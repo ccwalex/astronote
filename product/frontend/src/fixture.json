@@ -1,0 +1,107 @@
+{
+  "id": "ws-1",
+  "name": "My Workspace",
+  "library_nodes": {
+    "ws-1_root": {
+      "id": "ws-1_root",
+      "kind": "folder",
+      "name": "Root",
+      "parent_id": null,
+      "child_ids": [
+        "ws-1_default_page"
+      ],
+      "target_project_id": null
+    },
+    "ws-1_default_page": {
+      "id": "ws-1_default_page",
+      "kind": "page",
+      "name": "Default Page",
+      "parent_id": "ws-1_root",
+      "child_ids": [],
+      "target_project_id": "ws-1_default_proj"
+    }
+  },
+  "projects": {
+    "ws-1_default_proj": {
+      "id": "ws-1_default_proj",
+      "name": "Default Project",
+      "root_space_id": "ws-1_default_proj_root",
+      "spaces": {
+        "ws-1_default_proj_root": {
+          "id": "ws-1_default_proj_root",
+          "kind": "RootSpace",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0,
+          "width": 1920.0,
+          "height": 1080.0,
+          "parent_space_id": null,
+          "child_space_ids": [
+            "ws-1_default_proj_bg",
+            "ws-1_default_proj_container",
+            "ws-1_default_proj_annotation"
+          ],
+          "object_ids": [],
+          "asset_ids": [],
+          "scale_x": 1.0,
+          "scale_y": 1.0,
+          "reference_asset_id": null,
+          "reference_mode": "top_left_box"
+        },
+        "ws-1_default_proj_bg": {
+          "id": "ws-1_default_proj_bg",
+          "kind": "BackgroundSpace",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0,
+          "width": 1920.0,
+          "height": 1080.0,
+          "parent_space_id": "ws-1_default_proj_root",
+          "child_space_ids": [],
+          "object_ids": [],
+          "asset_ids": [],
+          "scale_x": 1.0,
+          "scale_y": 1.0,
+          "reference_asset_id": null,
+          "reference_mode": "top_left_box"
+        },
+        "ws-1_default_proj_container": {
+          "id": "ws-1_default_proj_container",
+          "kind": "ObjectContainerSpace",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 1.0,
+          "width": 1920.0,
+          "height": 1080.0,
+          "parent_space_id": "ws-1_default_proj_root",
+          "child_space_ids": [],
+          "object_ids": [],
+          "asset_ids": [],
+          "scale_x": 1.0,
+          "scale_y": 1.0,
+          "reference_asset_id": null,
+          "reference_mode": "top_left_box"
+        },
+        "ws-1_default_proj_annotation": {
+          "id": "ws-1_default_proj_annotation",
+          "kind": "FreeAnnotationSpace",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 2.0,
+          "width": 1920.0,
+          "height": 1080.0,
+          "parent_space_id": "ws-1_default_proj_root",
+          "child_space_ids": [],
+          "object_ids": [],
+          "asset_ids": [],
+          "scale_x": 1.0,
+          "scale_y": 1.0,
+          "reference_asset_id": null,
+          "reference_mode": "top_left_box"
+        }
+      },
+      "objects": {},
+      "assets": {}
+    }
+  }
+}

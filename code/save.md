@@ -1,0 +1,1 @@
+Actions in the web app currently do not trigger an auto-save in the backend. The persistence model relies on manual export and import of JSON files within the browser. Backend saving APIs and autosave functionality are explicitly deferred in the current development plan.
