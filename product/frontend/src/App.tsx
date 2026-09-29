@@ -864,9 +864,12 @@ export default function App() {
         const dirty =
           isWorkspaceDirty(workspaceDirtyGateRef.current) || hasUnsavedLocalRef.current;
         if (dirty) {
-          setServerAheadNotice(
-            `Server workspace updated (revision ${serverRev}). Reload to sync your view.`
-          );
+          // Save already failed — reload would discard local edits; persist error UI handles recovery.
+          if (!persistBlockedRef.current) {
+            setServerAheadNotice(
+              `Server workspace updated (revision ${serverRev}). Reload to sync your view.`
+            );
+          }
           schedule();
           return;
         }

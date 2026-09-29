@@ -2,6 +2,7 @@ import json
 import os
 import sqlite3
 import tempfile
+import threading
 import unittest
 
 from modules.asset import Asset
@@ -250,6 +251,29 @@ class WorkspaceStorageBackendTests(unittest.TestCase):
         self.assertEqual(status["active_backend"], "json")
         self.assertTrue(status["migration_skipped"])
         self.assertFalse(status["needs_migration"])
+
+    def test_concurrent_sqlite_saves_do_not_fail_on_storage_meta(self):
+        workspace = _seed_workspace()
+        write_storage_meta(self.json_path, backend="sqlite")
+        errors = []
+
+        def _save():
+            try:
+                save_workspace(workspace, self.json_path)
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=_save) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(errors, [])
+        meta_path = os.path.join(self.ws_dir, "workspace.storage.meta.json")
+        self.assertTrue(os.path.isfile(meta_path))
+        with open(meta_path, "r", encoding="utf-8") as handle:
+            meta = json.load(handle)
+        self.assertEqual(meta.get("backend"), "sqlite")
 
 
 if __name__ == "__main__":

@@ -163,12 +163,24 @@ def write_storage_meta(path: str, backend: str, extra: Optional[Dict[str, Any]] 
     meta_path = storage_meta_path(path)
     parent = os.path.dirname(meta_path) or "."
     os.makedirs(parent, exist_ok=True)
-    tmp_path = meta_path + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, ensure_ascii=False)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(tmp_path, meta_path)
+    fd, tmp_path = tempfile.mkstemp(
+        prefix="workspace.storage.meta.",
+        suffix=".tmp",
+        dir=parent,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, ensure_ascii=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, meta_path)
+    except Exception:
+        try:
+            if os.path.isfile(tmp_path):
+                os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def detect_workspace_backend(path: str) -> str:
