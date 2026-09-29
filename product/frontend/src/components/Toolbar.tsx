@@ -38,7 +38,8 @@ interface ToolbarProps {
   onConvertGroupToImage: () => void;
   onRestoreImageToGroup: () => void;
   spaceConversionBusy?: boolean;
-  persistStatus?: 'idle' | 'unsaved' | 'saving' | 'saved' | 'synced';
+  persistStatus?: 'idle' | 'unsaved' | 'saving' | 'saved' | 'synced' | 'locked';
+  readOnly?: boolean;
 }
 
 const PERSIST_STATUS_LABEL: Record<
@@ -50,6 +51,7 @@ const PERSIST_STATUS_LABEL: Record<
   saving: { text: 'Saving…', color: '#1d4ed8' },
   saved: { text: 'Saved', color: '#15803d' },
   synced: { text: 'Synced from server', color: '#15803d' },
+  locked: { text: 'Editing locked', color: '#92400e' },
 };
 
 const HEX_COLOR_RE = /^#[0-9A-Fa-f]{6}$/;
@@ -77,7 +79,8 @@ export function Toolbar({
   onConvertGroupToImage,
   onRestoreImageToGroup,
   spaceConversionBusy = false,
-  persistStatus = 'idle'
+  persistStatus = 'idle',
+  readOnly = false
 }: ToolbarProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pendingTransparentApplyRef = useRef(false);
@@ -115,6 +118,9 @@ export function Toolbar({
       />
       <button onClick={() => onSelectTool('pointer')} style={getStyle('pointer')}>Pointer</button>
       <button onClick={() => onSelectTool('probe')} style={getStyle('probe')}>Probe</button>
+      {readOnly ? (
+        <span style={{ fontSize: '12px', color: '#92400e', marginLeft: '4px' }}>Read-only</span>
+      ) : null}
       
       {selectedTool === 'probe' && (
         <select 
@@ -128,13 +134,13 @@ export function Toolbar({
         </select>
       )}
 
-      <button onClick={() => onSelectTool('create_generic_space')} style={getStyle('create_generic_space')}>Create Generic</button>
-      <button onClick={() => onSelectTool('create_text_space')} style={getStyle('create_text_space')}>Create Text</button>
-      <button onClick={() => onSelectTool('create_image_space')} style={getStyle('create_image_space')}>Create Image</button>
-      <button onClick={() => onSelectTool('create_pdf_space')} style={getStyle('create_pdf_space')}>Create PDF</button>
-      <button onClick={() => onSelectTool('create_group_space')} style={getStyle('create_group_space')}>Create Group</button>
-      <button onClick={() => onSelectTool('create_stroke_object')} style={getStyle('create_stroke_object')}>Create Stroke</button>
-      <button onClick={() => onSelectTool('erase_stroke_object')} style={getStyle('erase_stroke_object')}>Eraser</button>
+      <button disabled={readOnly} onClick={() => onSelectTool('create_generic_space')} style={getStyle('create_generic_space')}>Create Generic</button>
+      <button disabled={readOnly} onClick={() => onSelectTool('create_text_space')} style={getStyle('create_text_space')}>Create Text</button>
+      <button disabled={readOnly} onClick={() => onSelectTool('create_image_space')} style={getStyle('create_image_space')}>Create Image</button>
+      <button disabled={readOnly} onClick={() => onSelectTool('create_pdf_space')} style={getStyle('create_pdf_space')}>Create PDF</button>
+      <button disabled={readOnly} onClick={() => onSelectTool('create_group_space')} style={getStyle('create_group_space')}>Create Group</button>
+      <button disabled={readOnly} onClick={() => onSelectTool('create_stroke_object')} style={getStyle('create_stroke_object')}>Create Stroke</button>
+      <button disabled={readOnly} onClick={() => onSelectTool('erase_stroke_object')} style={getStyle('erase_stroke_object')}>Eraser</button>
 
       {selectedTool === 'erase_stroke_object' && (
         <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -207,28 +213,28 @@ export function Toolbar({
 
       <button
         onClick={onUndo}
-        disabled={!canUndo}
+        disabled={readOnly || !canUndo}
         style={{
           padding: '4px 8px',
-          cursor: canUndo ? 'pointer' : 'not-allowed',
+          cursor: readOnly || !canUndo ? 'not-allowed' : 'pointer',
           border: '1px solid #ccc',
           borderRadius: '4px',
-          backgroundColor: canUndo ? '#fff' : '#f3f3f3',
-          color: canUndo ? '#000' : '#999'
+          backgroundColor: readOnly || !canUndo ? '#f3f3f3' : '#fff',
+          color: readOnly || !canUndo ? '#999' : '#000'
         }}
       >
         Undo
       </button>
       <button
         onClick={onRedo}
-        disabled={!canRedo}
+        disabled={readOnly || !canRedo}
         style={{
           padding: '4px 8px',
-          cursor: canRedo ? 'pointer' : 'not-allowed',
+          cursor: readOnly || !canRedo ? 'not-allowed' : 'pointer',
           border: '1px solid #ccc',
           borderRadius: '4px',
-          backgroundColor: canRedo ? '#fff' : '#f3f3f3',
-          color: canRedo ? '#000' : '#999'
+          backgroundColor: readOnly || !canRedo ? '#f3f3f3' : '#fff',
+          color: readOnly || !canRedo ? '#999' : '#000'
         }}
       >
         Redo
@@ -236,6 +242,7 @@ export function Toolbar({
       <button
         type="button"
         onClick={onCommit}
+        disabled={readOnly}
         style={{
           padding: '4px 8px',
           cursor: 'pointer',
@@ -250,6 +257,7 @@ export function Toolbar({
       <button
         type="button"
         onClick={onRevert}
+        disabled={readOnly}
         style={{
           padding: '4px 8px',
           cursor: 'pointer',
@@ -264,6 +272,7 @@ export function Toolbar({
       <button
         type="button"
         onClick={onSave}
+        disabled={readOnly}
         style={{
           padding: '4px 8px',
           cursor: 'pointer',

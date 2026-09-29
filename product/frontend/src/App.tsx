@@ -74,6 +74,13 @@ import {
   markUserMutation,
 } from './model/workspaceDirtyGate';
 import {
+  deriveWriteProtection,
+  getOrCreatePageSessionId,
+  startPagePresence,
+  type PagePresenceController,
+  type PagePresenceStatus,
+} from './model/pagePresence';
+import {
   applyPendingMarkdownToWorkspace,
   clearProjectFromPendingPersist,
   collectPendingDirtyMarkdown,
@@ -174,6 +181,8 @@ export default function App() {
   const savedFlashTimerRef = useRef<number | null>(null);
   const serverRefreshInFlightRef = useRef(false);
   const selectedProjectIdRef = useRef<string | null>(null);
+  const pageWriteProtectedRef = useRef(false);
+  const pagePresenceControllerRef = useRef<PagePresenceController | null>(null);
 
   const [loading, setLoading] = useState(true);
   const [projectBodyError, setProjectBodyError] = useState<string | null>(null);
@@ -181,6 +190,9 @@ export default function App() {
   const [persistError, setPersistError] = useState<string | null>(null);
   const [persistStatus, setPersistStatus] = useState<'idle' | 'unsaved' | 'saving' | 'saved' | 'synced'>('idle');
   const [serverAheadNotice, setServerAheadNotice] = useState<string | null>(null);
+  const [pagePresenceBanner, setPagePresenceBanner] = useState<string | null>(null);
+  const [canForcePageUnlock, setCanForcePageUnlock] = useState(false);
+  const [pageWriteProtected, setPageWriteProtected] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [migrationPromptOpen, setMigrationPromptOpen] = useState(false);
   const [migrationStatus, setMigrationStatus] = useState<AssetTrackingStorageStatus | null>(null);
@@ -409,6 +421,33 @@ export default function App() {
     }
   };
 
+  const applyPagePresenceStatus = (status: PagePresenceStatus | null) => {
+    const protection = deriveWriteProtection(status);
+    const wasProtected = pageWriteProtectedRef.current;
+    pageWriteProtectedRef.current = protection.readOnly;
+    setPageWriteProtected(protection.readOnly);
+    setPagePresenceBanner(protection.bannerText);
+    setCanForcePageUnlock(protection.canForceUnlock);
+    if (protection.readOnly && !wasProtected) {
+      clearPersistTimer();
+    }
+  };
+
+  const handleForcePageUnlock = () => {
+    if (!selectedProjectId) return;
+    const confirmed = window.confirm(
+      'Take write access for this page? The other viewer will no longer be able to edit until they force unlock or you leave.'
+    );
+    if (!confirmed) return;
+    const controller = pagePresenceControllerRef.current;
+    if (!controller) return;
+    void controller.forceUnlock().catch((err) => {
+      setNavError(
+        err instanceof Error && err.message ? err.message : 'Failed to force page unlock'
+      );
+    });
+  };
+
   const flashPersistStatus = (status: 'saved' | 'synced', ms = 2500) => {
     setPersistStatus(status);
     if (savedFlashTimerRef.current !== null) {
@@ -457,7 +496,7 @@ export default function App() {
 
   const flushPendingPersistInBackground = () => {
     if (!launchSettledRef.current) return;
-    if (suppressPersistRef.current || persistBlockedRef.current) return;
+    if (suppressPersistRef.current || persistBlockedRef.current || pageWriteProtectedRef.current) return;
     if (listPendingProjectIds().length === 0) return;
     let workspace = presentRef.current;
     if (!workspace || !shouldPersistWorkspace(workspace)) return;
@@ -482,7 +521,7 @@ export default function App() {
     persistDeferredRef.current = false;
     // After hydrate quiet window so skipBackendPersist is not still set.
     window.setTimeout(() => {
-      if (suppressPersistRef.current || persistBlockedRef.current) return;
+      if (suppressPersistRef.current || persistBlockedRef.current || pageWriteProtectedRef.current) return;
       if (listPendingProjectIds().length > 0) {
         flushPendingPersistInBackground();
         return;
@@ -498,7 +537,7 @@ export default function App() {
     options?: { keepalive?: boolean }
   ) => {
     if (!workspace || !shouldPersistWorkspace(workspace)) return;
-    if (persistBlockedRef.current) return;
+    if (persistBlockedRef.current || pageWriteProtectedRef.current) return;
     clearPersistTimer();
     if (coalesceKey) pendingCoalesceKeyRef.current = coalesceKey;
     if (persistAbortRef.current) {
@@ -529,7 +568,8 @@ export default function App() {
       return saveWorkspace(prepareWorkspaceForSave(workspace), {
         coalesce_key: coalesceKey || pendingCoalesceKeyRef.current || undefined,
         signal: options?.keepalive ? undefined : signal,
-        keepalive: options?.keepalive
+        keepalive: options?.keepalive,
+        pageWriteSessionId: getOrCreatePageSessionId(),
       });
     };
     run()
@@ -587,6 +627,7 @@ export default function App() {
       skipBackendPersist: skipBackendPersistRef.current,
       suppressPersist: suppressPersistRef.current,
       persistBlocked: persistBlockedRef.current,
+      writeProtected: pageWriteProtectedRef.current,
     });
     if (decision.drainSkip || decision.consumeSkip) {
       skipBackendPersistRef.current = false;
@@ -598,7 +639,7 @@ export default function App() {
       if (suppressPersistRef.current || skipBackendPersistRef.current) return;
       if (!isWorkspaceDirty(workspaceDirtyGateRef.current)) return;
       const current = presentRef.current;
-      if (persistBlockedRef.current) return;
+      if (persistBlockedRef.current || pageWriteProtectedRef.current) return;
       if (current && shouldPersistWorkspace(current)) {
         hasUnsavedLocalRef.current = true;
         flushPersist(current, pendingCoalesceKeyRef.current);
@@ -613,6 +654,9 @@ export default function App() {
     markDirty = true
   ) => {
     setHistoryState((prevState) => {
+      if (markDirty && pageWriteProtectedRef.current) {
+        return prevState;
+      }
       if (prevState.present === null) {
         if (typeof action === 'function') return prevState;
         presentRef.current = action;
@@ -639,6 +683,7 @@ export default function App() {
   };
 
   const handleUndo = () => {
+    if (pageWriteProtectedRef.current) return;
     setHistoryError(null);
     setHistoryState((prev) => {
       const next = undoLocalHistory(prev);
@@ -649,6 +694,7 @@ export default function App() {
   };
 
   const handleRedo = () => {
+    if (pageWriteProtectedRef.current) return;
     setHistoryError(null);
     setHistoryState((prev) => {
       const next = redoLocalHistory(prev);
@@ -659,6 +705,7 @@ export default function App() {
   };
 
   const handleCommit = () => {
+    if (pageWriteProtectedRef.current) return;
     postCommit().then(() => {
       setHistoryError(null);
     }).catch(err => {
@@ -667,6 +714,7 @@ export default function App() {
   };
 
   const handleRevert = () => {
+    if (pageWriteProtectedRef.current) return;
     const confirmed = window.confirm(
       'Revert discards uncommitted working-period changes and restores the last Commit baseline. Continue?'
     );
@@ -702,6 +750,7 @@ export default function App() {
   };
 
   const handleSave = () => {
+    if (pageWriteProtectedRef.current) return;
     persistBlockedRef.current = false;
     suppressPersistRef.current = false;
     flushPersist(presentRef.current);
@@ -864,8 +913,8 @@ export default function App() {
         const dirty =
           isWorkspaceDirty(workspaceDirtyGateRef.current) || hasUnsavedLocalRef.current;
         if (dirty) {
-          // Save already failed — reload would discard local edits; persist error UI handles recovery.
-          if (!persistBlockedRef.current) {
+          // Save already failed / page locked — reload would discard local edits.
+          if (!persistBlockedRef.current && !pageWriteProtectedRef.current) {
             setServerAheadNotice(
               `Server workspace updated (revision ${serverRev}). Reload to sync your view.`
             );
@@ -896,6 +945,26 @@ export default function App() {
       }
     };
   }, [loading]);
+
+  useEffect(() => {
+    pagePresenceControllerRef.current?.stop();
+    pagePresenceControllerRef.current = null;
+    if (loading || !selectedProjectId) {
+      pageWriteProtectedRef.current = false;
+      setPageWriteProtected(false);
+      setPagePresenceBanner(null);
+      setCanForcePageUnlock(false);
+      return;
+    }
+    const controller = startPagePresence(selectedProjectId, applyPagePresenceStatus);
+    pagePresenceControllerRef.current = controller;
+    return () => {
+      controller.stop();
+      if (pagePresenceControllerRef.current === controller) {
+        pagePresenceControllerRef.current = null;
+      }
+    };
+  }, [loading, selectedProjectId]);
 
   const handleReloadFromServer = (options?: { skipConfirm?: boolean }) => {
     if (!options?.skipConfirm) {
@@ -2505,6 +2574,14 @@ export default function App() {
           onOpenProject={openProject}
           onSelectSpace={handleSelectSpace}
         />
+        {pagePresenceBanner ? (
+          <div role="status" style={{ padding: '8px 12px', backgroundColor: '#fffbeb', color: '#92400e', borderBottom: '1px solid #fcd34d', display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+            <span style={{ flex: 1 }}>{pagePresenceBanner}</span>
+            {canForcePageUnlock ? (
+              <button type="button" onClick={handleForcePageUnlock} style={recoveryButtonStyle}>Force unlock</button>
+            ) : null}
+          </div>
+        ) : null}
         {serverAheadNotice ? (
           <div role="status" style={{ padding: '8px 12px', backgroundColor: '#eff6ff', color: '#1e40af', borderBottom: '1px solid #bfdbfe', display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
             <span style={{ flex: 1 }}>{serverAheadNotice}</span>
@@ -2628,7 +2705,8 @@ export default function App() {
               onConvertGroupToImage={handleConvertGroupToImage}
               onRestoreImageToGroup={handleRestoreImageToGroup}
               spaceConversionBusy={spaceConversionBusy}
-              persistStatus={persistStatus}
+              persistStatus={pageWriteProtected ? 'locked' : persistStatus}
+              readOnly={pageWriteProtected}
             />
             
             {probeResults.length > 0 && selectedTool === 'probe' && (
@@ -2766,6 +2844,7 @@ export default function App() {
               selectedTool={selectedTool}
               eraserMode={eraserMode}
               zoom={zoom}
+              readOnly={pageWriteProtected}
               snapGuides={snapGuides}
               onLayoutGestureEnd={handleLayoutGestureEnd}
               onZoomChange={handleZoomChange}
@@ -2791,6 +2870,7 @@ export default function App() {
               onEraseStrokeAtPoint={handleEraseStrokeAtPoint}
               onProbe={handleProbe}
               onInsertVerticalPageGap={handleInsertVerticalPageGap}
+              onEnterTextEdit={() => setSelectedTool('pointer')}
             />
             </ErrorBoundary>
               </>

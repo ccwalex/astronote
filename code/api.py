@@ -19,6 +19,13 @@ from modules.workspace import (
     repair_workspace_dict,
 )
 from modules.workspace_lazy import incoming_would_wipe_page_bodies, is_project_incomplete, is_project_stub, merge_incoming_workspace_dict, workspace_nav_dict
+from modules.page_view_lock import (
+    check_write_allowed,
+    force_unlock as force_page_write_unlock,
+    get_holder_session_id,
+    heartbeat as page_presence_heartbeat,
+    leave as page_presence_leave,
+)
 from modules.load_workspace import load_workspace, parse_workspace_json_text
 from modules.save_workspace import save_workspace, strip_asset_content_from_dict
 from modules.workspace_zip import (
@@ -643,6 +650,83 @@ def _current_workspace_revision(workspace_id):
         return 0
 
 
+def _page_write_lock_snapshot(project_id: Optional[str]) -> Optional[dict]:
+    pid = str(project_id or "").strip()
+    if not pid:
+        return None
+    holder = get_holder_session_id(pid)
+    return {
+        "project_id": pid,
+        "write_holder_session_id": holder,
+    }
+
+
+def _enforce_page_write_locks(data: dict, write_session_id: Optional[str]) -> None:
+    session_id = str(write_session_id or "").strip()
+    if not session_id:
+        return
+    projects = data.get("projects") if isinstance(data.get("projects"), dict) else {}
+    for project_id, project in projects.items():
+        if not isinstance(project, dict):
+            continue
+        if is_project_stub(project):
+            continue
+        if not check_write_allowed(str(project_id), session_id):
+            holder = get_holder_session_id(str(project_id))
+            raise HTTPException(
+                status_code=423,
+                detail={
+                    "message": "Page write lock held by another viewer",
+                    "project_id": str(project_id),
+                    "write_holder_session_id": holder,
+                },
+            )
+
+
+@app.post("/api/pages/{project_id}/presence")
+def post_page_presence(project_id: str, body: dict = Body(...)):
+    session_id = str(body.get("session_id") or "").strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+    action = str(body.get("action") or "heartbeat").strip().lower()
+    client_label = body.get("client_label")
+    label = str(client_label).strip() if client_label is not None else None
+    if label == "":
+        label = None
+    pid = str(project_id or "").strip()
+    if not pid:
+        raise HTTPException(status_code=400, detail="project_id is required")
+    try:
+        if action == "leave":
+            page_presence_leave(pid, session_id)
+            return {"status": "left"}
+        status = page_presence_heartbeat(pid, session_id, label)
+        return status.to_dict()
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/pages/{project_id}/write-lock/force")
+def post_page_write_lock_force(project_id: str, body: dict = Body(...)):
+    session_id = str(body.get("session_id") or "").strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+    pid = str(project_id or "").strip()
+    if not pid:
+        raise HTTPException(status_code=400, detail="project_id is required")
+    try:
+        status = force_page_write_unlock(pid, session_id)
+        return status.to_dict()
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/workspace/revision")
 def get_workspace_revision():
     """Lightweight revision probe for client cache sync (poll without full nav)."""
@@ -798,6 +882,7 @@ def get_workspace_page_load(
                 "resolved_project_id": resolved_project_id,
                 "resolved_library_node_id": resolved_library_node_id,
                 "rag_config": _page_load_rag_config(),
+                "page_write_lock": _page_write_lock_snapshot(resolved_project_id),
             }
 
         known_project_id = str(project_id or "").strip() or None
@@ -829,6 +914,7 @@ def get_workspace_page_load(
                 "resolved_project_id": resolved_project_id,
                 "resolved_library_node_id": resolved_library_node_id,
                 "rag_config": _page_load_rag_config(),
+                "page_write_lock": _page_write_lock_snapshot(resolved_project_id),
             }
 
         # project_id unknown: nav_only first to inspect library_nodes / pick default page.
@@ -861,6 +947,7 @@ def get_workspace_page_load(
             "resolved_project_id": resolved_project_id,
             "resolved_library_node_id": resolved_library_node_id,
             "rag_config": _page_load_rag_config(),
+            "page_write_lock": _page_write_lock_snapshot(resolved_project_id),
         }
     except HTTPException:
         raise
@@ -871,12 +958,17 @@ def get_workspace_page_load(
         _release_page_load_priority()
 
 
-def _post_workspace_sync(data: dict, coalesce_key: Optional[str]):
+def _post_workspace_sync(
+    data: dict,
+    coalesce_key: Optional[str],
+    write_session_id: Optional[str] = None,
+):
     """Heavy save work off the asyncio event loop (see post_workspace).
 
     Waits while interactive page-load / project GET holds priority so a click
     hydrate is not stuck behind a long merge/rewrite.
     """
+    _enforce_page_write_locks(data, write_session_id)
     _wait_while_page_load_priority()
     previous_workspace: Optional[Workspace] = None
     previous_dict = None
@@ -941,8 +1033,11 @@ async def post_workspace(request: Request):
             coalesce_key = data.pop("coalesce_key")
             if coalesce_key is not None:
                 coalesce_key = str(coalesce_key).strip() or None
+        write_session_id = request.headers.get("X-Page-Write-Session")
         # Sync merge/save must not block the event loop (interactive GETs stall otherwise).
-        return await asyncio.to_thread(_post_workspace_sync, data, coalesce_key)
+        return await asyncio.to_thread(
+            _post_workspace_sync, data, coalesce_key, write_session_id
+        )
     except HTTPException:
         raise
     except Exception as e:

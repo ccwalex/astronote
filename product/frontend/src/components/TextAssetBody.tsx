@@ -11,6 +11,7 @@ export interface TextAssetBodyProps {
   isSelected: boolean;
   mountContent?: boolean;
   suppressHeightReports?: boolean;
+  readOnly?: boolean;
   onTextContentChange: (projectId: string, spaceId: string, content: string) => void;
   onTextPersistRequest?: (projectId: string, spaceId: string) => void;
   onHeightChange: (spaceId: string, height: number) => void;
@@ -25,6 +26,7 @@ export function TextAssetBody({
   isSelected,
   mountContent = true,
   suppressHeightReports = false,
+  readOnly = false,
   onTextContentChange,
   onTextPersistRequest,
   onHeightChange,
@@ -94,6 +96,7 @@ export function TextAssetBody({
         isSelected={isSelected}
         mountContent={mountContent}
         suppressHeightReports={suppressHeightReports}
+        readOnly={readOnly}
         zoom={zoom}
       />
     </>

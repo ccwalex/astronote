@@ -232,6 +232,10 @@ function testDecideDebouncedPersistMatrix() {
     'blocked blocks'
   );
   assert(decideDebouncedPersist(base).shouldSchedule === true, 'all clear => schedule');
+  assert(
+    decideDebouncedPersist({ ...base, writeProtected: true }).shouldSchedule === false,
+    'write protected blocks schedule'
+  );
 }
 
 function main() {

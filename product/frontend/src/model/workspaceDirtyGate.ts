@@ -32,6 +32,7 @@ export type DebouncedPersistInput = {
   skipBackendPersist: boolean;
   suppressPersist: boolean;
   persistBlocked: boolean;
+  writeProtected?: boolean;
 };
 
 export type DebouncedPersistDecision = {
@@ -67,7 +68,7 @@ export function decideDebouncedPersist(
   if (input.skipBackendPersist) {
     return { shouldSchedule: false, consumeSkip: true, drainSkip: false };
   }
-  if (input.suppressPersist || input.persistBlocked) {
+  if (input.suppressPersist || input.persistBlocked || input.writeProtected) {
     return { shouldSchedule: false, consumeSkip: false, drainSkip: false };
   }
   return { shouldSchedule: true, consumeSkip: false, drainSkip: false };

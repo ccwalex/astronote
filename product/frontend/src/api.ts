@@ -138,6 +138,87 @@ export type WorkspaceRevisionResponse = {
   workspace_revision: number | null;
 };
 
+export type PagePresenceStatus = {
+  viewer_count: number;
+  write_holder_session_id: string | null;
+  can_write: boolean;
+  write_holder_label?: string | null;
+  forced?: boolean;
+};
+
+export type PagePresenceRequest = {
+  session_id: string;
+  action?: 'heartbeat' | 'leave';
+  client_label?: string;
+};
+
+export async function postPagePresence(
+  projectId: string,
+  body: PagePresenceRequest
+): Promise<PagePresenceStatus> {
+  const endpoint = `${API_BASE}/pages/${encodeURIComponent(projectId)}/presence`;
+  let response: Response;
+  try {
+    response = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      keepalive: body.action === 'leave',
+    });
+  } catch (err) {
+    throw makeNetworkError('Post page presence', endpoint, err);
+  }
+  if (!response.ok) {
+    const snippet = await getResponseBodySnippet(response);
+    throw new Error(
+      `Failed to post page presence (${response.status} ${response.statusText}) at ${endpoint}${snippet ? `: ${snippet}` : ''}`
+    );
+  }
+  const data = await response.json();
+  return {
+    viewer_count: typeof data?.viewer_count === 'number' ? data.viewer_count : 0,
+    write_holder_session_id:
+      typeof data?.write_holder_session_id === 'string' ? data.write_holder_session_id : null,
+    can_write: data?.can_write === true,
+    write_holder_label:
+      typeof data?.write_holder_label === 'string' ? data.write_holder_label : null,
+    forced: data?.forced === true,
+  };
+}
+
+export async function forcePageWriteUnlock(
+  projectId: string,
+  sessionId: string
+): Promise<PagePresenceStatus> {
+  const endpoint = `${API_BASE}/pages/${encodeURIComponent(projectId)}/write-lock/force`;
+  let response: Response;
+  try {
+    response = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId }),
+    });
+  } catch (err) {
+    throw makeNetworkError('Force page write unlock', endpoint, err);
+  }
+  if (!response.ok) {
+    const snippet = await getResponseBodySnippet(response);
+    throw new Error(
+      `Failed to force page write unlock (${response.status} ${response.statusText}) at ${endpoint}${snippet ? `: ${snippet}` : ''}`
+    );
+  }
+  const data = await response.json();
+  return {
+    viewer_count: typeof data?.viewer_count === 'number' ? data.viewer_count : 0,
+    write_holder_session_id:
+      typeof data?.write_holder_session_id === 'string' ? data.write_holder_session_id : null,
+    can_write: data?.can_write === true,
+    write_holder_label:
+      typeof data?.write_holder_label === 'string' ? data.write_holder_label : null,
+    forced: data?.forced === true,
+  };
+}
+
 export async function fetchWorkspaceRevision(): Promise<WorkspaceRevisionResponse> {
   const endpoint = `${API_BASE}/workspace/revision`;
   let response: Response;
@@ -357,20 +438,30 @@ export type SaveWorkspaceResponse = {
 
 export async function saveWorkspace(
   workspace: Workspace,
-  options?: { coalesce_key?: string; signal?: AbortSignal; keepalive?: boolean }
+  options?: {
+    coalesce_key?: string;
+    signal?: AbortSignal;
+    keepalive?: boolean;
+    pageWriteSessionId?: string;
+  }
 ): Promise<SaveWorkspaceResponse> {
   const endpoint = `${API_BASE}/workspace`;
   let response: Response;
   const payload = options && options.coalesce_key
     ? { ...workspace, coalesce_key: options.coalesce_key }
     : workspace;
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  const pageWriteSessionId = options?.pageWriteSessionId?.trim();
+  if (pageWriteSessionId) {
+    headers['X-Page-Write-Session'] = pageWriteSessionId;
+  }
 
   try {
     response = await fetch(endpoint, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
+      headers,
       body: JSON.stringify(payload),
       signal: options?.signal,
       keepalive: options?.keepalive === true

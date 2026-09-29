@@ -53,6 +53,8 @@ interface CanvasViewProps {
   onResizeSpace?: (spaceId: string, width: number, height: number) => void;
   onScaleSpace?: (spaceId: string, scaleX: number, scaleY: number) => void;
   onRotateSpace?: (spaceId: string, transformMatrix: number[]) => void;
+  readOnly?: boolean;
+  onEnterTextEdit?: () => void;
 }
 
 const CANVAS_PADDING = 400;
@@ -206,7 +208,9 @@ export default function CanvasView({
   onMoveSpaceEnd,
   onResizeSpace,
   onScaleSpace,
-  onRotateSpace
+  onRotateSpace,
+  readOnly = false,
+  onEnterTextEdit
 }: CanvasViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const worldLayerRef = useRef<HTMLDivElement>(null);
@@ -466,6 +470,7 @@ export default function CanvasView({
   };
 
   const handleCanvasPointerDownCapture = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (readOnly) return;
     if (selectedTool === 'insert_vertical_space') {
       if (e.button !== 0) return;
       e.preventDefault();
@@ -483,6 +488,7 @@ export default function CanvasView({
     }
 
     if (selectedTool !== 'probe' || !onProbe) return;
+    if ((e.target as Element).closest?.('.editable-area')) return;
 
     const { x, y } = getPointerPosition(e.currentTarget, e.clientX, e.clientY, zoom, canvasOffsetX, canvasOffsetY);
     onProbe(x, y);
@@ -494,6 +500,7 @@ export default function CanvasView({
   };
 
   const handleCanvasPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (readOnly) return;
     if (selectedTool === 'insert_vertical_space') return;
     if (!isCreateTool(selectedTool)) return;
     if (e.target !== e.currentTarget) return;
@@ -707,6 +714,7 @@ export default function CanvasView({
                 selectedSpaceId={selectedSpaceId}
                 selectedTool={selectedTool}
                 eraserMode={eraserMode}
+                readOnly={readOnly}
                 onTextContentChange={onTextContentChange}
                 onTextPersistRequest={onTextPersistRequest}
                 onHeightChange={onHeightChange}
@@ -730,6 +738,7 @@ export default function CanvasView({
                 onRotateSpace={onRotateSpace}
                 zoom={zoom}
                 mountContent={mountContent}
+                onEnterTextEdit={onEnterTextEdit}
               />
             );
           })}

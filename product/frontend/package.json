@@ -10,6 +10,7 @@
     "build": "tsc",
     "test:workspace-cache": "node --experimental-strip-types src/model/workspaceCache.test.ts",
     "test:workspace-dirty-gate": "node --experimental-strip-types src/model/workspaceDirtyGate.test.ts",
+    "test:page-presence": "node --experimental-strip-types src/model/pagePresence.test.ts",
     "preview": "vite preview"
   },
   "dependencies": {

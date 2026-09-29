@@ -39,6 +39,8 @@ interface SpaceViewProps {
   visitedSpaceIds?: ReadonlySet<string>;
   mountContent?: boolean;
   suppressHeightReports?: boolean;
+  readOnly?: boolean;
+  onEnterTextEdit?: () => void;
 }
 
 function SparseRGBAObjectRenderer({ obj, tileSize, tiles }: { obj: any, tileSize: number, tiles: Record<string, number[]> }) {
@@ -176,7 +178,9 @@ export default function SpaceView({
   onRotateSpace,
   visitedSpaceIds,
   mountContent = true,
-  suppressHeightReports = false
+  suppressHeightReports = false,
+  readOnly = false,
+  onEnterTextEdit
 }: SpaceViewProps) {
   const isSelected = selectedSpaceId === space.id;
   const shouldMountContent = Boolean(mountContent || isSelected);
@@ -286,6 +290,16 @@ export default function SpaceView({
 
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     e.stopPropagation();
+    const target = e.target as HTMLElement;
+    if (space.kind === 'TextSpace' && target.closest?.('.editable-area')) {
+      onEnterTextEdit?.();
+    }
+    if (readOnly) {
+      if (selectedTool === 'pointer' || selectedTool === 'probe') {
+        onSelectSpace(space.id);
+      }
+      return;
+    }
     if (selectedTool === 'delete_space') {
       onDeleteSpace(space.id);
     } else if (selectedTool === 'create_stroke_object') {
@@ -325,7 +339,6 @@ export default function SpaceView({
     } else if (selectedTool === 'pointer') {
       onSelectSpace(space.id);
       if (!isLayer) {
-        const target = e.target as HTMLElement;
         const interactiveTags = ['TEXTAREA', 'INPUT', 'BUTTON', 'LABEL', 'IFRAME', 'SELECT', 'OPTION'];
         if (interactiveTags.includes(target.tagName) || target.isContentEditable) return;
 
@@ -648,6 +661,7 @@ export default function SpaceView({
               isSelected={isSelected}
               mountContent={shouldMountContent}
               suppressHeightReports={suppressHeightReports}
+              readOnly={readOnly}
               onTextContentChange={onTextContentChange}
               onTextPersistRequest={onTextPersistRequest}
               onHeightChange={onHeightChange}
@@ -1092,6 +1106,8 @@ export default function SpaceView({
                 visitedSpaceIds={nextVisitedSpaceIds}
                 mountContent={shouldMountContent}
                 suppressHeightReports={suppressHeightReports}
+                readOnly={readOnly}
+                onEnterTextEdit={onEnterTextEdit}
               />
             );
           })}

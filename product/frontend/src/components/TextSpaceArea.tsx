@@ -440,6 +440,7 @@ export interface TextSpaceAreaProps {
   suppressHeightReports?: boolean;
   onPersistRequest?: () => void;
   zoom?: number;
+  readOnly?: boolean;
 }
 
 export function TextSpaceArea({
@@ -451,7 +452,8 @@ export function TextSpaceArea({
   mountContent = true,
   suppressHeightReports = false,
   onPersistRequest,
-  zoom = 1
+  zoom = 1,
+  readOnly = false
 }: TextSpaceAreaProps) {
   const editorRef = useRef<HTMLDivElement>(null);
   const persistRequestRef = useRef(onPersistRequest);
@@ -550,8 +552,8 @@ export function TextSpaceArea({
     if (editor) {
       const isFocused = document.activeElement === editor;
       const isExternalValue = value !== lastEmittedMarkdownRef.current;
-      if (!isSelected || !isFocused || isExternalValue) {
-        const html = markdownToEditorHtml(value);
+      const html = markdownToEditorHtml(value);
+      if (isExternalValue || (!isFocused && editor.innerHTML !== html)) {
         if (editor.innerHTML !== html) {
           editor.innerHTML = html;
         }
@@ -915,6 +917,7 @@ export function TextSpaceArea({
   };
 
   const execCmd = (cmd: string, val?: string) => {
+    ensureSelectionInEditor();
     document.execCommand(cmd, false, val);
     handleInput();
     refreshActiveFormats();
@@ -1294,7 +1297,7 @@ export function TextSpaceArea({
         <div
           ref={editorRef}
           className="editable-area"
-          contentEditable
+          contentEditable={!readOnly && isSelected}
           suppressContentEditableWarning
           onBlur={() => {
             handleInput();
