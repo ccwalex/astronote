@@ -1536,6 +1536,18 @@ def post_restore_image_to_group(data: dict = Body(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _normalize_upload_asset_id(requested: str) -> Optional[str]:
+    """Return a safe client-provided asset id, or None to mint a new one."""
+    text = str(requested or "").strip()
+    if not text:
+        return None
+    if ("/" in text) or (chr(92) in text) or (".." in text):
+        raise HTTPException(status_code=400, detail="Invalid asset id")
+    if re.fullmatch(r"^asset_[a-zA-Z0-9_-]{3,128}$", text) is None:
+        return None
+    return text
+
+
 @app.post("/api/assets")
 async def upload_asset(file: UploadFile = File(...), asset_id: Optional[str] = Form(None)):
     os.makedirs(ASSETS_DIR, exist_ok=True)
@@ -1546,7 +1558,8 @@ async def upload_asset(file: UploadFile = File(...), asset_id: Optional[str] = F
     requested = ""
     if asset_id is not None:
         requested = str(asset_id).strip()
-    if not requested:
+    normalized_id = _normalize_upload_asset_id(requested) if requested else None
+    if not normalized_id:
         ext = os.path.splitext(file.filename)[1] if file.filename else ""
         new_id = "asset_" + uuid.uuid4().hex
         stored_filename = new_id + ext
@@ -1561,22 +1574,7 @@ async def upload_asset(file: UploadFile = File(...), asset_id: Optional[str] = F
             "mime_type": file.content_type,
         }
 
-    if ("/" in requested) or (chr(92) in requested) or (".." in requested):
-        raise HTTPException(status_code=400, detail="Invalid asset id")
-    if re.fullmatch("^asset_[0-9a-fA-F]{8,}$", requested) is None:
-        ext = os.path.splitext(file.filename)[1] if file.filename else ""
-        new_id = "asset_" + uuid.uuid4().hex
-        stored_filename = new_id + ext
-        file_path = os.path.join(ASSETS_DIR, stored_filename)
-        with open(file_path, "wb") as buffer:
-            buffer.write(raw)
-        invalidate_asset_cache(new_id)
-        return {
-            "id": new_id,
-            "url": "/api/assets/" + new_id,
-            "filename": file.filename,
-            "mime_type": file.content_type,
-        }
+    requested = normalized_id
 
     matched_name = None
     if os.path.isdir(ASSETS_DIR):

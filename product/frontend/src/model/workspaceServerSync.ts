@@ -74,6 +74,6 @@ export async function refreshWorkspaceFromServer(
   }
 
   updateCacheAfterSave(finalRevision, { workspace: present });
-  noteHydratedMarkdownAssets(present);
+  noteHydratedMarkdownAssets(present, { trustFilesOnDisk: true });
   return { present, serverRevision: finalRevision, projectBodyError };
 }

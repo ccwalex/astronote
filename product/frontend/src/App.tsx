@@ -362,7 +362,7 @@ export default function App() {
         }
         skipBackendPersistRef.current = true;
         postHydrateQuietUntilRef.current = Date.now() + 2000;
-        noteHydratedMarkdownAssets(present);
+        noteHydratedMarkdownAssets(present, { trustFilesOnDisk: true });
         const loadedProject = present.projects[projectId];
         if (loadedProject) {
           const projectRev = extractWorkspaceRevision(loadedProject);

@@ -157,7 +157,9 @@ function finishBootstrap(
   }
 ): BootstrapWorkspaceResult {
   // Seed baseline before overlay so pending markdown stays unsynced (no dirty mark).
-  noteHydratedMarkdownAssets(workspace);
+  noteHydratedMarkdownAssets(workspace, {
+    trustFilesOnDisk: extras.usedPageLoad,
+  });
   workspace = safeOverlayPending(workspace);
   const selection = pickSelection(workspace, lastView, envelope);
 

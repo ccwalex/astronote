@@ -359,6 +359,28 @@ def test_post_assets_matching_id_overwrites_same_file():
             api.ASSETS_DIR = old_assets
 
 
+def test_post_assets_accepts_frontend_style_asset_id():
+    with tempfile.TemporaryDirectory() as tmp:
+        assets_dir = os.path.join(tmp, "assets")
+        os.makedirs(assets_dir)
+        old_assets = api.ASSETS_DIR
+        try:
+            api.ASSETS_DIR = assets_dir
+            client = _test_client()
+            asset_id = "asset_lq8x3k_9f2abc"
+            res = client.post(
+                "/api/assets",
+                files={"file": ("note.md", b"hello", "text/markdown")},
+                data={"asset_id": asset_id},
+            )
+            assert res.status_code == 200
+            payload = res.json()
+            assert payload["id"] == asset_id
+            assert os.path.isfile(os.path.join(assets_dir, asset_id + ".md"))
+        finally:
+            api.ASSETS_DIR = old_assets
+
+
 def test_post_assets_nonmatching_id_mints_new_uuid():
     with tempfile.TemporaryDirectory() as tmp:
         assets_dir = os.path.join(tmp, "assets")
@@ -421,6 +443,7 @@ def main():
         test_post_layout_without_asset_content_does_not_wipe,
         test_put_large_markdown_then_layout_post_keeps_file,
         test_post_assets_matching_id_overwrites_same_file,
+        test_post_assets_accepts_frontend_style_asset_id,
         test_post_assets_nonmatching_id_mints_new_uuid,
         test_asset_tracking_storage_status_skips_hydrate,
         test_get_workspace_revision_matches_nav,

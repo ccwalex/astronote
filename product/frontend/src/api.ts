@@ -268,7 +268,7 @@ export async function putAssetText(
   assetId: string,
   text: string,
   options?: { signal?: AbortSignal; keepalive?: boolean }
-): Promise<void> {
+): Promise<{ id: string }> {
   const endpoint = `${API_BASE}/assets`;
   const formData = new FormData();
   formData.append('file', new Blob([text], { type: 'text/markdown' }), `${assetId}.md`);
@@ -287,6 +287,19 @@ export async function putAssetText(
   if (!response.ok) {
     const snippet = await getResponseBodySnippet(response);
     throw new Error(`Failed to save asset (${response.status} ${response.statusText}) at ${endpoint}${snippet ? `: ${snippet}` : ''}`);
+  }
+  try {
+    const data = await response.json();
+    const storedId = typeof data?.id === 'string' ? data.id : assetId;
+    if (storedId !== assetId) {
+      throw new Error(`Asset id mismatch: requested ${assetId}, stored as ${storedId}`);
+    }
+    return { id: storedId };
+  } catch (err) {
+    if (err instanceof Error && err.message.includes('Asset id mismatch')) {
+      throw err;
+    }
+    return { id: assetId };
   }
 }
 

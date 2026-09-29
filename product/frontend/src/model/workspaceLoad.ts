@@ -4,8 +4,10 @@ import { normalizeProject, normalizeWorkspace } from './normalizeWorkspace';
 
 const WARN_PREFIX = '[workspaceLoad]';
 
-/** Last successfully PUT markdown text per asset id; seeded on hydrate. */
+/** Last successfully PUT markdown text per asset id. */
 const lastPersistedMarkdownByAssetId = new Map<string, string>();
+/** Asset ids confirmed written to disk via POST /api/assets in this session. */
+const confirmedMarkdownOnDisk = new Set<string>();
 
 export type WorkspaceEntityCounts = {
   libraryNodes: number;
@@ -71,7 +73,10 @@ function isPersistableMarkdownContent(content: unknown): content is string {
 }
 
 /** Seed baseline so hydrate-inlined markdown is not PUT until edited. */
-export function noteHydratedMarkdownAssets(workspace: Workspace | null | undefined): void {
+export function noteHydratedMarkdownAssets(
+  workspace: Workspace | null | undefined,
+  options?: { trustFilesOnDisk?: boolean }
+): void {
   if (!workspace) return;
   for (const project of Object.values(workspace.projects || {})) {
     if (!isProjectHydrated(project)) continue;
@@ -79,6 +84,9 @@ export function noteHydratedMarkdownAssets(workspace: Workspace | null | undefin
       if (!isMarkdownAsset(asset)) continue;
       if (!isPersistableMarkdownContent(asset.content)) continue;
       lastPersistedMarkdownByAssetId.set(assetId, asset.content);
+      if (options?.trustFilesOnDisk) {
+        confirmedMarkdownOnDisk.add(assetId);
+      }
     }
   }
 }
@@ -86,6 +94,7 @@ export function noteHydratedMarkdownAssets(workspace: Workspace | null | undefin
 export function markMarkdownAssetsPersisted(items: DirtyMarkdownAsset[]): void {
   for (const item of items) {
     lastPersistedMarkdownByAssetId.set(item.assetId, item.content);
+    confirmedMarkdownOnDisk.add(item.assetId);
   }
 }
 
@@ -97,7 +106,8 @@ export function collectDirtyMarkdownAssets(workspace: Workspace): DirtyMarkdownA
       if (!isMarkdownAsset(asset)) continue;
       const content = asset.content;
       if (!isPersistableMarkdownContent(content)) continue;
-      if (lastPersistedMarkdownByAssetId.get(assetId) === content) continue;
+      const unchanged = lastPersistedMarkdownByAssetId.get(assetId) === content;
+      if (unchanged && confirmedMarkdownOnDisk.has(assetId)) continue;
       dirty.push({
         projectId,
         assetId,
