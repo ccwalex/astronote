@@ -1,5 +1,6 @@
 import type { Workspace, Project } from '../types';
 import { fetchPageLoad, fetchWorkspaceNav, type PageLoadResponse } from '../api';
+import { getOrCreatePageSessionId } from './pagePresence';
 import { normalizeWorkspace } from './normalizeWorkspace';
 import {
   clearWorkspaceCache,
@@ -243,6 +244,7 @@ export async function bootstrapWorkspaceLoad(
     const envelope = await fetchPageLoad({
       projectId: lastView?.selectedProjectId ?? null,
       libraryNodeId: lastView?.selectedLibraryNodeId ?? null,
+      sessionId: getOrCreatePageSessionId(),
     });
     const serverRevision =
       envelope.workspace_revision ?? extractWorkspaceRevision(envelope.nav);

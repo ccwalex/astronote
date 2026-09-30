@@ -23,6 +23,7 @@ from modules.page_view_lock import (
     check_write_allowed,
     force_unlock as force_page_write_unlock,
     get_holder_session_id,
+    get_viewed_project_ids,
     heartbeat as page_presence_heartbeat,
     leave as page_presence_leave,
 )
@@ -76,6 +77,7 @@ from modules.library_write import (
     create_page_in_workspace,
     create_pdf_in_workspace,
     create_text_in_workspace,
+    resolve_page_path,
 )
 
 class FastAPIApp:
@@ -661,23 +663,80 @@ def _page_write_lock_snapshot(project_id: Optional[str]) -> Optional[dict]:
     }
 
 
+def _view_session_from_request(request: Request) -> str:
+    return str(request.headers.get("X-Page-View-Session") or "").strip()
+
+
+def _maybe_refresh_page_presence(
+    request: Request,
+    project_id: Optional[str],
+) -> Optional[dict]:
+    session_id = _view_session_from_request(request)
+    pid = str(project_id or "").strip()
+    if not session_id or not pid:
+        return None
+    try:
+        return page_presence_heartbeat(pid, session_id).to_dict()
+    except ValueError:
+        return None
+
+
+def _with_page_presence(
+    payload: dict,
+    request: Request,
+    project_id: Optional[str],
+) -> dict:
+    presence = _maybe_refresh_page_presence(request, project_id)
+    if presence is not None:
+        payload["page_presence"] = presence
+    return payload
+
+
+def _project_id_for_page_path(workspace: Workspace, page_path: str) -> Optional[str]:
+    try:
+        node = resolve_page_path(workspace, page_path)
+        target = getattr(node, "target_project_id", None)
+        return str(target).strip() if target else None
+    except ValueError:
+        return None
+
+
+def _enforce_project_view_lock(
+    project_id: Optional[str],
+    session_id: Optional[str] = None,
+) -> None:
+    pid = str(project_id or "").strip()
+    if not pid:
+        return
+    sid = str(session_id or "").strip()
+    if check_write_allowed(pid, sid):
+        return
+    holder = get_holder_session_id(pid)
+    raise HTTPException(
+        status_code=423,
+        detail={
+            "message": "Page write lock held by another viewer",
+            "project_id": pid,
+            "write_holder_session_id": holder,
+        },
+    )
+
+
 def _enforce_page_write_locks(data: dict, write_session_id: Optional[str]) -> None:
     session_id = str(write_session_id or "").strip()
     if not session_id:
         return
-    projects = data.get("projects") if isinstance(data.get("projects"), dict) else {}
-    for project_id, project in projects.items():
-        if not isinstance(project, dict):
-            continue
-        if is_project_stub(project):
-            continue
-        if not check_write_allowed(str(project_id), session_id):
-            holder = get_holder_session_id(str(project_id))
+    viewed = get_viewed_project_ids(session_id)
+    if not viewed:
+        return
+    for project_id in viewed:
+        if not check_write_allowed(project_id, session_id):
+            holder = get_holder_session_id(project_id)
             raise HTTPException(
                 status_code=423,
                 detail={
                     "message": "Page write lock held by another viewer",
-                    "project_id": str(project_id),
+                    "project_id": project_id,
                     "write_holder_session_id": holder,
                 },
             )
@@ -728,24 +787,35 @@ def post_page_write_lock_force(project_id: str, body: dict = Body(...)):
 
 
 @app.get("/api/workspace/revision")
-def get_workspace_revision():
+def get_workspace_revision(
+    request: Request,
+    project_id: Optional[str] = Query(None),
+):
     """Lightweight revision probe for client cache sync (poll without full nav)."""
     if not _workspace_store_exists():
         ws = Workspace.create_default("ws_1", "Default Workspace", True)
         workspace_id = getattr(ws, "id", None)
-        return {
-            "workspace_id": workspace_id,
-            "workspace_revision": _current_workspace_revision(workspace_id),
-        }
+        return _with_page_presence(
+            {
+                "workspace_id": workspace_id,
+                "workspace_revision": _current_workspace_revision(workspace_id),
+            },
+            request,
+            project_id,
+        )
     try:
         ws = load_workspace(
             WORKSPACE_PATH, hydrate=False, nav_only=True, persist_repairs=False
         )
         workspace_id = getattr(ws, "id", None)
-        return {
-            "workspace_id": workspace_id,
-            "workspace_revision": _current_workspace_revision(workspace_id),
-        }
+        return _with_page_presence(
+            {
+                "workspace_id": workspace_id,
+                "workspace_revision": _current_workspace_revision(workspace_id),
+            },
+            request,
+            project_id,
+        )
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
@@ -853,6 +923,7 @@ def _resolve_page_load_targets(workspace, project_id=None, library_node_id=None)
 
 @app.get("/api/workspace/page-load")
 def get_workspace_page_load(
+    request: Request,
     project_id: Optional[str] = Query(None),
     library_node_id: Optional[str] = Query(None),
 ):
@@ -875,15 +946,19 @@ def get_workspace_page_load(
             resolved_project_id, resolved_library_node_id = _resolve_page_load_targets(
                 ws, project_id=project_id, library_node_id=library_node_id
             )
-            return {
-                "nav": nav,
-                "workspace_revision": revision,
-                "project": None,
-                "resolved_project_id": resolved_project_id,
-                "resolved_library_node_id": resolved_library_node_id,
-                "rag_config": _page_load_rag_config(),
-                "page_write_lock": _page_write_lock_snapshot(resolved_project_id),
-            }
+            return _with_page_presence(
+                {
+                    "nav": nav,
+                    "workspace_revision": revision,
+                    "project": None,
+                    "resolved_project_id": resolved_project_id,
+                    "resolved_library_node_id": resolved_library_node_id,
+                    "rag_config": _page_load_rag_config(),
+                    "page_write_lock": _page_write_lock_snapshot(resolved_project_id),
+                },
+                request,
+                resolved_project_id,
+            )
 
         known_project_id = str(project_id or "").strip() or None
         if known_project_id:
@@ -907,15 +982,19 @@ def get_workspace_page_load(
                 if proj is not None and not is_project_stub(proj.to_dict()):
                     project_payload = proj.to_dict()
                     project_payload["workspace_revision"] = revision
-            return {
-                "nav": nav,
-                "workspace_revision": revision,
-                "project": project_payload,
-                "resolved_project_id": resolved_project_id,
-                "resolved_library_node_id": resolved_library_node_id,
-                "rag_config": _page_load_rag_config(),
-                "page_write_lock": _page_write_lock_snapshot(resolved_project_id),
-            }
+            return _with_page_presence(
+                {
+                    "nav": nav,
+                    "workspace_revision": revision,
+                    "project": project_payload,
+                    "resolved_project_id": resolved_project_id,
+                    "resolved_library_node_id": resolved_library_node_id,
+                    "rag_config": _page_load_rag_config(),
+                    "page_write_lock": _page_write_lock_snapshot(resolved_project_id),
+                },
+                request,
+                resolved_project_id,
+            )
 
         # project_id unknown: nav_only first to inspect library_nodes / pick default page.
         ws_nav = load_workspace(
@@ -940,15 +1019,19 @@ def get_workspace_page_load(
             if proj is not None and not is_project_stub(proj.to_dict()):
                 project_payload = proj.to_dict()
                 project_payload["workspace_revision"] = revision
-        return {
-            "nav": nav,
-            "workspace_revision": revision,
-            "project": project_payload,
-            "resolved_project_id": resolved_project_id,
-            "resolved_library_node_id": resolved_library_node_id,
-            "rag_config": _page_load_rag_config(),
-            "page_write_lock": _page_write_lock_snapshot(resolved_project_id),
-        }
+        return _with_page_presence(
+            {
+                "nav": nav,
+                "workspace_revision": revision,
+                "project": project_payload,
+                "resolved_project_id": resolved_project_id,
+                "resolved_library_node_id": resolved_library_node_id,
+                "rag_config": _page_load_rag_config(),
+                "page_write_lock": _page_write_lock_snapshot(resolved_project_id),
+            },
+            request,
+            resolved_project_id,
+        )
     except HTTPException:
         raise
     except Exception as e:
@@ -1583,6 +1666,7 @@ def post_convert_group_to_image(data: dict = Body(...)):
 
     try:
         workspace = _load_workspace_for_rag()
+        _enforce_project_view_lock(project_id)
         clone_root_dir = os.path.join(PROJECT_ROOT, "data", "workspace", "group_space_clones")
         converted = convert_group_space_to_image(
             workspace=workspace,
@@ -1612,6 +1696,7 @@ def post_restore_image_to_group(data: dict = Body(...)):
 
     try:
         workspace = _load_workspace_for_rag()
+        _enforce_project_view_lock(project_id)
         clone_root_dir = os.path.join(PROJECT_ROOT, "data", "workspace", "group_space_clones")
         restored = restore_image_space_to_group(
             workspace=workspace,
@@ -1733,6 +1818,9 @@ def post_library_page(data: dict = Body(...)):
         raise HTTPException(status_code=400, detail="path is required")
     try:
         workspace = _load_workspace_for_rag()
+        target_pid = _project_id_for_page_path(workspace, path)
+        if target_pid:
+            _enforce_project_view_lock(target_pid)
         result = create_page_in_workspace(workspace, path)
         save_workspace_and_snapshot(workspace, WORKSPACE_PATH, "create_page")
         return result
@@ -1755,6 +1843,9 @@ def post_text_create(data: dict = Body(...)):
         raise HTTPException(status_code=400, detail="page_path is required")
     try:
         workspace = _load_workspace_for_rag()
+        target_pid = _project_id_for_page_path(workspace, page_path)
+        if target_pid:
+            _enforce_project_view_lock(target_pid)
         result = create_text_in_workspace(workspace, page_path, str(markdown), assets_dir=ASSETS_DIR)
         save_workspace_and_snapshot(workspace, WORKSPACE_PATH, "create_text")
         return result
@@ -1788,6 +1879,9 @@ def post_image_create(data: dict = Body(...)):
     page_path, filename, mime_type, content = _media_create_fields(data)
     try:
         workspace = _load_workspace_for_rag()
+        target_pid = _project_id_for_page_path(workspace, page_path)
+        if target_pid:
+            _enforce_project_view_lock(target_pid)
         result = create_image_in_workspace(workspace, page_path, filename, mime_type, content, assets_dir=ASSETS_DIR)
         save_workspace_and_snapshot(workspace, WORKSPACE_PATH, "create_image")
         return result
@@ -1805,6 +1899,9 @@ def post_pdf_create(data: dict = Body(...)):
     page_path, filename, mime_type, content = _media_create_fields(data)
     try:
         workspace = _load_workspace_for_rag()
+        target_pid = _project_id_for_page_path(workspace, page_path)
+        if target_pid:
+            _enforce_project_view_lock(target_pid)
         result = create_pdf_in_workspace(workspace, page_path, filename, mime_type, content, assets_dir=ASSETS_DIR)
         save_workspace_and_snapshot(workspace, WORKSPACE_PATH, "create_pdf")
         return result

@@ -19,7 +19,8 @@ if not isinstance(_app, FastAPIApp):
     api.app = _app
 ASGI_APP: FastAPIApp = _app
 
-from modules.page_view_lock import VIEWER_TTL_SEC, heartbeat, leave, reset_registry_for_tests
+from modules.page_view_lock import VIEWER_TTL_SEC, get_viewed_project_ids, heartbeat, leave, reset_registry_for_tests
+from modules.library_write import create_page_in_workspace
 from modules.save_workspace import save_workspace
 from modules.workspace import Workspace
 
@@ -129,6 +130,104 @@ def test_save_rejected_when_non_holder_posts_workspace():
             api.WORKSPACE_PATH = old_path
 
 
+def test_save_allowed_when_only_other_page_locked():
+    reset_registry_for_tests()
+    ws = Workspace.create_default("ws_1", "Test", True)
+    proj_a = list(ws.projects.keys())[0]
+    page_b = create_page_in_workspace(ws, "OtherPage")
+    proj_b = page_b["project_id"]
+    with tempfile.TemporaryDirectory() as tmp:
+        ws_dir = os.path.join(tmp, "workspace")
+        os.makedirs(ws_dir)
+        path = os.path.join(ws_dir, "workspace.json")
+        old_path = api.WORKSPACE_PATH
+        try:
+            save_workspace(ws, path)
+            api.WORKSPACE_PATH = path
+            heartbeat(proj_a, "session_a")
+            heartbeat(proj_b, "session_b")
+            heartbeat(proj_b, "session_c")
+            assert get_viewed_project_ids("session_a") == {proj_a}
+            assert get_viewed_project_ids("session_b") == {proj_b}
+            client = _test_client()
+            payload = ws.to_dict()
+            res = client.post(
+                "/api/workspace",
+                json=payload,
+                headers={"X-Page-Write-Session": "session_a"},
+            )
+            assert res.status_code == 200
+        finally:
+            api.WORKSPACE_PATH = old_path
+
+
+def test_revision_poll_registers_presence():
+    reset_registry_for_tests()
+    client = _test_client()
+    res_a = client.get(
+        "/api/workspace/revision",
+        params={"project_id": "proj_a"},
+        headers={"X-Page-View-Session": "session_a"},
+    )
+    assert res_a.status_code == 200
+    body_a = res_a.json()
+    assert body_a["page_presence"]["can_write"] is True
+    res_b = client.get(
+        "/api/workspace/revision",
+        params={"project_id": "proj_a"},
+        headers={"X-Page-View-Session": "session_b"},
+    )
+    assert res_b.status_code == 200
+    assert res_b.json()["page_presence"]["can_write"] is False
+
+
+def test_revision_poll_without_view_headers_has_no_presence():
+    reset_registry_for_tests()
+    client = _test_client()
+    res = client.get("/api/workspace/revision")
+    assert res.status_code == 200
+    assert "page_presence" not in res.json()
+
+
+def test_mcp_create_text_blocked_when_target_page_locked():
+    reset_registry_for_tests()
+    ws = Workspace.create_default("ws_1", "Test", True)
+    create_page_in_workspace(ws, "Notes")
+    proj_id = next(
+        node.target_project_id
+        for node in ws.library_nodes.values()
+        if node.kind == "page" and node.name == "Notes"
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        ws_dir = os.path.join(tmp, "workspace")
+        os.makedirs(ws_dir)
+        path = os.path.join(ws_dir, "workspace.json")
+        assets_dir = os.path.join(tmp, "assets")
+        os.makedirs(assets_dir)
+        old_path = api.WORKSPACE_PATH
+        old_assets = api.ASSETS_DIR
+        try:
+            save_workspace(ws, path)
+            api.WORKSPACE_PATH = path
+            api.ASSETS_DIR = assets_dir
+            heartbeat(proj_id, "session_a")
+            client = _test_client()
+            res = client.post(
+                "/api/text/create",
+                json={"page_path": "Notes", "markdown": "blocked"},
+            )
+            assert res.status_code == 423
+            leave(proj_id, "session_a")
+            ok = client.post(
+                "/api/text/create",
+                json={"page_path": "Notes", "markdown": "allowed"},
+            )
+            assert ok.status_code == 200
+        finally:
+            api.WORKSPACE_PATH = old_path
+            api.ASSETS_DIR = old_assets
+
+
 def test_presence_endpoint_round_trip():
     reset_registry_for_tests()
     res_a = _presence("proj_x", "sess_1")
@@ -149,6 +248,10 @@ def main():
     test_leave_releases_lock_for_remaining_viewer()
     test_stale_viewer_ttl_prunes_and_releases_lock()
     test_save_rejected_when_non_holder_posts_workspace()
+    test_save_allowed_when_only_other_page_locked()
+    test_revision_poll_registers_presence()
+    test_revision_poll_without_view_headers_has_no_presence()
+    test_mcp_create_text_blocked_when_target_page_locked()
     test_presence_endpoint_round_trip()
     print("test_page_view_lock.py: all passed")
 

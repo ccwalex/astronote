@@ -164,6 +164,23 @@ def get_holder_session_id(project_id: str) -> Optional[str]:
         return lock.session_id if lock else None
 
 
+def get_viewed_project_ids(session_id: str) -> set[str]:
+    """Project ids where this session has live viewer presence."""
+    sid = str(session_id or "").strip()
+    if not sid:
+        return set()
+    now = _now()
+    with _registry_lock:
+        result: set[str] = set()
+        for project_id, viewers in list(_viewers.items()):
+            _prune_stale(project_id, now)
+            viewers = _viewers.get(project_id) or {}
+            record = viewers.get(sid)
+            if record is not None and now - record.last_seen <= VIEWER_TTL_SEC:
+                result.add(project_id)
+        return result
+
+
 def reset_registry_for_tests() -> None:
     with _registry_lock:
         _viewers.clear()

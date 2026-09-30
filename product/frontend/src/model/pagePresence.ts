@@ -9,7 +9,6 @@ export type WriteProtectionState = {
 };
 
 const SESSION_STORAGE_KEY = 'astronote_page_session';
-export const PAGE_PRESENCE_HEARTBEAT_MS = 15000;
 
 export function getOrCreatePageSessionId(): string {
   try {
@@ -52,7 +51,6 @@ export function startPagePresence(
   const sessionId = options?.sessionId || getOrCreatePageSessionId();
   const clientLabel = options?.clientLabel;
   let activeProjectId = projectId;
-  let heartbeatTimer: number | null = null;
   let stopped = false;
 
   const sendLeave = (pid: string) => {
@@ -63,61 +61,23 @@ export function startPagePresence(
     }).catch(() => {});
   };
 
-  const heartbeat = async () => {
-    if (stopped || !activeProjectId) return;
-    try {
-      const status = await postPagePresence(activeProjectId, {
-        session_id: sessionId,
-        action: 'heartbeat',
-        client_label: clientLabel,
-      });
-      onStatusChange(status);
-    } catch (err) {
-      console.warn('Page presence heartbeat failed', err);
-    }
-  };
-
-  const scheduleHeartbeat = () => {
-    if (heartbeatTimer !== null) {
-      window.clearInterval(heartbeatTimer);
-    }
-    heartbeatTimer = window.setInterval(() => {
-      void heartbeat();
-    }, PAGE_PRESENCE_HEARTBEAT_MS);
-  };
-
   const handlePageHide = () => {
     if (activeProjectId) {
       sendLeave(activeProjectId);
     }
   };
 
-  const handleVisibility = () => {
-    if (document.visibilityState === 'visible') {
-      void heartbeat();
-    }
-  };
-
-  if (projectId) {
-    void heartbeat();
-    scheduleHeartbeat();
-  } else {
+  if (!projectId) {
     onStatusChange(null);
   }
 
   window.addEventListener('pagehide', handlePageHide);
-  document.addEventListener('visibilitychange', handleVisibility);
 
   return {
     stop: () => {
       if (stopped) return;
       stopped = true;
-      if (heartbeatTimer !== null) {
-        window.clearInterval(heartbeatTimer);
-        heartbeatTimer = null;
-      }
       window.removeEventListener('pagehide', handlePageHide);
-      document.removeEventListener('visibilitychange', handleVisibility);
       if (activeProjectId) {
         sendLeave(activeProjectId);
       }

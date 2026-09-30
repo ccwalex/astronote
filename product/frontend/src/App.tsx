@@ -894,7 +894,14 @@ export default function App() {
         return;
       }
       try {
-        const { workspace_revision: serverRev } = await fetchWorkspaceRevision();
+        const { workspace_revision: serverRev, page_presence: pagePresence } =
+          await fetchWorkspaceRevision({
+            projectId: selectedProjectIdRef.current,
+            sessionId: getOrCreatePageSessionId(),
+          });
+        if (pagePresence) {
+          applyPagePresenceStatus(pagePresence);
+        }
         if (cancelled || serverRev == null) {
           schedule();
           return;
@@ -937,14 +944,14 @@ export default function App() {
       }
     };
 
-    schedule();
+    void poll();
     return () => {
       cancelled = true;
       if (timer !== null) {
         window.clearTimeout(timer);
       }
     };
-  }, [loading]);
+  }, [loading, selectedProjectId]);
 
   useEffect(() => {
     pagePresenceControllerRef.current?.stop();

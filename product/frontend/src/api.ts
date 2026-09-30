@@ -11,6 +11,7 @@ export type PageLoadResponse = {
 export async function fetchPageLoad(options?: {
   projectId?: string | null;
   libraryNodeId?: string | null;
+  sessionId?: string | null;
 }): Promise<PageLoadResponse> {
   const params = new URLSearchParams();
   const projectId = options?.projectId;
@@ -23,9 +24,14 @@ export async function fetchPageLoad(options?: {
   }
   const query = params.toString();
   const endpoint = `${API_BASE}/workspace/page-load${query ? `?${query}` : ''}`;
+  const headers: Record<string, string> = {};
+  const sessionId = options?.sessionId?.trim();
+  if (sessionId) {
+    headers['X-Page-View-Session'] = sessionId;
+  }
   let response: Response;
   try {
-    response = await fetch(endpoint);
+    response = await fetch(endpoint, { headers });
   } catch (err) {
     throw makeNetworkError('Fetch workspace page load', endpoint, err);
   }
@@ -136,6 +142,7 @@ export type WorkspaceNavResponse = Workspace & WorkspaceRevisionFields;
 export type WorkspaceRevisionResponse = {
   workspace_id?: string | null;
   workspace_revision: number | null;
+  page_presence?: PagePresenceStatus | null;
 };
 
 export type PagePresenceStatus = {
@@ -219,12 +226,45 @@ export async function forcePageWriteUnlock(
   };
 }
 
-export async function fetchWorkspaceRevision(): Promise<WorkspaceRevisionResponse> {
-  const endpoint = `${API_BASE}/workspace/revision`;
+function parsePagePresenceStatus(data: unknown): PagePresenceStatus | null {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    return null;
+  }
+  const raw = data as Record<string, unknown>;
+  if (typeof raw.can_write !== 'boolean') {
+    return null;
+  }
+  return {
+    viewer_count: typeof raw.viewer_count === 'number' ? raw.viewer_count : 0,
+    write_holder_session_id:
+      typeof raw.write_holder_session_id === 'string' ? raw.write_holder_session_id : null,
+    can_write: raw.can_write === true,
+    write_holder_label:
+      typeof raw.write_holder_label === 'string' ? raw.write_holder_label : null,
+    forced: raw.forced === true,
+  };
+}
+
+export async function fetchWorkspaceRevision(options?: {
+  projectId?: string | null;
+  sessionId?: string | null;
+}): Promise<WorkspaceRevisionResponse> {
+  const params = new URLSearchParams();
+  const projectId = options?.projectId?.trim();
+  if (projectId) {
+    params.set('project_id', projectId);
+  }
+  const query = params.toString();
+  const endpoint = `${API_BASE}/workspace/revision${query ? `?${query}` : ''}`;
+  const headers: Record<string, string> = {};
+  const sessionId = options?.sessionId?.trim();
+  if (sessionId) {
+    headers['X-Page-View-Session'] = sessionId;
+  }
   let response: Response;
 
   try {
-    response = await fetch(endpoint);
+    response = await fetch(endpoint, { headers });
   } catch (err) {
     throw makeNetworkError('Fetch workspace revision', endpoint, err);
   }
@@ -245,6 +285,11 @@ export async function fetchWorkspaceRevision(): Promise<WorkspaceRevisionRespons
   return {
     workspace_id: workspaceId,
     workspace_revision: revision,
+    page_presence: parsePagePresenceStatus(
+      data && typeof data === 'object' && !Array.isArray(data)
+        ? (data as { page_presence?: unknown }).page_presence
+        : null
+    ),
   };
 }
 
