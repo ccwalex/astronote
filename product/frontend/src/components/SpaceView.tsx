@@ -193,6 +193,7 @@ export default function SpaceView({
   const [showImageDrawComposer, setShowImageDrawComposer] = useState(false);
 
   const [dragMode, setDragMode] = useState<DragMode>('none');
+  const [enterCaretPoint, setEnterCaretPoint] = useState<{ x: number; y: number } | null>(null);
   const [dragStart, setDragStart] = useState<DragStart | null>(null);
   const moveDragStateRef = useRef<{ lastX: number; lastY: number; lastTs: number } | null>(null);
   const pendingMoveActivationRef = useRef<PendingMoveActivation | null>(null);
@@ -232,6 +233,7 @@ export default function SpaceView({
       clearPendingMoveActivation();
       setIsDrawing(false);
       setCurrentStroke([]);
+      setEnterCaretPoint(null);
     }
   }, [isSelected]);
 
@@ -292,6 +294,9 @@ export default function SpaceView({
     e.stopPropagation();
     const target = e.target as HTMLElement;
     if (space.kind === 'TextSpace' && target.closest?.('.editable-area')) {
+      // The editor is contentEditable=false until selected, so the browser will
+      // not place the caret for this click; hand the click point to the editor.
+      setEnterCaretPoint({ x: e.clientX, y: e.clientY });
       onEnterTextEdit?.();
     }
     if (readOnly) {
@@ -666,6 +671,7 @@ export default function SpaceView({
               onTextPersistRequest={onTextPersistRequest}
               onHeightChange={onHeightChange}
               zoom={zoom}
+              enterCaretPoint={enterCaretPoint}
             />
           ) : null}
         </div>

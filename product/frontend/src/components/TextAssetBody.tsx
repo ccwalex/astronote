@@ -16,6 +16,7 @@ export interface TextAssetBodyProps {
   onTextPersistRequest?: (projectId: string, spaceId: string) => void;
   onHeightChange: (spaceId: string, height: number) => void;
   zoom?: number;
+  enterCaretPoint?: { x: number; y: number } | null;
 }
 
 export function TextAssetBody({
@@ -30,7 +31,8 @@ export function TextAssetBody({
   onTextContentChange,
   onTextPersistRequest,
   onHeightChange,
-  zoom = 1
+  zoom = 1,
+  enterCaretPoint = null
 }: TextAssetBodyProps) {
   const inline = typeof asset.content === 'string' ? asset.content : null;
   const [loaded, setLoaded] = useState<string>(inline || '');
@@ -98,6 +100,7 @@ export function TextAssetBody({
         suppressHeightReports={suppressHeightReports}
         readOnly={readOnly}
         zoom={zoom}
+        enterCaretPoint={enterCaretPoint}
       />
     </>
   );

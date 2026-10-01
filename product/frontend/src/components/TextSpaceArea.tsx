@@ -297,6 +297,77 @@ const TEXTSPACE_PADDING_Y = 12;
 const TEXTSPACE_BORDER_Y = 3;
 const OUTER_TEXTSPACE_CHROME_HEIGHT = TEXTSPACE_PADDING_Y * 2 + TEXTSPACE_BORDER_Y * 2;
 
+/** Plain-text offset of the caret from the start of the editor, or null if no caret lives inside it. */
+function getCaretTextOffset(editor: HTMLElement): number | null {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0) return null;
+  const range = selection.getRangeAt(0);
+  if (!editor.contains(range.startContainer)) return null;
+  const prefix = range.cloneRange();
+  prefix.selectNodeContents(editor);
+  prefix.setEnd(range.startContainer, range.startOffset);
+  return prefix.toString().length;
+}
+
+/** Place the caret at the given plain-text offset within the editor, clamped to the content length. */
+function restoreCaretTextOffset(editor: HTMLElement, offset: number): void {
+  const selection = window.getSelection();
+  if (!selection) return;
+  const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT);
+  let remaining = Math.max(0, Math.floor(offset));
+  let lastText: Text | null = null;
+  let targetText: Text | null = null;
+  let targetOffset = 0;
+  let current = walker.nextNode();
+  while (current) {
+    const text = current as Text;
+    lastText = text;
+    if (remaining <= text.data.length) {
+      targetText = text;
+      targetOffset = remaining;
+      break;
+    }
+    remaining -= text.data.length;
+    current = walker.nextNode();
+  }
+  try {
+    const range = document.createRange();
+    if (targetText) {
+      range.setStart(targetText, targetOffset);
+    } else if (lastText) {
+      range.setStart(lastText, lastText.data.length);
+    } else {
+      range.selectNodeContents(editor);
+      range.collapse(true);
+    }
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  } catch {
+    // Content shape may have changed drastically; leave the browser default caret.
+  }
+}
+
+/** Range at a viewport point, using caretRangeFromPoint / caretPositionFromPoint where available. */
+function caretRangeFromClientPoint(x: number, y: number): Range | null {
+  const doc = document as Document & {
+    caretRangeFromPoint?: (x: number, y: number) => Range | null;
+    caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
+  };
+  if (typeof doc.caretRangeFromPoint === 'function') {
+    return doc.caretRangeFromPoint(x, y);
+  }
+  if (typeof doc.caretPositionFromPoint === 'function') {
+    const position = doc.caretPositionFromPoint(x, y);
+    if (!position || !position.offsetNode) return null;
+    const range = document.createRange();
+    range.setStart(position.offsetNode, position.offset);
+    range.collapse(true);
+    return range;
+  }
+  return null;
+}
+
 function measureEditorContentHeight(editor: HTMLElement): number {
   const style = window.getComputedStyle(editor);
   const paddingBottom = parseFloat(style.paddingBottom) || 0;
@@ -441,6 +512,7 @@ export interface TextSpaceAreaProps {
   onPersistRequest?: () => void;
   zoom?: number;
   readOnly?: boolean;
+  enterCaretPoint?: { x: number; y: number } | null;
 }
 
 export function TextSpaceArea({
@@ -453,7 +525,8 @@ export function TextSpaceArea({
   suppressHeightReports = false,
   onPersistRequest,
   zoom = 1,
-  readOnly = false
+  readOnly = false,
+  enterCaretPoint = null
 }: TextSpaceAreaProps) {
   const editorRef = useRef<HTMLDivElement>(null);
   const persistRequestRef = useRef(onPersistRequest);
@@ -476,6 +549,8 @@ export function TextSpaceArea({
   const lastSelectionRangeRef = useRef<Range | null>(null);
   const [toolbarHost, setToolbarHost] = useState<HTMLElement | null>(null);
   const [activeFormats, setActiveFormats] = useState<ActiveTextFormats>(INACTIVE_FORMATS);
+  const enterCaretPointRef = useRef(enterCaretPoint);
+  enterCaretPointRef.current = enterCaretPoint;
 
   const refreshActiveFormats = useCallback(() => {
     setActiveFormats(readActiveTextFormats(editorRef.current, lastSelectionRangeRef.current));
@@ -555,7 +630,15 @@ export function TextSpaceArea({
       const html = markdownToEditorHtml(value);
       if (isExternalValue || (!isFocused && editor.innerHTML !== html)) {
         if (editor.innerHTML !== html) {
-          editor.innerHTML = html;
+          if (isFocused) {
+            const caretOffset = getCaretTextOffset(editor);
+            editor.innerHTML = html;
+            if (caretOffset != null) {
+              restoreCaretTextOffset(editor, caretOffset);
+            }
+          } else {
+            editor.innerHTML = html;
+          }
         }
         lastEmittedMarkdownRef.current = value;
       }
@@ -571,20 +654,45 @@ export function TextSpaceArea({
       editor.focus({ preventScroll: true });
     }
     const selection = window.getSelection();
-    let rangeInEditor = false;
-    if (selection && selection.rangeCount > 0) {
-      const range = selection.getRangeAt(0);
-      const container = range.commonAncestorContainer;
-      const element = container.nodeType === Node.ELEMENT_NODE ? (container as Element) : container.parentElement;
-      rangeInEditor = Boolean(element && editor.contains(element));
+
+    // Click entry: the browser could not place the caret because the editor was
+    // contentEditable=false at mousedown, so place it at the click point instead
+    // of restoring a stale saved range from a previous editing session.
+    let placedFromClick = false;
+    const clickPoint = enterCaretPointRef.current;
+    if (clickPoint && selection) {
+      const clickRange = caretRangeFromClientPoint(clickPoint.x, clickPoint.y);
+      if (clickRange && editor.contains(clickRange.startContainer) && editor.contains(clickRange.endContainer)) {
+        selection.removeAllRanges();
+        selection.addRange(clickRange);
+        placedFromClick = true;
+      }
+      enterCaretPointRef.current = null;
     }
-    if (!rangeInEditor) {
-      const saved = lastSelectionRangeRef.current;
-      if (saved && selection) {
-        try {
-          selection.removeAllRanges();
-          selection.addRange(saved);
-        } catch {
+
+    if (!placedFromClick) {
+      let rangeInEditor = false;
+      if (selection && selection.rangeCount > 0) {
+        const range = selection.getRangeAt(0);
+        const container = range.commonAncestorContainer;
+        const element = container.nodeType === Node.ELEMENT_NODE ? (container as Element) : container.parentElement;
+        rangeInEditor = Boolean(element && editor.contains(element));
+      }
+      if (!rangeInEditor) {
+        const saved = lastSelectionRangeRef.current;
+        if (saved && selection) {
+          try {
+            selection.removeAllRanges();
+            selection.addRange(saved);
+          } catch {
+            const range = document.createRange();
+            range.selectNodeContents(editor);
+            range.collapse(true);
+            selection.removeAllRanges();
+            selection.addRange(range);
+            lastSelectionRangeRef.current = range.cloneRange();
+          }
+        } else if (selection) {
           const range = document.createRange();
           range.selectNodeContents(editor);
           range.collapse(true);
@@ -592,13 +700,6 @@ export function TextSpaceArea({
           selection.addRange(range);
           lastSelectionRangeRef.current = range.cloneRange();
         }
-      } else if (selection) {
-        const range = document.createRange();
-        range.selectNodeContents(editor);
-        range.collapse(true);
-        selection.removeAllRanges();
-        selection.addRange(range);
-        lastSelectionRangeRef.current = range.cloneRange();
       }
     }
     refreshActiveFormats();
@@ -625,6 +726,11 @@ export function TextSpaceArea({
     if (markdown !== value) {
       lastEmittedMarkdownRef.current = markdown;
       onChange(markdown);
+    } else {
+      // Round-trip collision (e.g. deletes that markdown normalization collapses):
+      // keep the invariant lastEmitted === value so the sync effect does not
+      // mistake a later emit for an external change and rewrite the DOM.
+      lastEmittedMarkdownRef.current = value;
     }
     reportRequiredHeight();
   }, [value, onChange, reportRequiredHeight]);
