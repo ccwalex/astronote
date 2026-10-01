@@ -219,7 +219,7 @@ export function searchWorkspace(workspace: Workspace, query: string): SearchResu
             id: asset.id,
             kind: 'asset',
             label: getAssetDisplayLabel(asset.kind),
-            detail: snippet ? `${baseDetail} • ${snippet}` : baseDetail,
+            detail: baseDetail,
             projectId: project.id,
             assetId: asset.id,
             spaceId: spaceId || project.root_space_id || undefined,
@@ -248,14 +248,23 @@ export function searchWorkspace(workspace: Workspace, query: string): SearchResu
 }
 
 /**
- * Convert backend /api/search rows (snake_case) to frontend SearchResult,
- * merging duplicate rows for the same asset (e.g. filename + content hits).
- * Content-match rows (snippets) win over filename/kind rows.
+ * Convert backend /api/search rows (snake_case) to frontend SearchResult.
+ * Rows for the same asset are collapsed into one entry, labels use the
+ * filename/page name, and details show the library path to the page/asset
+ * (no "content match" labels or raw snippets).
  */
 export function convertBackendSearchResults(
-  rows: BackendSearchResultRow[]
+  rows: BackendSearchResultRow[],
+  workspace: Workspace
 ): SearchResult[] {
+  const projectLocations = buildProjectLocationIndex(workspace);
   const byKey = new Map<string, SearchResult>();
+
+  const locationPathFor = (projectId?: string): string => {
+    if (!projectId) return '';
+    const projectName = workspace.projects?.[projectId]?.name || '';
+    return getPrimaryProjectLocation(projectLocations, projectId, projectName);
+  };
 
   for (const row of rows) {
     if (!row || typeof row !== 'object') continue;
@@ -263,18 +272,62 @@ export function convertBackendSearchResults(
     const projectId = row.project_id || undefined;
     const assetId = row.asset_id || undefined;
     const libraryNodeId = row.library_node_id || undefined;
-    const spaceId = row.space_id || undefined;
+    let spaceId = row.space_id || undefined;
 
     const key = assetId && projectId
       ? `asset:${projectId}:${assetId}`
       : row.id || `${row.kind}:${row.label}`;
     if (!key) continue;
 
+    const kind = row.kind || 'unknown';
+    let label = row.label || '';
+    let detail = row.detail || '';
+
+    if (libraryNodeId) {
+      const node = workspace.library_nodes?.[libraryNodeId];
+      label = node?.name || label;
+      detail = buildNodePath(workspace, libraryNodeId) || detail;
+    } else if (assetId && projectId) {
+      const project = workspace.projects?.[projectId];
+      const asset = project?.assets?.[assetId];
+      if (asset?.filename) label = asset.filename;
+      if (!spaceId && project?.spaces) {
+        for (const space of Object.values(project.spaces)) {
+          if (
+            space.reference_asset_id === assetId ||
+            (space.asset_ids && space.asset_ids.includes(assetId))
+          ) {
+            spaceId = space.id;
+            break;
+          }
+        }
+      }
+      const assetKind =
+        asset?.kind ||
+        (kind === 'markdown_content' ? 'markdown' : kind === 'pdf_content' ? 'pdf' : kind);
+      const kindLabel = getAssetDisplayLabel(assetKind);
+      const path = locationPathFor(projectId);
+      detail = path ? `${path} -> ${kindLabel}` : kindLabel;
+    } else if (projectId) {
+      const project = workspace.projects?.[projectId];
+      const path = locationPathFor(projectId);
+      if (kind === 'project') {
+        label = project?.name || label;
+        detail = path || project?.name || detail;
+      } else if (spaceId) {
+        const spaceKind = project?.spaces?.[spaceId]?.kind;
+        if (spaceKind) label = spaceKind;
+        detail = [path || project?.name || '', spaceKind || label].filter(Boolean).join(' -> ');
+      } else {
+        detail = path || detail;
+      }
+    }
+
     const converted: SearchResult = {
       id: row.id || key,
-      kind: row.kind || 'unknown',
-      label: row.label || '',
-      detail: row.detail || '',
+      kind,
+      label: label || key,
+      detail,
       projectId,
       spaceId,
       assetId,
@@ -286,17 +339,11 @@ export function convertBackendSearchResults(
       byKey.set(key, converted);
       continue;
     }
-
-    const isContentMatch = (result: SearchResult) =>
-      result.kind === 'markdown_content' || result.kind === 'pdf_content';
-    const preferNext =
-      (isContentMatch(converted) && !isContentMatch(existing)) ||
-      converted.detail.length > existing.detail.length;
-    if (preferNext) {
-      byKey.set(key, {
-        ...converted,
-        detail: converted.detail || existing.detail,
-      });
+    // Collapse duplicates: prefer rows backed by a concrete asset/page row
+    // over content-only rows for the same asset.
+    const isContentKind = (k: string) => k === 'markdown_content' || k === 'pdf_content';
+    if (isContentKind(existing.kind) && !isContentKind(converted.kind)) {
+      byKey.set(key, converted);
     }
   }
 

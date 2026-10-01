@@ -214,7 +214,7 @@ export function SearchBar({ workspace, onOpenProject, onSelectSpace }: SearchBar
       try {
         const rows = await searchWorkspaceServer(normalized);
         if (plainSearchSeqRef.current !== seq) return;
-        setServerResults(convertBackendSearchResults(rows));
+        setServerResults(convertBackendSearchResults(rows, workspace));
       } catch (err: any) {
         if (plainSearchSeqRef.current !== seq) return;
         setServerResults(null);
