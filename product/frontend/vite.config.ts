@@ -1,11 +1,26 @@
+import path from 'path'
+import { fileURLToPath } from 'url'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
 // Set VITE_API_PROXY_TARGET when the API is not on this host (e.g. Docker service).
 const apiProxyTarget = process.env.VITE_API_PROXY_TARGET || 'http://127.0.0.1:8000'
+const rootDir = path.dirname(fileURLToPath(import.meta.url))
 
 export default defineConfig({
   plugins: [react()],
+  resolve: {
+    // Prevent "dispatcher.useState" null crashes from duplicate React copies
+    // (common with Vite prebundling + react-dom createPortal).
+    dedupe: ['react', 'react-dom'],
+    alias: {
+      react: path.resolve(rootDir, 'node_modules/react'),
+      'react-dom': path.resolve(rootDir, 'node_modules/react-dom'),
+    },
+  },
+  optimizeDeps: {
+    include: ['react', 'react-dom', 'react/jsx-runtime'],
+  },
   server: {
     proxy: {
       '/api': {

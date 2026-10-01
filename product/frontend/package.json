@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0 --port 5173 --strictPort",
     "predev:full": "test -d venv || python3 -m venv venv && ./venv/bin/python3 -m pip install fastapi uvicorn python-multipart pillow mcp",
-    "dev:full": "concurrently -k \"ASTRONOTE_API_HOST=0.0.0.0 ./venv/bin/python3 ../../code/api.py > /dev/null 2>&1\" \"vite --host 0.0.0.0 --port 5173 --strictPort > /dev/null 2>&1\"",
+    "dev:full": "concurrently -k \"ASTRONOTE_API_HOST=0.0.0.0 ./venv/bin/python3 ../../code/api.py\" \"vite --host 0.0.0.0 --port 5173 --strictPort\"",
     "build": "tsc",
     "test:workspace-cache": "node --experimental-strip-types src/model/workspaceCache.test.ts",
     "test:workspace-dirty-gate": "node --experimental-strip-types src/model/workspaceDirtyGate.test.ts",

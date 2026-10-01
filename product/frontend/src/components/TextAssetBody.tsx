@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Asset } from '../types';
 import { fetchAssetText } from '../api';
 import { TextSpaceArea } from './TextSpaceArea';

@@ -10,26 +10,28 @@ type Props = {
 
 type State = {
   error: Error | null;
+  componentStack: string | null;
 };
 
 export class ErrorBoundary extends Component<Props, State> {
-  state: State = { error: null };
+  state: State = { error: null, componentStack: null };
 
-  static getDerivedStateFromError(error: Error): State {
+  static getDerivedStateFromError(error: Error): Partial<State> {
     return { error };
   }
 
   componentDidCatch(error: Error, info: ErrorInfo) {
     console.error('ErrorBoundary', error, info.componentStack);
+    this.setState({ componentStack: info.componentStack || null });
   }
 
   private handleRecover = () => {
     if (this.props.onRecover) {
-      this.setState({ error: null });
+      this.setState({ error: null, componentStack: null });
       this.props.onRecover();
       return;
     }
-    this.setState({ error: null });
+    this.setState({ error: null, componentStack: null });
   };
 
   render() {
@@ -49,13 +51,31 @@ export class ErrorBoundary extends Component<Props, State> {
             padding: '2rem'
           }}
         >
-          <div>
+          <div style={{ maxWidth: 640 }}>
             <div style={{ fontWeight: 700, marginBottom: 8 }}>
               {this.props.fallbackTitle || 'Something went wrong'}
             </div>
-            <div style={{ marginBottom: this.props.onRecover ? 16 : 0 }}>
+            <div style={{ marginBottom: 12 }}>
               {detail}
             </div>
+            {this.state.componentStack ? (
+              <pre
+                style={{
+                  textAlign: 'left',
+                  fontSize: '11px',
+                  color: '#666',
+                  whiteSpace: 'pre-wrap',
+                  marginBottom: 16,
+                  maxHeight: 180,
+                  overflow: 'auto',
+                  background: '#f6f6f6',
+                  padding: 8,
+                  borderRadius: 4
+                }}
+              >
+                {this.state.componentStack}
+              </pre>
+            ) : null}
             {this.props.onRecover ? (
               <button
                 type="button"
@@ -68,7 +88,19 @@ export class ErrorBoundary extends Component<Props, State> {
               >
                 {this.props.recoverLabel || 'Clear cache and reload'}
               </button>
-            ) : null}
+            ) : (
+              <button
+                type="button"
+                onClick={() => window.location.reload()}
+                style={{
+                  fontSize: '12px',
+                  padding: '6px 12px',
+                  cursor: 'pointer'
+                }}
+              >
+                Reload page
+              </button>
+            )}
           </div>
         </div>
       );
