@@ -1460,6 +1460,7 @@ def _embed_all_assets_locked():
         embedded_assets = 0
         up_to_date_assets = 0
         failed_assets = []
+        pending_embeds: list[tuple[str, str, Any]] = []
 
         for project_id, project in workspace.projects.items():
             for asset_id, asset in project.assets.items():
@@ -1477,19 +1478,26 @@ def _embed_all_assets_locked():
                     up_to_date_assets += 1
                     continue
 
-                try:
-                    embedded = embedding_index.embed_asset(project_id, asset_id, asset)
-                    if embedded:
-                        embedded_assets += 1
-                        mark_asset_embedded(
-                            data_dir=os.path.join(PROJECT_ROOT, "data"),
-                            asset_id=asset_id,
-                            project_id=project_id,
-                            filename=getattr(asset, "filename", None),
-                            embedded_checksum=compute_asset_checksum(asset),
-                        )
-                except Exception as e:
-                    failed_assets.append({"asset_id": asset_id, "error": str(e)})
+                pending_embeds.append((project_id, asset_id, asset))
+
+        if pending_embeds:
+            try:
+                embed_results = embedding_index.embed_assets(pending_embeds, n_jobs=2)
+                for project_id, asset_id, asset in pending_embeds:
+                    try:
+                        if embed_results.get((project_id, asset_id)):
+                            embedded_assets += 1
+                            mark_asset_embedded(
+                                data_dir=os.path.join(PROJECT_ROOT, "data"),
+                                asset_id=asset_id,
+                                project_id=project_id,
+                                filename=getattr(asset, "filename", None),
+                                embedded_checksum=compute_asset_checksum(asset),
+                            )
+                    except Exception as e:
+                        failed_assets.append({"asset_id": asset_id, "error": str(e)})
+            except Exception as e:
+                failed_assets.append({"asset_id": "*", "error": str(e)})
 
         try:
             embedding_index.drop_unkept_assets(_kept_asset_ids_for_embeddings(workspace))

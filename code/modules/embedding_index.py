@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import os
 import pickle
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -70,6 +72,13 @@ def _parse_iso_datetime(value: str) -> Optional[datetime]:
         return datetime.fromisoformat(text)
     except ValueError:
         return None
+
+
+@dataclass
+class _AssetEmbedPlan:
+    action: str  # "skip", "remove", "embed"
+    existing_keys: list[str] = field(default_factory=list)
+    chunks: list[tuple[str, str, dict[str, Any]]] = field(default_factory=list)
 
 
 def _tracking_requires_embed(tracking_row: Optional[dict[str, str]]) -> bool:
@@ -224,10 +233,58 @@ class WorkspaceEmbeddingIndex:
     def has_embeddings(self) -> bool:
         return bool(self._lookup_order)
 
-    def embed_workspace(self, workspace) -> None:
-        for project_id, project in workspace.projects.items():
-            for asset_id, asset in project.assets.items():
-                self.embed_asset(project_id, asset_id, asset)
+    def embed_assets(
+        self,
+        items: list[tuple[str, str, Any]],
+        *,
+        n_jobs: int = 2,
+    ) -> dict[tuple[str, str], bool]:
+        if not items:
+            return {}
+
+        plans = [
+            (item, self._plan_asset_embed(item[0], item[1], item[2]))
+            for item in items
+        ]
+
+        embed_plans = [(item, plan) for item, plan in plans if plan.action == "embed"]
+        if embed_plans and n_jobs > 1:
+            with ThreadPoolExecutor(max_workers=n_jobs) as executor:
+                computed = list(
+                    executor.map(
+                        lambda pair: (pair[0], self._compute_embed_vectors(pair[1])),
+                        embed_plans,
+                    )
+                )
+            plan_vectors = {item: vectors for item, vectors in computed}
+        else:
+            plan_vectors = {
+                item: self._compute_embed_vectors(plan)
+                for item, plan in embed_plans
+            }
+
+        results: dict[tuple[str, str], bool] = {}
+        changed = False
+        for item, plan in plans:
+            project_id, asset_id, asset = item
+            vectors = plan_vectors.get(item) if plan.action == "embed" else None
+            applied = self._apply_asset_embed(project_id, asset_id, asset, plan, vectors)
+            results[(project_id, asset_id)] = applied
+            if applied:
+                changed = True
+
+        if changed:
+            self._refit_indexes()
+            self.save_to_disk()
+        return results
+
+    def embed_workspace(self, workspace, *, n_jobs: int = 2) -> None:
+        items = [
+            (project_id, asset_id, asset)
+            for project_id, project in workspace.projects.items()
+            for asset_id, asset in project.assets.items()
+        ]
+        self.embed_assets(items, n_jobs=n_jobs)
 
     def _tracking_row_for_asset(
         self,
@@ -329,58 +386,98 @@ class WorkspaceEmbeddingIndex:
         row = self._tracking_row_for_asset(tracking_rows, project_id, asset_id)
         return _tracking_requires_embed(row)
 
-    def embed_asset(self, project_id: str, asset_id: str, asset) -> bool:
+    def _plan_asset_embed(self, project_id: str, asset_id: str, asset) -> _AssetEmbedPlan:
         text = self._asset_text_for_embedding(asset, project_id=project_id)
         existing_keys = self._lookup_keys_for_asset(project_id, asset_id)
 
         if existing_keys and not self._asset_requires_reembed(project_id, asset_id):
-            return False
+            return _AssetEmbedPlan(action="skip", existing_keys=existing_keys)
 
         if not text:
-            if existing_keys:
-                for lookup_key in existing_keys:
-                    self._remove_lookup_key(lookup_key)
-                self._refit_indexes()
-                self.save_to_disk()
-            return False
+            return _AssetEmbedPlan(action="remove", existing_keys=existing_keys)
 
         text_chunks = split_text_for_embedding(text)
         if not text_chunks:
-            if existing_keys:
-                for lookup_key in existing_keys:
-                    self._remove_lookup_key(lookup_key)
-                self._refit_indexes()
-                self.save_to_disk()
-            return False
-
-        if existing_keys:
-            for lookup_key in existing_keys:
-                self._remove_lookup_key(lookup_key)
+            return _AssetEmbedPlan(action="remove", existing_keys=existing_keys)
 
         chunk_count = len(text_chunks)
+        chunks: list[tuple[str, str, dict[str, Any]]] = []
         for chunk_index, chunk_text in enumerate(text_chunks):
             if chunk_count == 1:
                 lookup_key = build_asset_lookup_key(project_id, asset_id)
             else:
                 lookup_key = build_asset_chunk_lookup_key(project_id, asset_id, chunk_index)
+            chunks.append(
+                (
+                    lookup_key,
+                    chunk_text,
+                    {
+                        "project_id": project_id,
+                        "asset_id": asset_id,
+                        "kind": asset.kind,
+                        "filename": asset.filename,
+                        "chunk_index": chunk_index,
+                        "chunk_count": chunk_count,
+                        "chunk_word_count": len(chunk_text.split()),
+                    },
+                )
+            )
 
-            vector = self._embed_text(chunk_text, input_type="search_document")
+        return _AssetEmbedPlan(action="embed", existing_keys=existing_keys, chunks=chunks)
+
+    def _compute_embed_vectors(
+        self,
+        plan: _AssetEmbedPlan,
+    ) -> list[tuple[str, np.ndarray, dict[str, Any]]]:
+        return [
+            (
+                lookup_key,
+                self._embed_text(chunk_text, input_type="search_document"),
+                metadata,
+            )
+            for lookup_key, chunk_text, metadata in plan.chunks
+        ]
+
+    def _apply_asset_embed(
+        self,
+        project_id: str,
+        asset_id: str,
+        asset,
+        plan: _AssetEmbedPlan,
+        vectors: Optional[list[tuple[str, np.ndarray, dict[str, Any]]]] = None,
+    ) -> bool:
+        if plan.action == "skip":
+            return False
+
+        if plan.action == "remove":
+            if not plan.existing_keys:
+                return False
+            for lookup_key in plan.existing_keys:
+                self._remove_lookup_key(lookup_key)
+            return True
+
+        if not vectors:
+            return False
+
+        for lookup_key in plan.existing_keys:
+            self._remove_lookup_key(lookup_key)
+
+        for lookup_key, vector, metadata in vectors:
             self.raw_embeddings[lookup_key] = vector
-            self.lookup_metadata[lookup_key] = {
-                "project_id": project_id,
-                "asset_id": asset_id,
-                "kind": asset.kind,
-                "filename": asset.filename,
-                "chunk_index": chunk_index,
-                "chunk_count": chunk_count,
-                "chunk_word_count": len(chunk_text.split()),
-            }
+            self.lookup_metadata[lookup_key] = metadata
             self._lookup_order.append(lookup_key)
 
-        self._refit_indexes()
-        self.save_to_disk()
         self._record_asset_embedded(project_id, asset_id, asset)
         return True
+
+    def embed_asset(self, project_id: str, asset_id: str, asset) -> bool:
+        plan = self._plan_asset_embed(project_id, asset_id, asset)
+        vectors = self._compute_embed_vectors(plan) if plan.action == "embed" else None
+        applied = self._apply_asset_embed(project_id, asset_id, asset, plan, vectors)
+        if applied:
+            self._refit_indexes()
+            self.save_to_disk()
+        return applied
 
     def _record_asset_embedded(self, project_id: str, asset_id: str, asset) -> None:
         try:
@@ -688,7 +785,6 @@ class WorkspaceEmbeddingIndex:
                     n_components=n_components,
                     n_neighbors=n_neighbors,
                     metric="cosine",
-                    random_state=42,
                 )
                 reduced = reducer.fit_transform(self._raw_matrix)
                 self._umap_model = reducer
