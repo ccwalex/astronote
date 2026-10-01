@@ -7,14 +7,14 @@ from typing import Any, Optional
 
 from modules.embedding_index import WorkspaceEmbeddingIndex
 from modules.graph_rag import retrieve_spaces_within_distance_from_starts
-from modules.pdf_text_extractor import extract_text_from_pdf_asset
+from modules.pdf_text_extractor import extract_text_from_pdf_asset_cached
 from modules.project import Project
 from modules.workspace import Workspace
 
 
-def _safe_pdf_text(asset) -> str:
+def _safe_pdf_text(asset, project_id: Optional[str] = None) -> str:
     try:
-        return extract_text_from_pdf_asset(asset) or ""
+        return extract_text_from_pdf_asset_cached(asset, project_id=project_id) or ""
     except Exception:
         return ""
 
@@ -252,8 +252,7 @@ def embedding_search_assets(
     if not query or embedding_index is None:
         return []
 
-    if not embedding_index.has_embeddings:
-        embedding_index.embed_workspace(workspace)
+    embedding_index.embed_workspace(workspace)
 
     k = max_results if max_results is not None else 20
     if k <= 0:
@@ -313,8 +312,7 @@ def build_embedding_neighbor_matrix(
     embedding_index: WorkspaceEmbeddingIndex,
     max_neighbors: int = 5,
 ) -> dict[str, list[dict[str, Any]]]:
-    if not embedding_index.has_embeddings:
-        embedding_index.embed_workspace(workspace)
+    embedding_index.embed_workspace(workspace)
     return embedding_index.build_neighbor_matrix(max_neighbors=max_neighbors)
 
 
@@ -816,11 +814,7 @@ def search_workspace(
                     })
 
             if asset.kind == "pdf":
-                extracted_text = ""
-                try:
-                    extracted_text = extract_text_from_pdf_asset(asset)
-                except Exception:
-                    extracted_text = ""
+                extracted_text = _safe_pdf_text(asset, project_id=project_id)
 
                 if extracted_text and _contains_fold(extracted_text, fold_query):
                     idx = _fold(extracted_text).find(fold_query)

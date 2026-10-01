@@ -220,6 +220,7 @@ class WorkspaceEmbeddingIndex:
         if self._nn_model is None:
             self._refit_indexes()
 
+    @property
     def has_embeddings(self) -> bool:
         return bool(self._lookup_order)
 
@@ -329,7 +330,7 @@ class WorkspaceEmbeddingIndex:
         return _tracking_requires_embed(row)
 
     def embed_asset(self, project_id: str, asset_id: str, asset) -> bool:
-        text = self._asset_text_for_embedding(asset)
+        text = self._asset_text_for_embedding(asset, project_id=project_id)
         existing_keys = self._lookup_keys_for_asset(project_id, asset_id)
 
         if existing_keys and not self._asset_requires_reembed(project_id, asset_id):
@@ -378,7 +379,35 @@ class WorkspaceEmbeddingIndex:
 
         self._refit_indexes()
         self.save_to_disk()
+        self._record_asset_embedded(project_id, asset_id, asset)
         return True
+
+    def _record_asset_embedded(self, project_id: str, asset_id: str, asset) -> None:
+        try:
+            from datetime import datetime, timezone
+
+            from modules.asset_tracking import compute_asset_checksum, update_asset_tracking
+            from modules.embedding_state import mark_embedding_up_to_date
+
+            checksum = compute_asset_checksum(asset)
+            data_dir = self._tracking_data_dir()
+            update_asset_tracking(
+                asset_id=asset_id,
+                project_id=project_id,
+                filename=getattr(asset, "filename", None),
+                last_embed_time=datetime.now(timezone.utc).isoformat(),
+                content_checksum=checksum,
+                embedded_checksum=checksum,
+                data_dir=data_dir,
+            )
+            mark_embedding_up_to_date(
+                asset_id=asset_id,
+                project_id=project_id,
+                content_checksum=checksum,
+                data_dir=data_dir,
+            )
+        except Exception:
+            return
 
     def build_neighbor_matrix(self, max_neighbors: int = 5) -> dict[str, list[dict[str, Any]]]:
         if max_neighbors <= 0 or not self._lookup_order:
@@ -428,13 +457,15 @@ class WorkspaceEmbeddingIndex:
             for lookup_key, distance in neighbors
         ]
 
-    def _asset_text_for_embedding(self, asset) -> Optional[str]:
+    def _asset_text_for_embedding(self, asset, project_id: Optional[str] = None) -> Optional[str]:
         if asset.kind == "image":
             return None
 
         if asset.kind == "pdf":
             try:
-                extracted = (extract_text_from_pdf_asset(asset) or "").strip()
+                extracted = (
+                    extract_text_from_pdf_asset(asset, project_id=project_id, use_cache=True) or ""
+                ).strip()
             except Exception:
                 extracted = ""
             return extracted or None

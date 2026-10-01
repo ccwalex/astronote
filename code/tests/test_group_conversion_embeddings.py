@@ -369,7 +369,7 @@ class TestGroupConversionEmbeddings(unittest.TestCase):
             self.assertIsInstance(dropped, int)
             self.assertGreater(dropped, 0)
             self.assertNotIn(extra_key, index.raw_embeddings)
-            self.assertFalse(index.has_embeddings())
+            self.assertFalse(index.has_embeddings)
 
     def test_tracking_npz_meta_and_migration_helper_shapes(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

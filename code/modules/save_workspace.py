@@ -272,6 +272,34 @@ def hydrate_project_assets(workspace: Workspace, assets_dir: str, project_id: st
         _hydrate_one_asset(asset, assets_dir)
 
 
+def hydrate_text_assets(workspace: Workspace, assets_dir: Optional[str]) -> None:
+    """Read-only hydration for search: fill text-asset content from disk, skip binaries."""
+    if not workspace or not assets_dir:
+        return
+    for asset in _iter_assets(workspace):
+        if not _is_text_asset(asset):
+            continue
+        content = getattr(asset, "content", None)
+        if isinstance(content, str) and content != "":
+            continue
+        rel_path = str(getattr(asset, "path", None) or "").strip().replace("\\", "/")
+        if (
+            not rel_path
+            or rel_path.startswith("data:")
+            or os.path.isabs(rel_path)
+            or rel_path.startswith("/api/")
+        ):
+            continue
+        dest = os.path.join(assets_dir, rel_path)
+        if not os.path.isfile(dest):
+            continue
+        try:
+            with open(dest, "r", encoding="utf-8") as handle:
+                asset.content = handle.read()
+        except (OSError, UnicodeDecodeError):
+            continue
+
+
 def strip_asset_content_from_dict(payload: dict) -> dict:
     """Drop in-memory asset bodies so workspace.json stays layout-only."""
     if not isinstance(payload, dict):

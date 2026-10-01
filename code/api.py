@@ -5,6 +5,7 @@ import os
 import shutil
 import uuid
 import re
+import time
 import traceback
 import threading
 from datetime import datetime
@@ -29,7 +30,12 @@ from modules.page_view_lock import (
 )
 from modules.load_workspace import load_workspace, parse_workspace_json_text
 from modules.workspace_sync import workspace_write_lock
-from modules.save_workspace import save_workspace, strip_asset_content_from_dict
+from modules.save_workspace import (
+    assets_dir_from_workspace_path,
+    hydrate_text_assets,
+    save_workspace,
+    strip_asset_content_from_dict,
+)
 from modules.workspace_zip import (
     apply_imported_workspace,
     existing_workspace_requires_confirm,
@@ -359,6 +365,66 @@ def _load_workspace_for_rag(hydrate: bool = True) -> Workspace:
     with workspace_write_lock():
         ensure_baseline(ws, workspace_path=WORKSPACE_PATH)
     return ws
+
+
+SEARCH_CORPUS_TTL_SECONDS = 10.0
+_search_corpus_lock = threading.Lock()
+_search_corpus_cache: dict[str, Any] = {}
+_search_cache_generation = 0
+
+
+def _bump_search_cache_generation() -> None:
+    global _search_cache_generation
+    with _search_corpus_lock:
+        _search_cache_generation += 1
+        _search_corpus_cache.clear()
+
+
+def _search_corpus_mtime_key() -> tuple:
+    from modules.workspace_sqlite import sqlite_path_from_workspace_path
+
+    stamps = []
+    for candidate in (sqlite_path_from_workspace_path(WORKSPACE_PATH), WORKSPACE_PATH):
+        try:
+            stamps.append(os.path.getmtime(candidate))
+        except OSError:
+            stamps.append(None)
+    return tuple(stamps)
+
+
+def _build_search_workspace() -> Workspace:
+    workspace = load_workspace(WORKSPACE_PATH, hydrate=False, persist_repairs=False)
+    assets_dir = assets_dir_from_workspace_path(WORKSPACE_PATH) or ASSETS_DIR
+    hydrate_text_assets(workspace, assets_dir)
+    return workspace
+
+
+def _load_workspace_for_search() -> Workspace:
+    """Cached read-only corpus: metadata load + text-asset hydration, no writes."""
+    global _search_cache_generation
+    if not _workspace_store_exists():
+        # First-run bootstrap keeps the ensure_baseline write behavior.
+        return _load_workspace_for_rag()
+    with _search_corpus_lock:
+        generation = _search_cache_generation
+        entry = _search_corpus_cache.get("workspace")
+        if (
+            entry is not None
+            and entry["generation"] == generation
+            and entry["mtime_key"] == _search_corpus_mtime_key()
+            and time.monotonic() - entry["loaded_at"] < SEARCH_CORPUS_TTL_SECONDS
+        ):
+            return entry["workspace"]
+    workspace = _build_search_workspace()
+    with _search_corpus_lock:
+        if _search_cache_generation == generation:
+            _search_corpus_cache["workspace"] = {
+                "workspace": workspace,
+                "generation": generation,
+                "mtime_key": _search_corpus_mtime_key(),
+                "loaded_at": time.monotonic(),
+            }
+    return workspace
 
 
 def _resolve_rag_runtime_config(endpoint_override: str, api_key_override: str) -> dict[str, str]:
@@ -1093,6 +1159,7 @@ def _post_workspace_sync(
 
         os.makedirs(os.path.dirname(WORKSPACE_PATH), exist_ok=True)
         save_workspace_and_snapshot(ws, WORKSPACE_PATH, "save", coalesce_key=coalesce_key)
+        _bump_search_cache_generation()
         return {
             "status": "ok",
             "tracking_storage": get_tracking_storage_status(data_dir=data_dir),
@@ -1201,6 +1268,7 @@ def post_workspace_commit():
                 live_workspace=ws,
                 dest_path=WORKSPACE_PATH,
             )
+            _bump_search_cache_generation()
             return {"status": "ok", "undo_state": _undo_state_payload(state, ws.id), "committed": True}
     except HTTPException:
         raise
@@ -1515,9 +1583,10 @@ def get_search(
     limit = min(limit, 200)
 
     try:
-        # Read-only search: hydrate bodies from disk without ensure_baseline /
-        # the write lock so search does not contend with page-load traffic.
-        workspace = _load_workspace_from_disk()
+        # Read-only search: metadata load + text-asset hydration via the cached
+        # corpus, no ensure_baseline / write lock so search does not contend
+        # with page-load traffic.
+        workspace = _load_workspace_for_search()
         results = search_workspace(
             workspace,
             query,
@@ -1544,7 +1613,7 @@ def post_rag_search(data: dict = Body(...)):
     max_entries = _coerce_positive_int(data.get("max_entries"), 20)
 
     try:
-        workspace = _load_workspace_for_rag()
+        workspace = _load_workspace_for_search()
 
         embedding_index = None
         if mode in {"embedding", "mixed"}:
@@ -1604,7 +1673,7 @@ def post_rag_call_llm(data: dict = Body(...)):
 
     try:
         rag_config = _resolve_rag_runtime_config(endpoint_override, api_key_override)
-        workspace = _load_workspace_for_rag()
+        workspace = _load_workspace_for_search()
 
         embedding_index = None
         if mode in {"embedding", "mixed"}:

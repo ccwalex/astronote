@@ -54,7 +54,7 @@ class EmbeddingPersistenceTests(unittest.TestCase):
                 embedding_dim=4,
                 persist_path=persist_path,
             )
-            self.assertTrue(index2.has_embeddings())
+            self.assertTrue(index2.has_embeddings)
             self.assertIn("project-1:asset-1", index2.lookup_metadata)
 
 

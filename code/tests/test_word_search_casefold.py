@@ -50,7 +50,7 @@ def _http_rag_word_search(workspace: Workspace, query: str, *, max_entries: int 
     import api
     from starlette.testclient import TestClient
 
-    with patch.object(api, "_load_workspace_for_rag", return_value=workspace):
+    with patch.object(api, "_load_workspace_for_search", return_value=workspace):
         client = TestClient(api.app)
         response = client.post(
             "/api/rag/search",

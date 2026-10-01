@@ -105,6 +105,19 @@ export function SearchBar({ workspace, onOpenProject, onSelectSpace }: SearchBar
   const [plainSearchError, setPlainSearchError] = useState('');
   const [isPlainSearching, setIsPlainSearching] = useState(false);
   const plainSearchSeqRef = useRef(0);
+  const plainSearchAbortRef = useRef<AbortController | null>(null);
+
+  const abortPlainSearch = () => {
+    const controller = plainSearchAbortRef.current;
+    plainSearchAbortRef.current = null;
+    controller?.abort();
+  };
+
+  useEffect(() => {
+    if (!query.trim()) {
+      abortPlainSearch();
+    }
+  }, [query]);
 
   const folders = useMemo(() => listLibraryFolders(workspace), [workspace]);
 
@@ -207,16 +220,20 @@ export function SearchBar({ workspace, onOpenProject, onSelectSpace }: SearchBar
       setRagError('');
       setRagMasterNodeLinks([]);
       const seq = ++plainSearchSeqRef.current;
+      abortPlainSearch();
+      const controller = new AbortController();
+      plainSearchAbortRef.current = controller;
       setIsPlainSearching(true);
       setPlainSearchFailed(false);
       setPlainSearchError('');
       setServerResults(null);
       try {
-        const rows = await searchWorkspaceServer(normalized);
+        const rows = await searchWorkspaceServer(normalized, { signal: controller.signal });
         if (plainSearchSeqRef.current !== seq) return;
         setServerResults(convertBackendSearchResults(rows, workspace));
       } catch (err: any) {
         if (plainSearchSeqRef.current !== seq) return;
+        if (err?.name === 'AbortError') return;
         setServerResults(null);
         setPlainSearchFailed(true);
         setPlainSearchError(err?.message || 'Server search failed.');
@@ -228,6 +245,7 @@ export function SearchBar({ workspace, onOpenProject, onSelectSpace }: SearchBar
       return;
     }
 
+    abortPlainSearch();
     setIsRAGLoading(true);
     setRagError('');
     setRagAnswer('');

@@ -6,7 +6,14 @@ from types import SimpleNamespace
 
 import numpy as np
 
+from modules.asset_tracking import (
+    asset_requires_embed,
+    compute_asset_checksum,
+    get_asset_tracking_rows,
+    mark_asset_edited,
+)
 from modules.embedding_index import DEFAULT_PERSIST_PATH, WorkspaceEmbeddingIndex
+from modules.embedding_state import is_asset_embedding_up_to_date
 from modules.workspace_search import embedding_search_assets
 
 
@@ -70,7 +77,7 @@ class TestEmbeddingIndexPersistence(unittest.TestCase):
                 persist_path=persist_path,
                 embedding_dim=8,
             )
-            self.assertTrue(restored.has_embeddings())
+            self.assertTrue(restored.has_embeddings)
             self.assertEqual(restored._nn_model, {"kind": "knn"})
             self.assertEqual(restored._umap_model, {"kind": "umap"})
             self.assertEqual(restored._vector_scaler, {"kind": "standard-scaler"})
@@ -91,7 +98,7 @@ class TestEmbeddingIndexPersistence(unittest.TestCase):
             )
             workspace = self._workspace_fixture()
             index.embed_workspace(workspace)
-            self.assertTrue(index.has_embeddings())
+            self.assertTrue(index.has_embeddings)
             self.assertTrue(os.path.exists(persist_path))
             original_keys = list(index._lookup_order)
             original_meta = dict(index.lookup_metadata)
@@ -104,7 +111,7 @@ class TestEmbeddingIndexPersistence(unittest.TestCase):
                 persist_path=persist_path,
                 embedding_dim=8,
             )
-            self.assertTrue(restored.has_embeddings())
+            self.assertTrue(restored.has_embeddings)
             self.assertEqual(call_count["n"], 0)
             self.assertEqual(restored._lookup_order, original_keys)
             self.assertEqual(restored.lookup_metadata, original_meta)
@@ -130,7 +137,7 @@ class TestEmbeddingIndexPersistence(unittest.TestCase):
                 persist_path=persist_path,
                 embedding_dim=8,
             )
-            self.assertFalse(index.has_embeddings())
+            self.assertFalse(index.has_embeddings)
 
     def test_invalid_persist_payload_raises(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -175,6 +182,121 @@ class TestEmbeddingIndexPersistence(unittest.TestCase):
             self.assertIsInstance(removed, bool)
             dropped = index.drop_unkept_assets({"asset-2"})
             self.assertIsInstance(dropped, int)
+
+    def test_has_embeddings_is_bool_property(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            persist_path = os.path.join(tmpdir, "embeddings.pkl")
+            index = WorkspaceEmbeddingIndex(
+                embed_fn=self._embed_fn,
+                persist_path=persist_path,
+                embedding_dim=8,
+            )
+            self.assertFalse(index.has_embeddings)
+            self.assertIsInstance(index.has_embeddings, bool)
+            index.embed_workspace(self._workspace_fixture())
+            self.assertTrue(index.has_embeddings)
+
+    def test_embedding_search_lazy_embeds_empty_index(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            persist_path = os.path.join(tmpdir, "embeddings.pkl")
+            index = WorkspaceEmbeddingIndex(
+                embed_fn=self._embed_fn,
+                persist_path=persist_path,
+                embedding_dim=8,
+            )
+            workspace = self._workspace_fixture()
+            self.assertFalse(index.has_embeddings)
+
+            hits = embedding_search_assets(
+                workspace,
+                "alpha",
+                max_results=2,
+                embedding_index=index,
+            )
+
+            self.assertTrue(hits)
+            self.assertTrue(index.has_embeddings)
+            self.assertIn("project-1:asset-1", index.raw_embeddings)
+
+    def test_embed_asset_records_tracking_and_skips_when_up_to_date(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            persist_path = os.path.join(tmpdir, "embeddings.pkl")
+            call_count = {"n": 0}
+
+            def counting_embed(text: str, input_type: str) -> np.ndarray:
+                call_count["n"] += 1
+                return self._embed_fn(text, input_type)
+
+            index = WorkspaceEmbeddingIndex(
+                embed_fn=counting_embed,
+                persist_path=persist_path,
+                embedding_dim=8,
+            )
+            workspace = self._workspace_fixture()
+            asset = workspace.projects["project-1"].assets["asset-1"]
+
+            self.assertTrue(index.embed_asset("project-1", "asset-1", asset))
+            self.assertEqual(call_count["n"], 1)
+
+            rows = get_asset_tracking_rows(data_dir=tmpdir)
+            row = rows["project-1:asset-1"]
+            checksum = compute_asset_checksum(asset)
+            self.assertEqual(row["content_checksum"], checksum)
+            self.assertEqual(row["embedded_checksum"], checksum)
+            self.assertFalse(asset_requires_embed(row))
+            self.assertTrue(
+                is_asset_embedding_up_to_date(
+                    asset_id="asset-1",
+                    project_id="project-1",
+                    content_checksum=checksum,
+                    data_dir=tmpdir,
+                )
+            )
+
+            call_count["n"] = 0
+            self.assertFalse(index.embed_asset("project-1", "asset-1", asset))
+            self.assertEqual(call_count["n"], 0)
+
+    def test_embedding_search_reembeds_stale_tracked_asset(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            persist_path = os.path.join(tmpdir, "embeddings.pkl")
+            call_count = {"n": 0}
+
+            def counting_embed(text: str, input_type: str) -> np.ndarray:
+                call_count["n"] += 1
+                return self._embed_fn(text, input_type)
+
+            index = WorkspaceEmbeddingIndex(
+                embed_fn=counting_embed,
+                persist_path=persist_path,
+                embedding_dim=8,
+            )
+            workspace = self._workspace_fixture()
+            asset = workspace.projects["project-1"].assets["asset-1"]
+            index.embed_asset("project-1", "asset-1", asset)
+            original_vector = np.array(index.raw_embeddings["project-1:asset-1"], copy=True)
+
+            asset.content = "alpha beta gamma updated content"
+            new_checksum = compute_asset_checksum(asset)
+            mark_asset_edited(
+                asset_id="asset-1",
+                project_id="project-1",
+                filename=asset.filename,
+                content_checksum=new_checksum,
+                data_dir=tmpdir,
+            )
+
+            call_count["n"] = 0
+            hits = embedding_search_assets(
+                workspace,
+                "updated",
+                max_results=2,
+                embedding_index=index,
+            )
+
+            self.assertTrue(hits)
+            self.assertGreater(call_count["n"], 0)
+            self.assertFalse(np.allclose(original_vector, index.raw_embeddings["project-1:asset-1"]))
 
 
 if __name__ == "__main__":
