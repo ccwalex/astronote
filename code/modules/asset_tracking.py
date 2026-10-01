@@ -815,6 +815,10 @@ def get_asset_tracking_rows(data_dir: str = DATA_DIR) -> Dict[str, Dict[str, str
     return _load_all_rows(data_dir)
 
 
+def tracking_load_failed() -> bool:
+    return bool(_LOAD_FAILED)
+
+
 def export_asset_tracking_csv(data_dir: str = DATA_DIR) -> str:
     csv_path = tracking_csv_path(data_dir)
     rows = _load_all_rows(data_dir)

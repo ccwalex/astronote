@@ -5,7 +5,7 @@ import os
 import pickle
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any, Callable, Optional
@@ -24,6 +24,18 @@ MIN_TAIL_WORDS = 30
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_PERSIST_PATH = str(_PROJECT_ROOT / "data" / "embeddings.pkl")
+
+
+def _quarantine_corrupt_file(path: Path, label: str) -> Optional[str]:
+    if not path.exists():
+        return None
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    dest = path.with_name(f"{path.name}.{label}.{stamp}")
+    try:
+        path.replace(dest)
+        return str(dest)
+    except Exception:
+        return None
 
 
 def build_asset_lookup_key(project_id: str, asset_id: str) -> str:
@@ -158,8 +170,83 @@ class WorkspaceEmbeddingIndex:
         self._umap_model = None
         self._nn_model = None
         self._vector_scaler = None
+        self._load_error: Optional[str] = None
+        self._load_recovered: bool = False
 
         self.load_from_disk()
+
+    @property
+    def load_error(self) -> Optional[str]:
+        return self._load_error
+
+    @property
+    def load_recovered(self) -> bool:
+        return self._load_recovered
+
+    @property
+    def is_healthy(self) -> bool:
+        return self._load_error is None and self.has_embeddings
+
+    def _reset_index_state(self) -> None:
+        self.raw_embeddings = {}
+        self.reduced_embeddings = {}
+        self.lookup_metadata = {}
+        self._lookup_order = []
+        self._raw_matrix = None
+        self._reduced_matrix = None
+        self._umap_model = None
+        self._nn_model = None
+        self._vector_scaler = None
+
+    def _coerce_embedding_vector(self, value: Any) -> Optional[np.ndarray]:
+        try:
+            vector = np.asarray(value, dtype=float).reshape(-1)
+        except Exception:
+            return None
+        if vector.size == 0 or not np.all(np.isfinite(vector)):
+            return None
+        return vector
+
+    def _sanitize_loaded_payload(self) -> int:
+        """Drop corrupt lookup keys; return count removed."""
+        removed = 0
+        clean_raw: dict[str, np.ndarray] = {}
+        clean_meta: dict[str, dict[str, Any]] = {}
+        clean_order: list[str] = []
+
+        for lookup_key in self._lookup_order:
+            vector = self._coerce_embedding_vector(self.raw_embeddings.get(lookup_key))
+            if vector is None:
+                removed += 1
+                continue
+            meta = self.lookup_metadata.get(lookup_key)
+            if not isinstance(meta, dict):
+                removed += 1
+                continue
+            project_id = str(meta.get("project_id") or "").strip()
+            asset_id = str(meta.get("asset_id") or "").strip()
+            if not project_id or not asset_id:
+                removed += 1
+                continue
+            clean_raw[lookup_key] = vector
+            clean_meta[lookup_key] = meta
+            clean_order.append(lookup_key)
+
+        self.raw_embeddings = clean_raw
+        self.lookup_metadata = clean_meta
+        self._lookup_order = clean_order
+        self.reduced_embeddings = {
+            key: value
+            for key, value in self.reduced_embeddings.items()
+            if key in clean_raw
+        }
+        return removed
+
+    def _recover_from_corrupt_load(self, path: Path, reason: str) -> None:
+        self._reset_index_state()
+        self._load_error = reason
+        self._load_recovered = True
+        _quarantine_corrupt_file(path, "corrupt")
 
     def save_to_disk(self) -> None:
         if not self.persist_path:
@@ -188,46 +275,68 @@ class WorkspaceEmbeddingIndex:
         path = Path(self.persist_path)
         if not path.exists():
             return
-        with path.open("rb") as f:
-            data = pickle.load(f)
+
+        try:
+            with path.open("rb") as f:
+                data = pickle.load(f)
+        except Exception as exc:
+            self._recover_from_corrupt_load(path, f"unreadable embedding index: {exc}")
+            return
 
         if not isinstance(data, dict):
-            raise ValueError(f"Invalid embedding index payload: {path}")
-
-        self.raw_embeddings = data.get("raw_embeddings", {}) or {}
-        self.reduced_embeddings = data.get("reduced_embeddings", {}) or {}
-        self.lookup_metadata = data.get("lookup_metadata", {}) or {}
-        loaded_order = data.get("_lookup_order", []) or []
-        self._lookup_order = [k for k in loaded_order if k in self.raw_embeddings]
-
-        self._umap_model = data.get("_umap_model")
-        self._nn_model = data.get("_nn_model")
-        self._vector_scaler = data.get("_vector_scaler")
-
-        if not self._lookup_order:
-            self._raw_matrix = None
-            self._reduced_matrix = None
-            self.reduced_embeddings = {}
-            self._umap_model = None
-            self._nn_model = None
+            self._recover_from_corrupt_load(path, "invalid embedding index payload (not a dict)")
             return
 
-        self._raw_matrix = np.vstack([self.raw_embeddings[key] for key in self._lookup_order])
+        try:
+            self.raw_embeddings = data.get("raw_embeddings", {}) or {}
+            self.reduced_embeddings = data.get("reduced_embeddings", {}) or {}
+            self.lookup_metadata = data.get("lookup_metadata", {}) or {}
+            loaded_order = data.get("_lookup_order", []) or []
+            if not isinstance(loaded_order, list):
+                loaded_order = []
+            self._lookup_order = [str(k) for k in loaded_order if str(k) in self.raw_embeddings]
 
-        if all(key in self.reduced_embeddings for key in self._lookup_order):
-            reduced = np.vstack([self.reduced_embeddings[key] for key in self._lookup_order])
-            reduced = self._to_fixed_dim(np.asarray(reduced, dtype=float))
-            self._reduced_matrix = reduced
-            self.reduced_embeddings = {
-                key: reduced[idx]
-                for idx, key in enumerate(self._lookup_order)
-            }
-        else:
-            self._refit_indexes()
-            return
+            self._umap_model = data.get("_umap_model")
+            self._nn_model = data.get("_nn_model")
+            self._vector_scaler = data.get("_vector_scaler")
 
-        if self._nn_model is None:
-            self._refit_indexes()
+            dropped = self._sanitize_loaded_payload()
+            if dropped:
+                self._load_recovered = True
+
+            if not self._lookup_order:
+                self._reset_index_state()
+                if dropped:
+                    self._load_error = f"dropped {dropped} corrupt embedding entries"
+                return
+
+            try:
+                self._raw_matrix = np.vstack([self.raw_embeddings[key] for key in self._lookup_order])
+            except Exception as exc:
+                self._recover_from_corrupt_load(path, f"embedding matrix rebuild failed: {exc}")
+                return
+
+            if all(key in self.reduced_embeddings for key in self._lookup_order):
+                try:
+                    reduced = np.vstack([self.reduced_embeddings[key] for key in self._lookup_order])
+                    reduced = self._to_fixed_dim(np.asarray(reduced, dtype=float))
+                    self._reduced_matrix = reduced
+                    self.reduced_embeddings = {
+                        key: reduced[idx]
+                        for idx, key in enumerate(self._lookup_order)
+                    }
+                except Exception:
+                    self._refit_indexes()
+            else:
+                self._refit_indexes()
+
+            if self._nn_model is None and self._lookup_order:
+                self._refit_indexes()
+
+            if not self._lookup_order or self._reduced_matrix is None:
+                self._load_error = self._load_error or "embedding index partially loaded; search unavailable until re-embed"
+        except Exception as exc:
+            self._recover_from_corrupt_load(path, f"embedding index load failed: {exc}")
 
     @property
     def has_embeddings(self) -> bool:
@@ -507,52 +616,58 @@ class WorkspaceEmbeddingIndex:
             return
 
     def build_neighbor_matrix(self, max_neighbors: int = 5) -> dict[str, list[dict[str, Any]]]:
-        if max_neighbors <= 0 or not self._lookup_order:
+        if max_neighbors <= 0 or not self._lookup_order or self._reduced_matrix is None:
             return {}
 
         max_neighbors = min(max_neighbors, len(self._lookup_order))
         matrix: dict[str, list[dict[str, Any]]] = {}
 
-        for lookup_key in self._lookup_order:
-            query_vec = self.reduced_embeddings.get(lookup_key)
-            if query_vec is None:
-                continue
-
-            neighbors = self._kneighbors(query_vec, max_neighbors)
-            payload = []
-            for candidate_key, distance in neighbors:
-                if candidate_key == lookup_key:
+        try:
+            for lookup_key in self._lookup_order:
+                query_vec = self.reduced_embeddings.get(lookup_key)
+                if query_vec is None:
                     continue
-                payload.append(
-                    {
-                        "lookup_key": candidate_key,
-                        "distance": float(distance),
-                        "score": float(1.0 - distance),
-                        "metadata": self.lookup_metadata.get(candidate_key, {}),
-                    }
-                )
-            matrix[lookup_key] = payload
+
+                neighbors = self._kneighbors(query_vec, max_neighbors)
+                payload = []
+                for candidate_key, distance in neighbors:
+                    if candidate_key == lookup_key:
+                        continue
+                    payload.append(
+                        {
+                            "lookup_key": candidate_key,
+                            "distance": float(distance),
+                            "score": float(1.0 - distance),
+                            "metadata": self.lookup_metadata.get(candidate_key, {}),
+                        }
+                    )
+                matrix[lookup_key] = payload
+        except Exception:
+            return {}
 
         return matrix
 
     def search_query(self, query: str, max_results: int = 10) -> list[dict[str, Any]]:
         query = query.strip()
-        if not query or max_results <= 0 or not self._lookup_order:
+        if not query or max_results <= 0 or not self._lookup_order or self._reduced_matrix is None:
             return []
 
-        raw = self._embed_text(query, input_type="search_query")
-        reduced = self._reduce_query(raw)
-
-        neighbors = self._kneighbors(reduced, min(max_results, len(self._lookup_order)))
-        return [
-            {
-                "lookup_key": lookup_key,
-                "distance": float(distance),
-                "score": float(1.0 - distance),
-                "metadata": self.lookup_metadata.get(lookup_key, {}),
-            }
-            for lookup_key, distance in neighbors
-        ]
+        try:
+            raw = self._embed_text(query, input_type="search_query")
+            reduced = self._reduce_query(raw)
+            neighbors = self._kneighbors(reduced, min(max_results, len(self._lookup_order)))
+            return [
+                {
+                    "lookup_key": lookup_key,
+                    "distance": float(distance),
+                    "score": float(1.0 - distance),
+                    "metadata": self.lookup_metadata.get(lookup_key, {}),
+                }
+                for lookup_key, distance in neighbors
+                if lookup_key in self.lookup_metadata
+            ]
+        except Exception:
+            return []
 
     def _asset_text_for_embedding(self, asset, project_id: Optional[str] = None) -> Optional[str]:
         if asset.kind == "image":

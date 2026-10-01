@@ -200,11 +200,18 @@ def reconcile_embedding_state_with_workspace(*, workspace: object, data_dir: str
                 if not asset_id_str:
                     continue
 
-                if not bool(get_asset_embedding_properties(asset).get("embeddable")):
+                try:
+                    embeddable = bool(get_asset_embedding_properties(asset).get("embeddable"))
+                except Exception:
+                    continue
+                if not embeddable:
                     continue
 
                 key = _asset_key(asset_id=asset_id_str, project_id=project_id_str)
-                checksum = compute_asset_checksum(asset)
+                try:
+                    checksum = compute_asset_checksum(asset)
+                except Exception:
+                    continue
                 current_assets[key] = {
                     "asset_key": key,
                     "project_id": project_id_str,

@@ -246,16 +246,16 @@ export function LibrarySidebar({
   const canRefreshStatus = !statusBusy;
   const canEmbed = !statusBusy;
 
-  const indicatorColor = statusError
-    ? '#999'
+  const statusWarning = embeddingTrackingStatus?.status_error || statusError;
+  const indicatorColor = statusWarning
+    ? '#c77d00'
     : embeddingTrackingStatus == null
       ? '#bbb'
       : hasOutdatedEmbeddings
         ? '#d9534f'
         : '#2e7d32';
-
-  const indicatorText = statusError
-    ? 'Embedding status unavailable'
+  const indicatorText = statusWarning
+    ? 'Embedding status partial — click to retry'
     : isRefreshingStatus
       ? 'Refreshing embedding status...'
       : embeddingTrackingStatus
@@ -343,6 +343,11 @@ export function LibrarySidebar({
             Embed
           </button>
         </div>
+        {statusWarning ? (
+          <div style={{ marginTop: '6px', fontSize: '11px', color: '#8a5a00' }}>
+            {statusWarning}
+          </div>
+        ) : null}
         {needsMigration ? (
           <div style={{ marginTop: '6px', fontSize: '11px', color: '#8a5a00' }}>
             Asset tracking CSV can be upgraded. Use the migration prompt to transform, keep CSV, or defer.
