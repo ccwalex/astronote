@@ -734,7 +734,6 @@ export interface EmbeddingTrackingStatus {
   quarantined_rows?: number;
   csv_readable?: boolean;
   migration_skipped?: boolean;
-  status_error?: string;
 }
 
 export type AssetTrackingStorageStatus = EmbeddingTrackingStatus;
@@ -772,8 +771,7 @@ export function parseAssetTrackingStorageStatus(data: unknown): AssetTrackingSto
     active_backend: asOptionalString(raw.active_backend),
     quarantined_rows: asOptionalNumber(raw.quarantined_rows),
     csv_readable: asOptionalBoolean(raw.csv_readable),
-    migration_skipped: asOptionalBoolean(raw.migration_skipped),
-    status_error: asOptionalString(raw.status_error)
+    migration_skipped: asOptionalBoolean(raw.migration_skipped)
   };
 }
 

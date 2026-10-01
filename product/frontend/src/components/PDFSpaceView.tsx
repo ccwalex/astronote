@@ -13,8 +13,6 @@ export interface PDFSpaceViewProps {
 const DEFAULT_PDF_WIDTH = 560;
 const DEFAULT_PDF_HEIGHT = 700;
 const PDF_POINT_TO_CSS_PX = 96 / 72;
-/** Skip synchronous base64 decode/regex for very large inline PDF payloads. */
-const MAX_INLINE_PDF_PARSE_CHARS = 256 * 1024;
 
 const TOP_BAR_HEIGHT = 34;
 const SPACE_HORIZONTAL_CHROME = 20;
@@ -37,12 +35,8 @@ function extractPDFDataFromDataUrl(dataUrl: string): { width: number; height: nu
     return null;
   }
 
-  const base64 = dataUrl.slice(base64Start + 'base64,'.length);
-  if (base64.length > MAX_INLINE_PDF_PARSE_CHARS) {
-    return null;
-  }
-
   try {
+    const base64 = dataUrl.slice(base64Start + 'base64,'.length);
     const binaryString = atob(base64);
 
     let totalPages = 0;
@@ -264,20 +258,11 @@ export const PDFSpaceView: React.FC<PDFSpaceViewProps> = ({
   const lastResizeSignatureRef = useRef<string | null>(null);
 
   const extractedData = useMemo(() => {
-    if (!mountContent || !hasPDFContent || !asset?.content) {
-      return null;
+    if (hasPDFContent && asset?.content) {
+      return extractPDFDataFromDataUrl(asset.content);
     }
-    const fromMetadata = Number(asset.metadata?.total_pages);
-    if (Number.isInteger(fromMetadata) && fromMetadata > 0) {
-      const dims = normalizePageDimensions(asset)[1];
-      return {
-        width: dims?.width ?? DEFAULT_PDF_WIDTH,
-        height: dims?.height ?? DEFAULT_PDF_HEIGHT,
-        totalPages: fromMetadata,
-      };
-    }
-    return extractPDFDataFromDataUrl(asset.content);
-  }, [mountContent, hasPDFContent, asset?.content, asset?.metadata]);
+    return null;
+  }, [hasPDFContent, asset?.content]);
 
   const selectedPages = useMemo(() => normalizeSelectedPages(asset), [asset]);
   const metadataPageDimensions = useMemo(() => normalizePageDimensions(asset), [asset]);

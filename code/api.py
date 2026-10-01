@@ -65,7 +65,6 @@ from modules.asset_tracking import (
     migrate_asset_tracking_store,
     skip_asset_tracking_migration,
     get_tracking_storage_status,
-    tracking_load_failed,
 )
 from modules.embedding_index import WorkspaceEmbeddingIndex
 from modules.workspace_storage import load_library_config, save_library_config
@@ -133,46 +132,6 @@ _page_load_gate = threading.Condition()
 
 def _asset_tracking_data_dir() -> str:
     return data_dir_from_workspace_path(WORKSPACE_PATH) or os.path.join(PROJECT_ROOT, "data")
-
-
-def _embedding_persist_path() -> str:
-    return os.path.join(_asset_tracking_data_dir(), "embeddings.pkl")
-
-
-def _embedding_index_status(index: Optional[WorkspaceEmbeddingIndex]) -> dict[str, Any]:
-    if index is None:
-        return {
-            "available": False,
-            "healthy": False,
-            "entry_count": 0,
-            "load_error": "embedding index unavailable",
-            "recovered_from_corrupt": False,
-        }
-    return {
-        "available": bool(index.has_embeddings),
-        "healthy": bool(index.is_healthy),
-        "entry_count": len(index._lookup_order),
-        "load_error": index.load_error,
-        "recovered_from_corrupt": bool(index.load_recovered),
-    }
-
-
-def _open_embedding_index_safe() -> tuple[Optional[WorkspaceEmbeddingIndex], dict[str, Any]]:
-    try:
-        index = WorkspaceEmbeddingIndex(
-            prompt_for_missing=False,
-            persist_path=_embedding_persist_path(),
-        )
-        return index, _embedding_index_status(index)
-    except Exception as e:
-        traceback.print_exc()
-        return None, {
-            "available": False,
-            "healthy": False,
-            "entry_count": 0,
-            "load_error": str(e),
-            "recovered_from_corrupt": False,
-        }
 
 
 def _acquire_page_load_priority():
@@ -692,22 +651,6 @@ def _find_tracking_row(tracking_rows: dict[str, dict[str, str]], project_id: str
     return tracking_rows.get(asset_id)
 
 
-def _snapshot_from_tracking_rows(tracking_rows: dict[str, dict[str, str]]) -> dict[str, int]:
-    outdated_count = 0
-    for row in tracking_rows.values():
-        try:
-            if asset_requires_embed(row):
-                outdated_count += 1
-        except Exception:
-            outdated_count += 1
-    return {
-        "workspace_asset_count": len(tracking_rows),
-        "embeddable_asset_count": 0,
-        "non_embeddable_asset_count": 0,
-        "outdated_count": outdated_count,
-    }
-
-
 def _workspace_embedding_tracking_snapshot(
     workspace: Workspace,
     tracking_rows: dict[str, dict[str, str]],
@@ -721,22 +664,14 @@ def _workspace_embedding_tracking_snapshot(
         for asset_id, asset in project.assets.items():
             total_assets += 1
 
-            try:
-                properties = get_asset_embedding_properties(asset)
-            except Exception:
-                non_embeddable_asset_count += 1
-                continue
-
+            properties = get_asset_embedding_properties(asset)
             if not bool(properties.get("embeddable")):
                 non_embeddable_asset_count += 1
                 continue
 
             embeddable_asset_count += 1
-            try:
-                row = _find_tracking_row(tracking_rows, project_id, asset_id)
-                if row is None or _tracking_requires_embed(row):
-                    outdated_count += 1
-            except Exception:
+            row = _find_tracking_row(tracking_rows, project_id, asset_id)
+            if row is None or _tracking_requires_embed(row):
                 outdated_count += 1
 
     return {
@@ -1461,81 +1396,26 @@ def post_asset_tracking_migrate_skip():
 
 @app.get("/api/asset-tracking/status")
 def get_asset_tracking_status():
-    data_dir = _asset_tracking_data_dir()
-    status_error: Optional[str] = None
-    workspace: Optional[Workspace] = None
-
     try:
-        if _workspace_store_exists():
-            workspace = _load_workspace_for_search()
-    except Exception as e:
-        status_error = str(e)
-        traceback.print_exc()
+        workspace = _load_workspace_for_rag()
+        reconcile_workspace_asset_tracking(workspace=workspace, data_dir=os.path.join(PROJECT_ROOT, "data"))
 
-    if workspace is not None:
-        try:
-            reconcile_workspace_asset_tracking(workspace=workspace, data_dir=data_dir)
-        except Exception as e:
-            status_error = status_error or f"reconcile failed: {e}"
-            traceback.print_exc()
+        rows = get_asset_tracking_rows(data_dir=os.path.join(PROJECT_ROOT, "data"))
+        snapshot = _workspace_embedding_tracking_snapshot(workspace, rows)
+        outdated_count = snapshot["outdated_count"]
 
-    rows: dict[str, dict[str, str]] = {}
-    try:
-        rows = get_asset_tracking_rows(data_dir=data_dir)
-        if tracking_load_failed() and not rows:
-            status_error = status_error or (
-                "asset tracking store failed to load; migrate or restore NPZ tracking data"
-            )
-    except Exception as e:
-        status_error = status_error or f"tracking load failed: {e}"
-        traceback.print_exc()
-
-    try:
-        storage = get_tracking_storage_status(data_dir=data_dir)
-    except Exception as e:
-        storage = {}
-        status_error = status_error or f"tracking storage status failed: {e}"
-        traceback.print_exc()
-
-    if workspace is not None and rows:
-        try:
-            snapshot = _workspace_embedding_tracking_snapshot(workspace, rows)
-        except Exception as e:
-            status_error = status_error or f"embedding snapshot failed: {e}"
-            snapshot = _snapshot_from_tracking_rows(rows)
-    elif rows:
-        snapshot = _snapshot_from_tracking_rows(rows)
-    else:
-        snapshot = {
-            "workspace_asset_count": 0,
-            "embeddable_asset_count": 0,
-            "non_embeddable_asset_count": 0,
-            "outdated_count": 0,
+        return {
+            "has_outdated_embeddings": outdated_count > 0,
+            "outdated_count": outdated_count,
+            "tracked_asset_count": len(rows),
+            "workspace_asset_count": snapshot["workspace_asset_count"],
+            "embeddable_asset_count": snapshot["embeddable_asset_count"],
+            "non_embeddable_asset_count": snapshot["non_embeddable_asset_count"],
+            "last_checked_time": datetime.utcnow().isoformat() + "Z",
         }
-
-    _, embedding_status = _open_embedding_index_safe()
-    if embedding_status.get("load_error") and not embedding_status.get("available"):
-        status_error = status_error or str(embedding_status.get("load_error"))
-
-    outdated_count = snapshot["outdated_count"]
-    payload = {
-        "has_outdated_embeddings": outdated_count > 0,
-        "outdated_count": outdated_count,
-        "tracked_asset_count": len(rows),
-        "workspace_asset_count": snapshot["workspace_asset_count"],
-        "embeddable_asset_count": snapshot["embeddable_asset_count"],
-        "non_embeddable_asset_count": snapshot["non_embeddable_asset_count"],
-        "last_checked_time": datetime.utcnow().isoformat() + "Z",
-        "tracking_backend": storage.get("active_backend"),
-        "needs_migration": storage.get("needs_migration"),
-        "quarantined_rows": storage.get("quarantined_rows"),
-        "csv_readable": storage.get("csv_readable"),
-        "migration_skipped": storage.get("migration_skipped"),
-        "embedding_index": embedding_status,
-    }
-    if status_error:
-        payload["status_error"] = status_error
-    return payload
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/asset-tracking/embeddable-log")
@@ -1566,22 +1446,13 @@ def post_embed_all_assets():
 
 
 def _embed_all_assets_locked():
-        data_dir = _asset_tracking_data_dir()
-        workspace = _load_workspace_for_search()
-        try:
-            reconcile_workspace_asset_tracking(workspace=workspace, data_dir=data_dir)
-        except Exception:
-            traceback.print_exc()
+        workspace = _load_workspace_for_rag()
+        reconcile_workspace_asset_tracking(workspace=workspace, data_dir=os.path.join(PROJECT_ROOT, "data"))
 
-        tracking_rows = get_asset_tracking_rows(data_dir=data_dir)
+        tracking_rows = get_asset_tracking_rows(data_dir=os.path.join(PROJECT_ROOT, "data"))
         snapshot_before = _workspace_embedding_tracking_snapshot(workspace, tracking_rows)
 
-        embedding_index, _ = _open_embedding_index_safe()
-        if embedding_index is None:
-            embedding_index = WorkspaceEmbeddingIndex(
-                prompt_for_missing=False,
-                persist_path=_embedding_persist_path(),
-            )
+        embedding_index = WorkspaceEmbeddingIndex(prompt_for_missing=False, persist_path=os.path.join(PROJECT_ROOT, "data", "embeddings.pkl"))
 
         total_assets = 0
         embeddable_assets_total = 0
@@ -1595,26 +1466,17 @@ def _embed_all_assets_locked():
             for asset_id, asset in project.assets.items():
                 total_assets += 1
 
-                try:
-                    properties = get_asset_embedding_properties(asset)
-                except Exception as e:
-                    non_embeddable_assets += 1
-                    failed_assets.append({"asset_id": asset_id, "error": str(e)})
-                    continue
-
+                properties = get_asset_embedding_properties(asset)
                 if not bool(properties.get("embeddable")):
                     non_embeddable_assets += 1
                     continue
 
                 embeddable_assets_total += 1
 
-                try:
-                    row = _find_tracking_row(tracking_rows, project_id, asset_id)
-                    if row is not None and not _tracking_requires_embed(row):
-                        up_to_date_assets += 1
-                        continue
-                except Exception as e:
-                    failed_assets.append({"asset_id": asset_id, "error": str(e)})
+                row = _find_tracking_row(tracking_rows, project_id, asset_id)
+                if row is not None and not _tracking_requires_embed(row):
+                    up_to_date_assets += 1
+                    continue
 
                 pending_embeds.append((project_id, asset_id, asset))
 
@@ -1626,7 +1488,7 @@ def _embed_all_assets_locked():
                         if embed_results.get((project_id, asset_id)):
                             embedded_assets += 1
                             mark_asset_embedded(
-                                data_dir=data_dir,
+                                data_dir=os.path.join(PROJECT_ROOT, "data"),
                                 asset_id=asset_id,
                                 project_id=project_id,
                                 filename=getattr(asset, "filename", None),
@@ -1640,13 +1502,17 @@ def _embed_all_assets_locked():
         try:
             embedding_index.drop_unkept_assets(_kept_asset_ids_for_embeddings(workspace))
         except Exception:
-            traceback.print_exc()
+            pass
 
-        tracking_rows_after = get_asset_tracking_rows(data_dir=data_dir)
-        try:
-            snapshot_after = _workspace_embedding_tracking_snapshot(workspace, tracking_rows_after)
-        except Exception:
-            snapshot_after = _snapshot_from_tracking_rows(tracking_rows_after)
+        nearest_neighbor_matrix: dict[str, Any] = {}
+        if embedded_assets > 0:
+            try:
+                nearest_neighbor_matrix = embedding_index.build_neighbor_matrix(max_neighbors=5)
+            except Exception:
+                nearest_neighbor_matrix = {}
+
+        tracking_rows_after = get_asset_tracking_rows(data_dir=os.path.join(PROJECT_ROOT, "data"))
+        snapshot_after = _workspace_embedding_tracking_snapshot(workspace, tracking_rows_after)
 
         return {
             "status": "ok",
@@ -1658,9 +1524,10 @@ def _embed_all_assets_locked():
             "up_to_date_assets": up_to_date_assets,
             "skipped_assets": embeddable_assets_total - embedded_assets,
             "outdated_after": snapshot_after["outdated_count"],
+            "nearest_neighbor_entry_count": len(nearest_neighbor_matrix),
+            "nearest_neighbor_matrix": nearest_neighbor_matrix,
             "failed_assets": failed_assets,
             "last_embedded_time": datetime.utcnow().isoformat() + "Z",
-            "embedding_index": _embedding_index_status(embedding_index),
         }
 
 
@@ -1757,9 +1624,11 @@ def post_rag_search(data: dict = Body(...)):
         workspace = _load_workspace_for_search()
 
         embedding_index = None
-        embedding_status: dict[str, Any] = {"available": False, "healthy": False}
         if mode in {"embedding", "mixed"}:
-            embedding_index, embedding_status = _open_embedding_index_safe()
+            try:
+                embedding_index = WorkspaceEmbeddingIndex(prompt_for_missing=False, persist_path=os.path.join(PROJECT_ROOT, "data", "embeddings.pkl"))
+            except Exception:
+                embedding_index = None
 
         rag_kwargs = _rag_retriever_kwargs(data)
         retrieved_entries = retrieve_rag_assets(
@@ -1785,7 +1654,6 @@ def post_rag_search(data: dict = Body(...)):
             "master_nodes": master_nodes,
             "retrieved_entries": retrieved_entries,
             "search_results": keyword_results,
-            "embedding_index": embedding_status,
         }
     except HTTPException:
         raise
@@ -1816,9 +1684,11 @@ def post_rag_call_llm(data: dict = Body(...)):
         workspace = _load_workspace_for_search()
 
         embedding_index = None
-        embedding_status: dict[str, Any] = {"available": False, "healthy": False}
         if mode in {"embedding", "mixed"}:
-            embedding_index, embedding_status = _open_embedding_index_safe()
+            try:
+                embedding_index = WorkspaceEmbeddingIndex(prompt_for_missing=False, persist_path=os.path.join(PROJECT_ROOT, "data", "embeddings.pkl"))
+            except Exception:
+                embedding_index = None
 
         rag_kwargs = _rag_retriever_kwargs(data)
         retrieved_entries = retrieve_rag_assets(

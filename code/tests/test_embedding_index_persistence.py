@@ -139,72 +139,29 @@ class TestEmbeddingIndexPersistence(unittest.TestCase):
             )
             self.assertFalse(index.has_embeddings)
 
-    def test_invalid_persist_payload_recovers_to_empty_index(self) -> None:
+    def test_invalid_persist_payload_raises(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             persist_path = os.path.join(tmpdir, "embeddings.pkl")
             with open(persist_path, "wb") as f:
                 pickle.dump(["not", "a", "dict"], f)
-            index = WorkspaceEmbeddingIndex(
-                embed_fn=self._embed_fn,
-                persist_path=persist_path,
-                embedding_dim=8,
-            )
-            self.assertFalse(index.has_embeddings)
-            self.assertTrue(index.load_recovered)
-            self.assertIsNotNone(index.load_error)
-            self.assertFalse(os.path.isfile(persist_path))
+            with self.assertRaises(ValueError):
+                WorkspaceEmbeddingIndex(
+                    embed_fn=self._embed_fn,
+                    persist_path=persist_path,
+                    embedding_dim=8,
+                )
 
-    def test_unreadable_persist_file_recovers_to_empty_index(self) -> None:
+    def test_unreadable_persist_file_raises(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             persist_path = os.path.join(tmpdir, "embeddings.pkl")
             with open(persist_path, "wb") as f:
                 f.write(b"not-a-valid-pickle")
-            index = WorkspaceEmbeddingIndex(
-                embed_fn=self._embed_fn,
-                persist_path=persist_path,
-                embedding_dim=8,
-            )
-            self.assertFalse(index.has_embeddings)
-            self.assertTrue(index.load_recovered)
-            self.assertIsNotNone(index.load_error)
-            self.assertFalse(os.path.isfile(persist_path))
-
-    def test_corrupt_lookup_entries_are_dropped_without_crashing(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            persist_path = os.path.join(tmpdir, "embeddings.pkl")
-            payload = {
-                "raw_embeddings": {
-                    "project-1:asset-1": np.array([1.0, 0.0, 0.0], dtype=float),
-                    "project-1:bad": np.array([float("nan"), 0.0], dtype=float),
-                },
-                "reduced_embeddings": {
-                    "project-1:asset-1": np.array([1.0, 0.0], dtype=float),
-                },
-                "lookup_metadata": {
-                    "project-1:asset-1": {
-                        "project_id": "project-1",
-                        "asset_id": "asset-1",
-                    },
-                    "project-1:bad": {"project_id": "project-1", "asset_id": "bad"},
-                },
-                "_lookup_order": ["project-1:asset-1", "project-1:bad"],
-                "_umap_model": None,
-                "_nn_model": None,
-                "_vector_scaler": None,
-            }
-            with open(persist_path, "wb") as f:
-                pickle.dump(payload, f)
-
-            index = WorkspaceEmbeddingIndex(
-                embed_fn=self._embed_fn,
-                persist_path=persist_path,
-                embedding_dim=8,
-            )
-            self.assertTrue(index.has_embeddings)
-            self.assertIn("project-1:asset-1", index.raw_embeddings)
-            self.assertNotIn("project-1:bad", index.raw_embeddings)
-            hits = index.search_query("alpha", max_results=3)
-            self.assertIsInstance(hits, list)
+            with self.assertRaises(Exception):
+                WorkspaceEmbeddingIndex(
+                    embed_fn=self._embed_fn,
+                    persist_path=persist_path,
+                    embedding_dim=8,
+                )
     def test_public_api_includes_remove_asset_and_drop_unkept_assets(self) -> None:
         self.assertTrue(callable(getattr(WorkspaceEmbeddingIndex, "remove_asset", None)))
         self.assertTrue(callable(getattr(WorkspaceEmbeddingIndex, "drop_unkept_assets", None)))
