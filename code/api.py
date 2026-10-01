@@ -1501,6 +1501,36 @@ def get_last_rag_response():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/search")
+def get_search(
+    q: str = Query(...),
+    library_node_id: Optional[str] = Query(None),
+    max_results: Optional[int] = Query(None),
+):
+    query = str(q or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="q is required")
+
+    limit = _coerce_positive_int(max_results, 50)
+    limit = min(limit, 200)
+
+    try:
+        # Read-only search: hydrate bodies from disk without ensure_baseline /
+        # the write lock so search does not contend with page-load traffic.
+        workspace = _load_workspace_from_disk()
+        results = search_workspace(
+            workspace,
+            query,
+            library_node_id=str(library_node_id).strip() if library_node_id else None,
+        )[:limit]
+        return {"status": "ok", "query": query, "search_results": results}
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/rag/search")
 def post_rag_search(data: dict = Body(...)):
     query = str(data.get("query") or data.get("prompt") or "").strip()

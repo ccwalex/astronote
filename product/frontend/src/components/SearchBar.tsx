@@ -1,8 +1,13 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { marked } from 'marked';
+import { searchWorkspaceServer } from '../api';
 import DOMPurify from 'dompurify';
 import { Workspace } from '../types';
-import { SearchResult, searchWorkspace } from '../model/searchWorkspace';
+import {
+  SearchResult,
+  searchWorkspace,
+  convertBackendSearchResults,
+} from '../model/searchWorkspace';
 import {
   callLLM,
   fetchLastRAGResponse,
@@ -95,6 +100,11 @@ export function SearchBar({ workspace, onOpenProject, onSelectSpace }: SearchBar
   const [selectedFolderIds, setSelectedFolderIds] = useState<string[]>([]);
   const [submittedFolderIds, setSubmittedFolderIds] = useState<string[]>([]);
   const [folderError, setFolderError] = useState('');
+  const [serverResults, setServerResults] = useState<SearchResult[] | null>(null);
+  const [plainSearchFailed, setPlainSearchFailed] = useState(false);
+  const [plainSearchError, setPlainSearchError] = useState('');
+  const [isPlainSearching, setIsPlainSearching] = useState(false);
+  const plainSearchSeqRef = useRef(0);
 
   const folders = useMemo(() => listLibraryFolders(workspace), [workspace]);
 
@@ -115,8 +125,11 @@ export function SearchBar({ workspace, onOpenProject, onSelectSpace }: SearchBar
 
   const results = useMemo(() => {
     if (!submittedQuery.trim()) return [];
-    return filterResultsByFolders(workspace, searchWorkspace(workspace, submittedQuery), submittedFolderIds);
-  }, [workspace, submittedQuery, submittedFolderIds]);
+    const base =
+      serverResults ??
+      (plainSearchFailed ? searchWorkspace(workspace, submittedQuery) : []);
+    return filterResultsByFolders(workspace, base, submittedFolderIds);
+  }, [workspace, submittedQuery, submittedFolderIds, serverResults, plainSearchFailed]);
 
   const ragResponse = useMemo<RAGResponseViewModel | null>(() => {
     if (searchMode !== 'rag' || !submittedQuery.trim()) {
@@ -193,6 +206,25 @@ export function SearchBar({ workspace, onOpenProject, onSelectSpace }: SearchBar
       setRagAnswer('');
       setRagError('');
       setRagMasterNodeLinks([]);
+      const seq = ++plainSearchSeqRef.current;
+      setIsPlainSearching(true);
+      setPlainSearchFailed(false);
+      setPlainSearchError('');
+      setServerResults(null);
+      try {
+        const rows = await searchWorkspaceServer(normalized);
+        if (plainSearchSeqRef.current !== seq) return;
+        setServerResults(convertBackendSearchResults(rows));
+      } catch (err: any) {
+        if (plainSearchSeqRef.current !== seq) return;
+        setServerResults(null);
+        setPlainSearchFailed(true);
+        setPlainSearchError(err?.message || 'Server search failed.');
+      } finally {
+        if (plainSearchSeqRef.current === seq) {
+          setIsPlainSearching(false);
+        }
+      }
       return;
     }
 
@@ -200,6 +232,9 @@ export function SearchBar({ workspace, onOpenProject, onSelectSpace }: SearchBar
     setRagError('');
     setRagAnswer('');
     setRagMasterNodeLinks([]);
+    setServerResults(null);
+    setPlainSearchFailed(false);
+    setPlainSearchError('');
 
     const ragPayload = {
       mode: ragMode,
@@ -256,6 +291,8 @@ export function SearchBar({ workspace, onOpenProject, onSelectSpace }: SearchBar
       setRagAnswer(previous.response);
       setRagError('');
       setRagMasterNodeLinks(previous.masterNodeLinks || []);
+      setServerResults(null);
+      setPlainSearchFailed(false);
       setIsRAGLoading(false);
       setShowSearchPanel(true);
       setShowRAGResponse(true);
@@ -365,10 +402,16 @@ export function SearchBar({ workspace, onOpenProject, onSelectSpace }: SearchBar
           onClick={() => {
             void openFolderDialogForSearch();
           }}
-          disabled={!query.trim() || (searchMode === 'rag' && isRAGLoading)}
+          disabled={
+            !query.trim() ||
+            (searchMode === 'rag' && isRAGLoading) ||
+            (searchMode === 'plain' && isPlainSearching)
+          }
           style={{ padding: '0.5rem 0.75rem', cursor: query.trim() ? 'pointer' : 'not-allowed' }}
         >
-          {searchMode === 'rag' && isRAGLoading ? 'Searching...' : 'Search'}
+          {(searchMode === 'rag' && isRAGLoading) || (searchMode === 'plain' && isPlainSearching)
+            ? 'Searching...'
+            : 'Search'}
         </button>
         {submittedQuery && (
           <button
@@ -415,6 +458,11 @@ export function SearchBar({ workspace, onOpenProject, onSelectSpace }: SearchBar
 
           {showResults && (
             <>
+              {plainSearchFailed && plainSearchError && (
+                <div style={{ padding: '0.4rem 0.5rem', fontSize: '0.75rem', color: '#a15d00', backgroundColor: '#fff7e6', borderBottom: '1px solid #eee' }}>
+                  Server search failed, showing cached-page results: {plainSearchError}
+                </div>
+              )}
               {results.length > 0 ? (
                 results.map((r, idx) => (
                   <div

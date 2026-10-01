@@ -429,6 +429,51 @@ export async function putAssetText(
   }
 }
 
+export type BackendSearchResultRow = {
+  id: string;
+  kind: string;
+  label: string;
+  detail: string;
+  project_id?: string;
+  space_id?: string;
+  asset_id?: string;
+  library_node_id?: string;
+};
+
+export type BackendSearchResponse = {
+  status: string;
+  query: string;
+  search_results: BackendSearchResultRow[];
+};
+
+export async function searchWorkspaceServer(
+  q: string,
+  options?: { libraryNodeId?: string; signal?: AbortSignal }
+): Promise<BackendSearchResultRow[]> {
+  const params = new URLSearchParams();
+  params.set('q', q);
+  const libraryNodeId = options?.libraryNodeId;
+  if (typeof libraryNodeId === 'string' && libraryNodeId.trim()) {
+    params.set('library_node_id', libraryNodeId.trim());
+  }
+  const endpoint = `${API_BASE}/search?${params.toString()}`;
+  let response: Response;
+  try {
+    response = await fetch(endpoint, { signal: options?.signal });
+  } catch (err) {
+    throw makeNetworkError('Search workspace', endpoint, err);
+  }
+  if (!response.ok) {
+    const snippet = await getResponseBodySnippet(response);
+    throw new Error(`Failed to search workspace (${response.status} ${response.statusText}) at ${endpoint}${snippet ? `: ${snippet}` : ''}`);
+  }
+  const data = (await response.json()) as BackendSearchResponse | null;
+  if (!data || typeof data !== 'object' || !Array.isArray(data.search_results)) {
+    throw new Error('Search response is missing results');
+  }
+  return data.search_results;
+}
+
 export type WorkspaceUndoState = {
   workspace_id?: string;
   baseline?: string;

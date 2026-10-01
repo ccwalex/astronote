@@ -1,4 +1,5 @@
 import { Workspace, LibraryNode } from '../types';
+import type { BackendSearchResultRow } from '../api';
 
 export interface SearchResult {
   id: string;
@@ -244,4 +245,60 @@ export function searchWorkspace(workspace: Workspace, query: string): SearchResu
   }
 
   return results;
+}
+
+/**
+ * Convert backend /api/search rows (snake_case) to frontend SearchResult,
+ * merging duplicate rows for the same asset (e.g. filename + content hits).
+ * Content-match rows (snippets) win over filename/kind rows.
+ */
+export function convertBackendSearchResults(
+  rows: BackendSearchResultRow[]
+): SearchResult[] {
+  const byKey = new Map<string, SearchResult>();
+
+  for (const row of rows) {
+    if (!row || typeof row !== 'object') continue;
+
+    const projectId = row.project_id || undefined;
+    const assetId = row.asset_id || undefined;
+    const libraryNodeId = row.library_node_id || undefined;
+    const spaceId = row.space_id || undefined;
+
+    const key = assetId && projectId
+      ? `asset:${projectId}:${assetId}`
+      : row.id || `${row.kind}:${row.label}`;
+    if (!key) continue;
+
+    const converted: SearchResult = {
+      id: row.id || key,
+      kind: row.kind || 'unknown',
+      label: row.label || '',
+      detail: row.detail || '',
+      projectId,
+      spaceId,
+      assetId,
+      libraryNodeId,
+    };
+
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, converted);
+      continue;
+    }
+
+    const isContentMatch = (result: SearchResult) =>
+      result.kind === 'markdown_content' || result.kind === 'pdf_content';
+    const preferNext =
+      (isContentMatch(converted) && !isContentMatch(existing)) ||
+      converted.detail.length > existing.detail.length;
+    if (preferNext) {
+      byKey.set(key, {
+        ...converted,
+        detail: converted.detail || existing.detail,
+      });
+    }
+  }
+
+  return Array.from(byKey.values());
 }
