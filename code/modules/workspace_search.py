@@ -249,8 +249,10 @@ def embedding_search_assets(
     allowed_project_ids: Optional[set[str]] = None,
 ) -> list[dict[str, Any]]:
     query = query.strip()
-    if not query or embedding_index is None or not embedding_index.has_embeddings:
+    if not query or embedding_index is None:
         return []
+
+    embedding_index.embed_workspace(workspace)
 
     k = max_results if max_results is not None else 20
     if k <= 0:
@@ -321,16 +323,8 @@ def lookup_space_architecture(project: Project) -> dict[str, dict[str, Any]]:
             "space_id": space_id,
             "kind": space.kind,
             "parent_space_id": space.parent_space_id,
-            "child_space_ids": [
-                child_id
-                for child_id in (space.child_space_ids or [])
-                if child_id in project.spaces
-            ],
-            "asset_ids": [
-                asset_id
-                for asset_id in _space_asset_ids(space)
-                if asset_id in project.assets
-            ],
+            "child_space_ids": list(space.child_space_ids or []),
+            "asset_ids": _space_asset_ids(space),
         }
     return architecture
 
@@ -387,10 +381,7 @@ def _build_space_node(
     if space_id in visited:
         return {"space_id": space_id, "cycle_detected": True}
 
-    space = project.spaces.get(space_id)
-    if space is None:
-        return {"space_id": space_id, "missing": True, "children": [], "assets": []}
-
+    space = project.spaces[space_id]
     visited.add(space_id)
 
     assets_payload = []
@@ -608,8 +599,7 @@ def retrieve_rag_assets(
         if not project:
             continue
         for space_id in _asset_to_space_index(project).get(match["asset_id"], set()):
-            if space_id in project.spaces:
-                hit_space_ids.append(space_id)
+            hit_space_ids.append(space_id)
 
     nearby_space_ids = set(
         retrieve_spaces_within_distance_from_starts(
@@ -661,23 +651,18 @@ def retrieve_rag_assets(
         for asset_id in matched_asset_ids:
             candidate_space_ids.update(asset_to_spaces.get(asset_id, set()))
 
-        master_space_ids = [
-            space_id
-            for space_id in prune_master_spaces(project, candidate_space_ids)
-            if space_id in project.spaces
-        ]
+        master_space_ids = prune_master_spaces(project, candidate_space_ids)
 
-        nodes = []
-        for master_space_id in master_space_ids:
-            node = _build_space_node(
+        nodes = [
+            _build_space_node(
                 project,
                 master_space_id,
                 matched_asset_ids,
                 workspace.id,
                 allowed_space_ids=candidate_space_ids,
             )
-            if not node.get("missing"):
-                nodes.append(node)
+            for master_space_id in master_space_ids
+        ]
 
         orphan_assets = []
         for entry in project_matches:

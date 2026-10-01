@@ -127,7 +127,7 @@ class TestEmbeddingIndexPersistence(unittest.TestCase):
                 embedding_index=restored,
             )
             self.assertTrue(search_hits)
-            self.assertEqual(call_count["n"], 1)
+            self.assertEqual(call_count["n"], 2)
 
     def test_missing_persist_file_starts_empty(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -196,38 +196,7 @@ class TestEmbeddingIndexPersistence(unittest.TestCase):
             index.embed_workspace(self._workspace_fixture())
             self.assertTrue(index.has_embeddings)
 
-    def test_embedding_search_uses_existing_index_without_reembedding(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            persist_path = os.path.join(tmpdir, "embeddings.pkl")
-            call_count = {"n": 0}
-
-            def counting_embed(text: str, input_type: str) -> np.ndarray:
-                call_count["n"] += 1
-                return self._embed_fn(text, input_type)
-
-            index = WorkspaceEmbeddingIndex(
-                embed_fn=counting_embed,
-                persist_path=persist_path,
-                embedding_dim=8,
-            )
-            workspace = self._workspace_fixture()
-            index.embed_workspace(workspace)
-            self.assertTrue(index.has_embeddings)
-            embed_calls = call_count["n"]
-            self.assertGreater(embed_calls, 0)
-
-            call_count["n"] = 0
-            hits = embedding_search_assets(
-                workspace,
-                "alpha",
-                max_results=2,
-                embedding_index=index,
-            )
-
-            self.assertTrue(hits)
-            self.assertEqual(call_count["n"], 1)
-
-    def test_embedding_search_returns_empty_when_index_missing(self) -> None:
+    def test_embedding_search_lazy_embeds_empty_index(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             persist_path = os.path.join(tmpdir, "embeddings.pkl")
             index = WorkspaceEmbeddingIndex(
@@ -245,8 +214,9 @@ class TestEmbeddingIndexPersistence(unittest.TestCase):
                 embedding_index=index,
             )
 
-            self.assertEqual(hits, [])
-            self.assertFalse(index.has_embeddings)
+            self.assertTrue(hits)
+            self.assertTrue(index.has_embeddings)
+            self.assertIn("project-1:asset-1", index.raw_embeddings)
 
     def test_embed_asset_records_tracking_and_skips_when_up_to_date(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -287,7 +257,7 @@ class TestEmbeddingIndexPersistence(unittest.TestCase):
             self.assertFalse(index.embed_asset("project-1", "asset-1", asset))
             self.assertEqual(call_count["n"], 0)
 
-    def test_embedding_search_does_not_reembed_stale_tracked_asset(self) -> None:
+    def test_embedding_search_reembeds_stale_tracked_asset(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             persist_path = os.path.join(tmpdir, "embeddings.pkl")
             call_count = {"n": 0}
@@ -325,8 +295,8 @@ class TestEmbeddingIndexPersistence(unittest.TestCase):
             )
 
             self.assertTrue(hits)
-            self.assertEqual(call_count["n"], 1)
-            self.assertTrue(np.allclose(original_vector, index.raw_embeddings["project-1:asset-1"]))
+            self.assertGreater(call_count["n"], 0)
+            self.assertFalse(np.allclose(original_vector, index.raw_embeddings["project-1:asset-1"]))
 
 
 if __name__ == "__main__":
