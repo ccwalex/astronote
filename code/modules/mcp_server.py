@@ -1,3 +1,4 @@
+import asyncio
 import inspect
 import json
 import mimetypes
@@ -266,16 +267,21 @@ def _call_api(fn, *args, **kwargs):
         raise ValueError(str(exc.detail)) from exc
 
 
-def _load_workspace():
-    from api import _load_workspace_for_rag
+def _load_mcp_workspace():
+    """Cached, non-hydrated workspace for MCP read tools (see mcp_read_cache)."""
+    from modules.mcp_read_cache import get_cached_workspace
 
-    return _load_workspace_for_rag()
+    return get_cached_workspace(_load_workspace_for_rag)
+
+
+def _load_workspace_for_rag():
+    from api import _load_workspace_for_rag as _load
+
+    return _load(hydrate=False)
 
 
 def tool_get_workspace() -> dict[str, Any]:
-    from api import get_workspace
-
-    return _call_api(get_workspace)
+    return _load_mcp_workspace().to_dict()
 
 
 def tool_get_text_format_schema() -> dict[str, Any]:
@@ -290,7 +296,7 @@ def tool_get_asset(id: str) -> dict[str, Any]:
         raise ValueError("id is required")
 
     workspace_payload = None
-    workspace = _load_workspace()
+    workspace = _load_mcp_workspace()
     for project_id, project in workspace.projects.items():
         assets = getattr(project, "assets", {}) or {}
         asset = _dict_get(assets, asset_id)
@@ -428,7 +434,7 @@ def resource_workspace() -> str:
 
 
 def resource_project(id: str) -> str:
-    workspace = _load_workspace()
+    workspace = _load_mcp_workspace()
     project = _dict_get(workspace.projects, id)
     if project is None:
         raise ValueError(f"Project not found: {id}")
@@ -437,7 +443,7 @@ def resource_project(id: str) -> str:
 
 
 def resource_space(id: str) -> str:
-    workspace = _load_workspace()
+    workspace = _load_mcp_workspace()
     for project_id, project in workspace.projects.items():
         spaces = getattr(project, "spaces", {}) or {}
         space = _dict_get(spaces, id)
@@ -726,7 +732,10 @@ def _stub_fastmcp(name="Astronote"):
                     })
                     await send({"type": "http.response.body", "body": b""})
                     return
-                await _send_json(send, 200, self._jsonrpc_from_payload(payload))
+                # Sync tool/resource execution must not block the event loop,
+                # otherwise human requests freeze while MCP work runs.
+                result = await asyncio.to_thread(self._jsonrpc_from_payload, payload)
+                await _send_json(send, 200, result)
             return asgi_app
 
         def streamable_http_app(self):

@@ -28,6 +28,7 @@ from modules.page_view_lock import (
     leave as page_presence_leave,
 )
 from modules.load_workspace import load_workspace, parse_workspace_json_text
+from modules.workspace_sync import workspace_write_lock
 from modules.save_workspace import save_workspace, strip_asset_content_from_dict
 from modules.workspace_zip import (
     apply_imported_workspace,
@@ -177,8 +178,8 @@ def _restore_incomplete_projects(data, fallback):
     return out
 
 
-def _load_workspace_from_disk() -> Workspace:
-    return load_workspace(WORKSPACE_PATH)
+def _load_workspace_from_disk(hydrate: bool = True) -> Workspace:
+    return load_workspace(WORKSPACE_PATH, hydrate=hydrate)
 
 
 def _workspace_store_exists(path: Optional[str] = None) -> bool:
@@ -346,15 +347,17 @@ def _rag_retriever_kwargs(data: dict) -> dict[str, Any]:
     }
 
 
-def _load_workspace_for_rag() -> Workspace:
+def _load_workspace_for_rag(hydrate: bool = True) -> Workspace:
     if not os.path.exists(WORKSPACE_PATH):
         ws = Workspace.create_default("ws_1", "Default Workspace", True)
         os.makedirs(os.path.dirname(WORKSPACE_PATH), exist_ok=True)
         save_workspace(ws, WORKSPACE_PATH)
         ensure_baseline(ws, workspace_path=WORKSPACE_PATH)
         return ws
-    ws = _load_workspace_from_disk()
-    ensure_baseline(ws, workspace_path=WORKSPACE_PATH)
+    ws = _load_workspace_from_disk(hydrate=hydrate)
+    # Baseline write must not interleave with a concurrent save's RMW cycle.
+    with workspace_write_lock():
+        ensure_baseline(ws, workspace_path=WORKSPACE_PATH)
     return ws
 
 
@@ -1053,47 +1056,48 @@ def _post_workspace_sync(
     """
     _enforce_page_write_locks(data, write_session_id)
     _wait_while_page_load_priority()
-    previous_workspace: Optional[Workspace] = None
-    previous_dict = None
-    if os.path.exists(WORKSPACE_PATH):
-        try:
-            previous_workspace = _load_workspace_from_disk()
-            previous_dict = previous_workspace.to_dict()
-        except HTTPException:
-            raise
-        except (ValueError, json.JSONDecodeError) as e:
+    with workspace_write_lock():
+        previous_workspace: Optional[Workspace] = None
+        previous_dict = None
+        if os.path.exists(WORKSPACE_PATH):
+            try:
+                previous_workspace = _load_workspace_from_disk()
+                previous_dict = previous_workspace.to_dict()
+            except HTTPException:
+                raise
+            except (ValueError, json.JSONDecodeError) as e:
+                raise HTTPException(
+                    status_code=400,
+                    detail="On-disk workspace could not be loaded: " + str(e),
+                )
+            except Exception as e:
+                raise HTTPException(
+                    status_code=400,
+                    detail="On-disk workspace could not be loaded: " + str(e),
+                )
+        if previous_dict is not None and incoming_would_wipe_page_bodies(data, previous_dict):
             raise HTTPException(
                 status_code=400,
-                detail="On-disk workspace could not be loaded: " + str(e),
+                detail="Incoming workspace would wipe on-disk page bodies",
             )
-        except Exception as e:
-            raise HTTPException(
-                status_code=400,
-                detail="On-disk workspace could not be loaded: " + str(e),
-            )
-    if previous_dict is not None and incoming_would_wipe_page_bodies(data, previous_dict):
-        raise HTTPException(
-            status_code=400,
-            detail="Incoming workspace would wipe on-disk page bodies",
-        )
-    data = repair_workspace_dict(data, fallback=previous_dict, assets_dir=ASSETS_DIR)
-    if previous_dict is not None:
-        data = merge_incoming_workspace_dict(data, previous_dict)
         data = repair_workspace_dict(data, fallback=previous_dict, assets_dir=ASSETS_DIR)
-    ws = Workspace.from_dict(data)
+        if previous_dict is not None:
+            data = merge_incoming_workspace_dict(data, previous_dict)
+            data = repair_workspace_dict(data, fallback=previous_dict, assets_dir=ASSETS_DIR)
+        ws = Workspace.from_dict(data)
 
-    data_dir = data_dir_from_workspace_path(WORKSPACE_PATH) or os.path.join(PROJECT_ROOT, "data")
-    cleanup_removed_assets(previous=previous_workspace, current=ws, data_dir=data_dir)
-    _sync_asset_tracking_for_workspace(previous_workspace, ws)
-    _drop_removed_asset_embeddings(previous_workspace, ws)
+        data_dir = data_dir_from_workspace_path(WORKSPACE_PATH) or os.path.join(PROJECT_ROOT, "data")
+        cleanup_removed_assets(previous=previous_workspace, current=ws, data_dir=data_dir)
+        _sync_asset_tracking_for_workspace(previous_workspace, ws)
+        _drop_removed_asset_embeddings(previous_workspace, ws)
 
-    os.makedirs(os.path.dirname(WORKSPACE_PATH), exist_ok=True)
-    save_workspace_and_snapshot(ws, WORKSPACE_PATH, "save", coalesce_key=coalesce_key)
-    return {
-        "status": "ok",
-        "tracking_storage": get_tracking_storage_status(data_dir=data_dir),
-        "workspace_revision": _current_workspace_revision(getattr(ws, "id", None)),
-    }
+        os.makedirs(os.path.dirname(WORKSPACE_PATH), exist_ok=True)
+        save_workspace_and_snapshot(ws, WORKSPACE_PATH, "save", coalesce_key=coalesce_key)
+        return {
+            "status": "ok",
+            "tracking_storage": get_tracking_storage_status(data_dir=data_dir),
+            "workspace_revision": _current_workspace_revision(getattr(ws, "id", None)),
+        }
 
 
 @app.post("/api/workspace")
@@ -1157,10 +1161,12 @@ def get_workspace_undo_state():
 @app.post("/api/workspace/undo")
 def post_workspace_undo():
     try:
-        ws = _load_workspace_for_rag()
-        state = undo_working_period(ws.id, WORKSPACE_PATH)
-        restored = _load_workspace_from_disk()
-        return {"workspace": restored.to_dict(), "undo_state": _undo_state_payload(state, ws.id)}
+        with workspace_write_lock():
+            _wait_while_page_load_priority()
+            ws = _load_workspace_for_rag()
+            state = undo_working_period(ws.id, WORKSPACE_PATH)
+            restored = _load_workspace_from_disk()
+            return {"workspace": restored.to_dict(), "undo_state": _undo_state_payload(state, ws.id)}
     except HTTPException:
         raise
     except Exception as e:
@@ -1171,10 +1177,12 @@ def post_workspace_undo():
 @app.post("/api/workspace/redo")
 def post_workspace_redo():
     try:
-        ws = _load_workspace_for_rag()
-        state = redo_working_period(ws.id, WORKSPACE_PATH)
-        restored = _load_workspace_from_disk()
-        return {"workspace": restored.to_dict(), "undo_state": _undo_state_payload(state, ws.id)}
+        with workspace_write_lock():
+            _wait_while_page_load_priority()
+            ws = _load_workspace_for_rag()
+            state = redo_working_period(ws.id, WORKSPACE_PATH)
+            restored = _load_workspace_from_disk()
+            return {"workspace": restored.to_dict(), "undo_state": _undo_state_payload(state, ws.id)}
     except HTTPException:
         raise
     except Exception as e:
@@ -1185,13 +1193,15 @@ def post_workspace_redo():
 @app.post("/api/workspace/commit")
 def post_workspace_commit():
     try:
-        ws = _load_workspace_for_rag()
-        state = commit_working_period(
-            ws.id,
-            live_workspace=ws,
-            dest_path=WORKSPACE_PATH,
-        )
-        return {"status": "ok", "undo_state": _undo_state_payload(state, ws.id), "committed": True}
+        with workspace_write_lock():
+            _wait_while_page_load_priority()
+            ws = _load_workspace_for_rag()
+            state = commit_working_period(
+                ws.id,
+                live_workspace=ws,
+                dest_path=WORKSPACE_PATH,
+            )
+            return {"status": "ok", "undo_state": _undo_state_payload(state, ws.id), "committed": True}
     except HTTPException:
         raise
     except Exception as e:
@@ -1202,9 +1212,11 @@ def post_workspace_commit():
 @app.post("/api/workspace/revert-to-baseline")
 def post_workspace_revert_to_baseline():
     try:
-        ws = _load_workspace_for_rag()
-        restored, state = revert_working_period_to_baseline(ws.id, WORKSPACE_PATH)
-        return {"workspace": restored.to_dict(), "undo_state": _undo_state_payload(state, ws.id)}
+        with workspace_write_lock():
+            _wait_while_page_load_priority()
+            ws = _load_workspace_for_rag()
+            restored, state = revert_working_period_to_baseline(ws.id, WORKSPACE_PATH)
+            return {"workspace": restored.to_dict(), "undo_state": _undo_state_payload(state, ws.id)}
     except HTTPException:
         raise
     except Exception as e:
@@ -1358,6 +1370,14 @@ def get_asset_tracking_embeddable_log():
 def post_embed_all_assets():
     try:
         _wait_while_page_load_priority()
+        with workspace_write_lock():
+            return _embed_all_assets_locked()
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _embed_all_assets_locked():
         workspace = _load_workspace_for_rag()
         reconcile_workspace_asset_tracking(workspace=workspace, data_dir=os.path.join(PROJECT_ROOT, "data"))
 
@@ -1433,9 +1453,6 @@ def post_embed_all_assets():
             "failed_assets": failed_assets,
             "last_embedded_time": datetime.utcnow().isoformat() + "Z",
         }
-    except Exception as e:
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/rag-config")
@@ -1665,17 +1682,19 @@ def post_convert_group_to_image(data: dict = Body(...)):
         raise HTTPException(status_code=400, detail="project_id and group_space_id are required")
 
     try:
-        workspace = _load_workspace_for_rag()
-        _enforce_project_view_lock(project_id)
-        clone_root_dir = os.path.join(PROJECT_ROOT, "data", "workspace", "group_space_clones")
-        converted = convert_group_space_to_image(
-            workspace=workspace,
-            project_id=project_id,
-            group_space_id=group_space_id,
-            clone_root_dir=clone_root_dir,
-            assets_dir=ASSETS_DIR,
-        )
-        save_workspace_and_snapshot(converted, WORKSPACE_PATH, "convert_group")
+        _wait_while_page_load_priority()
+        with workspace_write_lock():
+            workspace = _load_workspace_for_rag()
+            _enforce_project_view_lock(project_id)
+            clone_root_dir = os.path.join(PROJECT_ROOT, "data", "workspace", "group_space_clones")
+            converted = convert_group_space_to_image(
+                workspace=workspace,
+                project_id=project_id,
+                group_space_id=group_space_id,
+                clone_root_dir=clone_root_dir,
+                assets_dir=ASSETS_DIR,
+            )
+            save_workspace_and_snapshot(converted, WORKSPACE_PATH, "convert_group")
         return {"status": "ok", "workspace": converted.to_dict()}
     except GroupSpaceConversionError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1695,17 +1714,19 @@ def post_restore_image_to_group(data: dict = Body(...)):
         raise HTTPException(status_code=400, detail="project_id and image_space_id are required")
 
     try:
-        workspace = _load_workspace_for_rag()
-        _enforce_project_view_lock(project_id)
-        clone_root_dir = os.path.join(PROJECT_ROOT, "data", "workspace", "group_space_clones")
-        restored = restore_image_space_to_group(
-            workspace=workspace,
-            project_id=project_id,
-            image_space_id=image_space_id,
-            clone_root_dir=clone_root_dir,
-            assets_dir=ASSETS_DIR,
-        )
-        save_workspace_and_snapshot(restored, WORKSPACE_PATH, "restore_group")
+        _wait_while_page_load_priority()
+        with workspace_write_lock():
+            workspace = _load_workspace_for_rag()
+            _enforce_project_view_lock(project_id)
+            clone_root_dir = os.path.join(PROJECT_ROOT, "data", "workspace", "group_space_clones")
+            restored = restore_image_space_to_group(
+                workspace=workspace,
+                project_id=project_id,
+                image_space_id=image_space_id,
+                clone_root_dir=clone_root_dir,
+                assets_dir=ASSETS_DIR,
+            )
+            save_workspace_and_snapshot(restored, WORKSPACE_PATH, "restore_group")
         return {"status": "ok", "workspace": restored.to_dict()}
     except GroupSpaceConversionError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1798,9 +1819,11 @@ def post_library_folder(data: dict = Body(...)):
     if not path:
         raise HTTPException(status_code=400, detail="path is required")
     try:
-        workspace = _load_workspace_for_rag()
-        result = create_folder_in_workspace(workspace, path)
-        save_workspace_and_snapshot(workspace, WORKSPACE_PATH, "create_folder")
+        _wait_while_page_load_priority()
+        with workspace_write_lock():
+            workspace = _load_workspace_for_rag()
+            result = create_folder_in_workspace(workspace, path)
+            save_workspace_and_snapshot(workspace, WORKSPACE_PATH, "create_folder")
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1817,12 +1840,14 @@ def post_library_page(data: dict = Body(...)):
     if not path:
         raise HTTPException(status_code=400, detail="path is required")
     try:
-        workspace = _load_workspace_for_rag()
-        target_pid = _project_id_for_page_path(workspace, path)
-        if target_pid:
-            _enforce_project_view_lock(target_pid)
-        result = create_page_in_workspace(workspace, path)
-        save_workspace_and_snapshot(workspace, WORKSPACE_PATH, "create_page")
+        _wait_while_page_load_priority()
+        with workspace_write_lock():
+            workspace = _load_workspace_for_rag()
+            target_pid = _project_id_for_page_path(workspace, path)
+            if target_pid:
+                _enforce_project_view_lock(target_pid)
+            result = create_page_in_workspace(workspace, path)
+            save_workspace_and_snapshot(workspace, WORKSPACE_PATH, "create_page")
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1842,12 +1867,14 @@ def post_text_create(data: dict = Body(...)):
     if not page_path:
         raise HTTPException(status_code=400, detail="page_path is required")
     try:
-        workspace = _load_workspace_for_rag()
-        target_pid = _project_id_for_page_path(workspace, page_path)
-        if target_pid:
-            _enforce_project_view_lock(target_pid)
-        result = create_text_in_workspace(workspace, page_path, str(markdown), assets_dir=ASSETS_DIR)
-        save_workspace_and_snapshot(workspace, WORKSPACE_PATH, "create_text")
+        _wait_while_page_load_priority()
+        with workspace_write_lock():
+            workspace = _load_workspace_for_rag()
+            target_pid = _project_id_for_page_path(workspace, page_path)
+            if target_pid:
+                _enforce_project_view_lock(target_pid)
+            result = create_text_in_workspace(workspace, page_path, str(markdown), assets_dir=ASSETS_DIR)
+            save_workspace_and_snapshot(workspace, WORKSPACE_PATH, "create_text")
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1878,12 +1905,14 @@ def _media_create_fields(data: dict):
 def post_image_create(data: dict = Body(...)):
     page_path, filename, mime_type, content = _media_create_fields(data)
     try:
-        workspace = _load_workspace_for_rag()
-        target_pid = _project_id_for_page_path(workspace, page_path)
-        if target_pid:
-            _enforce_project_view_lock(target_pid)
-        result = create_image_in_workspace(workspace, page_path, filename, mime_type, content, assets_dir=ASSETS_DIR)
-        save_workspace_and_snapshot(workspace, WORKSPACE_PATH, "create_image")
+        _wait_while_page_load_priority()
+        with workspace_write_lock():
+            workspace = _load_workspace_for_rag()
+            target_pid = _project_id_for_page_path(workspace, page_path)
+            if target_pid:
+                _enforce_project_view_lock(target_pid)
+            result = create_image_in_workspace(workspace, page_path, filename, mime_type, content, assets_dir=ASSETS_DIR)
+            save_workspace_and_snapshot(workspace, WORKSPACE_PATH, "create_image")
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1898,12 +1927,14 @@ def post_image_create(data: dict = Body(...)):
 def post_pdf_create(data: dict = Body(...)):
     page_path, filename, mime_type, content = _media_create_fields(data)
     try:
-        workspace = _load_workspace_for_rag()
-        target_pid = _project_id_for_page_path(workspace, page_path)
-        if target_pid:
-            _enforce_project_view_lock(target_pid)
-        result = create_pdf_in_workspace(workspace, page_path, filename, mime_type, content, assets_dir=ASSETS_DIR)
-        save_workspace_and_snapshot(workspace, WORKSPACE_PATH, "create_pdf")
+        _wait_while_page_load_priority()
+        with workspace_write_lock():
+            workspace = _load_workspace_for_rag()
+            target_pid = _project_id_for_page_path(workspace, page_path)
+            if target_pid:
+                _enforce_project_view_lock(target_pid)
+            result = create_pdf_in_workspace(workspace, page_path, filename, mime_type, content, assets_dir=ASSETS_DIR)
+            save_workspace_and_snapshot(workspace, WORKSPACE_PATH, "create_pdf")
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
