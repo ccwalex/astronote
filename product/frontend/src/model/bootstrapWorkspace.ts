@@ -78,6 +78,11 @@ function safeMergeCacheIntoNav(
     if (comparison === 'match' && cached) {
       return mergeCachedProjectsIntoNav(nav, cached);
     }
+    // Drop stale bodies when the server moved ahead so a later false "match"
+    // cannot paint an incomplete page and leave the UI on Loading forever.
+    if (comparison === 'server_ahead' && serverRevision != null) {
+      writeNavToCache(nav, serverRevision);
+    }
     return nav;
   } catch (err) {
     console.warn('Workspace cache merge failed; clearing cache', err);
@@ -285,7 +290,6 @@ export async function bootstrapWorkspaceLoad(
     try {
       return await applyNavFallback(lastView, hasUnsavedLocal);
     } catch (err) {
-      clearWorkspaceCache();
       let workspace = emptyDefaultWorkspace();
       try {
         const cached = readWorkspaceCache();

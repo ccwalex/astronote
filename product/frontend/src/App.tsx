@@ -53,14 +53,16 @@ import { createStrokeObject, StrokeDrawStyle } from './model/canvasObjectFactory
 import { probeCanvas, ProbeMode, ProbeResult } from './model/probeCanvas';
 import { fetchWorkspaceRevision, saveWorkspace, putAssetText, isAssetTrackingPersistError, uploadAsset, convertGroupSpaceToImage, restoreImageToGroup, postCommit, postRevertToBaseline, fetchAssetTrackingStorageStatus, migrateAssetTrackingStore, skipAssetTrackingMigration, type AssetTrackingStorageStatus, fetchWorkspaceStorageStatus, migrateWorkspaceStorage, skipWorkspaceStorageMigration, type WorkspaceStorageStatus, isAbortError } from './api';
 import {
+  clearAstronoteLoadCaches,
   extractWorkspaceRevision,
+  removeProjectFromCache,
   updateCacheAfterSave,
   writeNavToCache,
   writeProjectToCache
 } from './model/workspaceCache';
 import { readLastView, validateLastView, writeLastView } from './model/lastViewCache';
 import { collectDirtyMarkdownAssets, isProjectHydrated, loadProjectIntoWorkspace, markMarkdownAssetsPersisted, noteHydratedMarkdownAssets, parseWorkspaceJson, prepareWorkspaceForSave, shouldPersistWorkspace } from './model/workspaceLoad';
-import { bootstrapWorkspaceLoad } from './model/bootstrapWorkspace';
+import { bootstrapWorkspaceLoad, type BootstrapWorkspaceResult } from './model/bootstrapWorkspace';
 import {
   refreshWorkspaceFromServer,
   WORKSPACE_REVISION_POLL_MS,
@@ -102,8 +104,10 @@ import {
 
 const ASSET_TRACKING_MIGRATION_DEFER_KEY = 'astronote_asset_tracking_migration_deferred_session';
 const WORKSPACE_STORAGE_MIGRATION_DEFER_KEY = 'astronote_workspace_storage_migration_deferred_session';
-// Survives React StrictMode remount (refs alone reset).
-let workspaceNavFetchStarted = false;
+const HYDRATE_TIMEOUT_MS = 30000;
+const LOADING_WATCHDOG_MS = 35000;
+// Shared across StrictMode remounts; re-attach handlers instead of skipping bootstrap.
+let workspaceBootstrapPromise: Promise<BootstrapWorkspaceResult> | null = null;
 const ASSET_TRACKING_MIGRATION_SESSION_ID = 'session_' + Date.now() + '_' + Math.random().toString(36).slice(2, 10);
 const WORKSPACE_STORAGE_MIGRATION_SESSION_ID = 'session_' + Date.now() + '_' + Math.random().toString(36).slice(2, 10);
 
@@ -171,6 +175,7 @@ export default function App() {
   const storagePromptCheckedRef = useRef(false);
   const hydrateInFlightRef = useRef<string | null>(null);
   const hydrateGenerationRef = useRef(0);
+  const hydrateAbortRef = useRef<AbortController | null>(null);
   const postHydrateQuietUntilRef = useRef(0);
   const lastViewPrefetchRef = useRef<{ projectId: string; promise: Promise<import('./types').Project> } | null>(null);
   const bootSideTrafficStartedRef = useRef(false);
@@ -185,6 +190,7 @@ export default function App() {
   const pagePresenceControllerRef = useRef<PagePresenceController | null>(null);
 
   const [loading, setLoading] = useState(true);
+  const [showLoadRecovery, setShowLoadRecovery] = useState(false);
   const [projectBodyError, setProjectBodyError] = useState<string | null>(null);
   const [navError, setNavError] = useState<string | null>(null);
   const [persistError, setPersistError] = useState<string | null>(null);
@@ -210,10 +216,16 @@ export default function App() {
   const lastViewSnapshotRef = useRef(readLastView());
   const [allowLastViewWrite, setAllowLastViewWrite] = useState(false);
   useEffect(() => {
-    if (workspaceNavFetchStarted) return;
-    workspaceNavFetchStarted = true;
+    let cancelled = false;
+    if (!workspaceBootstrapPromise) {
+      workspaceBootstrapPromise = bootstrapWorkspaceLoad(
+        readLastView(),
+        hasUnsavedLocalRef.current
+      );
+    }
 
-    void bootstrapWorkspaceLoad(readLastView(), hasUnsavedLocalRef.current).then((result) => {
+    workspaceBootstrapPromise.then((result) => {
+      if (cancelled) return;
       setNavError(result.navError);
       setProjectBodyError(result.projectBodyError);
       serverRevisionRef.current = result.serverRevision;
@@ -258,6 +270,7 @@ export default function App() {
         flushPendingPersistInBackground();
       }
     }).catch(err => {
+      if (cancelled) return;
       console.error('Failed to load workspace from backend', err);
       setNavError(err instanceof Error && err.message ? err.message : 'Failed to load workspace from backend');
       lastViewPrefetchRef.current = null;
@@ -285,6 +298,10 @@ export default function App() {
         schedulePostLaunchSideTraffic();
       }
     });
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const workspaceState = historyState.present ?? ({
@@ -339,35 +356,57 @@ export default function App() {
     }
   };
 
-  const beginProjectHydrate = (workspace: Workspace, projectId: string) => {
+  const beginProjectHydrate = (
+    workspace: Workspace,
+    projectId: string,
+    options?: { force?: boolean }
+  ) => {
     if (!projectId) return;
     const existing = workspace.projects?.[projectId];
     if (isProjectHydrated(existing)) {
       launchSettledRef.current = true;
+      setProjectBodyError(null);
       schedulePostLaunchSideTraffic();
       flushDeferredPersistIfNeeded();
       return;
     }
-    if (hydrateInFlightRef.current === projectId) return;
+    if (!options?.force && hydrateInFlightRef.current === projectId) return;
+
+    if (hydrateAbortRef.current) {
+      hydrateAbortRef.current.abort();
+      hydrateAbortRef.current = null;
+    }
+
     const generation = ++hydrateGenerationRef.current;
     hydrateInFlightRef.current = projectId;
+    const abort = new AbortController();
+    hydrateAbortRef.current = abort;
+    const timeoutId = window.setTimeout(() => {
+      if (!abort.signal.aborted) abort.abort();
+    }, HYDRATE_TIMEOUT_MS);
 
     const prefetch = lastViewPrefetchRef.current;
     let prefetched: Promise<import('./types').Project> | null = null;
-    if (prefetch && prefetch.projectId === projectId) {
+    if (!options?.force && prefetch && prefetch.projectId === projectId) {
       prefetched = prefetch.promise;
+      lastViewPrefetchRef.current = null;
+    } else if (options?.force) {
       lastViewPrefetchRef.current = null;
     }
 
     loadProjectIntoWorkspace(
       workspace,
       projectId,
-      prefetched ? { prefetched } : undefined
+      {
+        ...(prefetched ? { prefetched } : {}),
+        signal: abort.signal,
+      }
     )
       .then((present) => {
         if (generation !== hydrateGenerationRef.current) return;
         const loaded = present.projects[projectId];
         if (!isProjectHydrated(loaded) || !loaded?.root_space_id) {
+          removeProjectFromCache(projectId);
           setProjectBodyError('Project body is missing');
         } else {
           setProjectBodyError(null);
@@ -376,7 +415,7 @@ export default function App() {
         postHydrateQuietUntilRef.current = Date.now() + 2000;
         noteHydratedMarkdownAssets(present, { trustFilesOnDisk: true });
         const loadedProject = present.projects[projectId];
-        if (loadedProject) {
+        if (loadedProject && isProjectHydrated(loadedProject)) {
           const projectRev = extractWorkspaceRevision(loadedProject);
           if (projectRev != null) {
             serverRevisionRef.current = projectRev;
@@ -401,17 +440,45 @@ export default function App() {
       })
       .catch((err) => {
         if (generation !== hydrateGenerationRef.current) return;
+        if (isAbortError(err) && selectedProjectIdRef.current !== projectId) {
+          return;
+        }
         console.error('Failed to load project', err);
-        setProjectBodyError(err instanceof Error && err.message ? err.message : 'Project body is missing');
+        removeProjectFromCache(projectId);
+        const timedOut = isAbortError(err);
+        setProjectBodyError(
+          timedOut
+            ? 'Page load timed out. Retry, or clear cache if this keeps happening.'
+            : (err instanceof Error && err.message ? err.message : 'Project body is missing')
+        );
         launchSettledRef.current = true;
         schedulePostLaunchSideTraffic();
         flushDeferredPersistIfNeeded();
       })
       .finally(() => {
+        window.clearTimeout(timeoutId);
+        if (hydrateAbortRef.current === abort) {
+          hydrateAbortRef.current = null;
+        }
         if (hydrateInFlightRef.current === projectId) {
           hydrateInFlightRef.current = null;
         }
       });
+  };
+
+  const retryProjectHydrate = () => {
+    const workspace = presentRef.current;
+    const projectId = selectedProjectIdRef.current;
+    if (!workspace || !projectId) return;
+    setProjectBodyError(null);
+    removeProjectFromCache(projectId);
+    beginProjectHydrate(workspace, projectId, { force: true });
+  };
+
+  const clearLoadCachesAndReload = () => {
+    clearAstronoteLoadCaches();
+    workspaceBootstrapPromise = null;
+    window.location.reload();
   };
 
   const clearPersistTimer = () => {
@@ -1029,6 +1096,50 @@ export default function App() {
     beginProjectHydrate(historyState.present, selectedProjectId);
   }, [loading, lastViewRestored, selectedProjectId, historyState.present]);
 
+  // If hydrate hangs without abort (e.g. stuck promise), surface recovery UI.
+  useEffect(() => {
+    if (loading || projectBodyError || !selectedProjectId || !historyState.present) return;
+    const project = historyState.present.projects[selectedProjectId];
+    if (isProjectHydrated(project)) return;
+    const timer = window.setTimeout(() => {
+      if (selectedProjectIdRef.current !== selectedProjectId) return;
+      const current = presentRef.current?.projects?.[selectedProjectId];
+      if (isProjectHydrated(current)) return;
+      hydrateAbortRef.current?.abort();
+      removeProjectFromCache(selectedProjectId);
+      setProjectBodyError('Page load timed out. Retry, or clear cache if this keeps happening.');
+      hydrateInFlightRef.current = null;
+    }, LOADING_WATCHDOG_MS);
+    return () => window.clearTimeout(timer);
+  }, [loading, projectBodyError, selectedProjectId, historyState.present]);
+
+  // bfcache restore can leave module/bootstrap state stuck mid-load.
+  useEffect(() => {
+    const onPageShow = (event: PageTransitionEvent) => {
+      if (!event.persisted) return;
+      const projectId = selectedProjectIdRef.current;
+      const stuckWorkspace = loading;
+      const stuckPage =
+        Boolean(projectId) &&
+        !isProjectHydrated(presentRef.current?.projects?.[projectId || '']);
+      if (stuckWorkspace || stuckPage) {
+        workspaceBootstrapPromise = null;
+        window.location.reload();
+      }
+    };
+    window.addEventListener('pageshow', onPageShow);
+    return () => window.removeEventListener('pageshow', onPageShow);
+  }, [loading]);
+
+  useEffect(() => {
+    if (!loading) {
+      setShowLoadRecovery(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setShowLoadRecovery(true), 8000);
+    return () => window.clearTimeout(timer);
+  }, [loading]);
+
   useEffect(() => {
     setHistoryState((prev) => clearLocalHistoryStacks(prev));
   }, [selectedProjectId]);
@@ -1120,7 +1231,8 @@ export default function App() {
     const libraryNode = Object.values(nodes).find((node) => node.target_project_id === projectId);
     setSelectedLibraryNodeId(libraryNode?.id ?? null);
     const ws = presentRef.current;
-    if (ws) beginProjectHydrate(ws, projectId);
+    // Always force on explicit navigation so a stuck in-flight hydrate can be retried.
+    if (ws) beginProjectHydrate(ws, projectId, { force: true });
   };
 
   const [probeMode, setProbeMode] = useState<ProbeMode>('top_hit');
@@ -2557,7 +2669,16 @@ export default function App() {
   };
 
   if (loading || !historyState.present) {
-    return <div style={{ display: 'flex', height: '100%', alignItems: 'center', justifyContent: 'center' }}>Loading workspace...</div>;
+    return (
+      <div style={{ display: 'flex', height: '100%', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: '12px' }}>
+        <div>Loading workspace...</div>
+        {showLoadRecovery && (
+          <button type="button" style={recoveryButtonStyle} onClick={clearLoadCachesAndReload}>
+            Clear cache and reload
+          </button>
+        )}
+      </div>
+    );
   }
 
   return (
@@ -2680,12 +2801,23 @@ export default function App() {
             </div>
             </div>
             {projectBodyError ? (
-              <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#c00', textAlign: 'center', padding: '2rem' }}>
-                {projectBodyError}
+              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: '#c00', textAlign: 'center', padding: '2rem', gap: '12px' }}>
+                <div>{projectBodyError}</div>
+                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', justifyContent: 'center' }}>
+                  <button type="button" style={recoveryButtonStyle} onClick={retryProjectHydrate}>
+                    Retry
+                  </button>
+                  <button type="button" style={recoveryButtonStyle} onClick={clearLoadCachesAndReload}>
+                    Clear cache and reload
+                  </button>
+                </div>
               </div>
             ) : (selectedProjectId && !isProjectHydrated(selectedProject)) ? (
-              <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#666' }}>
-                Loading page...
+              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: '#666', gap: '12px' }}>
+                <div>Loading page...</div>
+                <button type="button" style={recoveryButtonStyle} onClick={retryProjectHydrate}>
+                  Retry
+                </button>
               </div>
             ) : (
               <>

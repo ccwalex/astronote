@@ -11,10 +11,12 @@
 
 import {
   WORKSPACE_CACHE_STORAGE_KEY,
+  clearAstronoteLoadCaches,
   clearWorkspaceCache,
   compareRevisions,
   mergeCachedProjectsIntoNav,
   readWorkspaceCache,
+  removeProjectFromCache,
   updateCacheAfterSave,
   writeNavToCache,
   writeProjectToCache
@@ -166,11 +168,31 @@ function testMergeCachedProjects() {
   assert(Object.keys(merged.projects.p1.spaces).length === 1, 'spaces present after merge');
 }
 
+function testRemoveProjectAndClearLoadCaches() {
+  const storage = makeMemoryStorage();
+  const nav = stubNav();
+  writeNavToCache(nav, 1, storage);
+  writeProjectToCache(hydratedProject(), 1, storage);
+  storage.setItem('astronote_last_view', '{"selectedProjectId":"p1"}');
+  storage.setItem('astronote_workspace', '{}');
+
+  removeProjectFromCache('p1', storage);
+  const afterRemove = readWorkspaceCache(storage);
+  assert(afterRemove != null && !afterRemove.projects.p1, 'project removed from cache');
+  assert(afterRemove.nav != null, 'nav kept after project remove');
+
+  clearAstronoteLoadCaches(storage);
+  assert(readWorkspaceCache(storage) === null, 'load caches cleared');
+  assert(storage.getItem('astronote_last_view') === null, 'last view cleared');
+  assert(storage.getItem('astronote_workspace') === null, 'legacy workspace cleared');
+}
+
 function main() {
   testCompareRevisions();
   testCacheHitMissStale();
   testMergeCachedProjects();
   testWriteProjectStripsAssetContent();
+  testRemoveProjectAndClearLoadCaches();
   console.log('workspaceCache.test.ts: all passed');
 }
 

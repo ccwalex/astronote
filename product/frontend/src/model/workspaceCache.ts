@@ -324,6 +324,47 @@ export function clearWorkspaceCache(
   }
 }
 
+/** Drop one cached project body (e.g. after a failed hydrate) without wiping nav. */
+export function removeProjectFromCache(
+  projectId: string,
+  storage: WorkspaceCacheStorage = defaultStorage()
+): WorkspaceCacheSnapshot | null {
+  try {
+    if (!projectId) return readWorkspaceCache(storage);
+    const prev = readWorkspaceCache(storage);
+    if (!prev || !prev.projects?.[projectId]) return prev;
+    const projects = { ...prev.projects };
+    delete projects[projectId];
+    const snapshot = emptyWorkspaceCache({
+      serverRevision: prev.serverRevision,
+      workspaceId: prev.workspaceId,
+      nav: prev.nav,
+      projects,
+      updatedAt: Date.now()
+    });
+    persistCache(snapshot, storage);
+    return snapshot;
+  } catch {
+    return readWorkspaceCache(storage);
+  }
+}
+
+/**
+ * Clear local workspace caches that can leave the UI stuck on Loading.
+ * Keeps pending-persist so unsynced edits are not silently discarded.
+ */
+export function clearAstronoteLoadCaches(
+  storage: WorkspaceCacheStorage = defaultStorage()
+): void {
+  clearWorkspaceCache(storage);
+  try {
+    storage.removeItem('astronote_last_view');
+    storage.removeItem('astronote_workspace');
+  } catch {
+    // ignore
+  }
+}
+
 /**
  * Merge cached hydrated project bodies into a nav workspace when revisions match.
  * Leaves stubs for projects not present in the cache.

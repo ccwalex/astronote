@@ -31,7 +31,7 @@ export async function fetchPageLoad(options?: {
   }
   let response: Response;
   try {
-    response = await fetch(endpoint, { headers });
+    response = await fetch(endpoint, withNoStore({ headers }));
   } catch (err) {
     throw makeNetworkError('Fetch workspace page load', endpoint, err);
   }
@@ -78,6 +78,14 @@ const runtimeDefaultApiBase = '/api';
 const API_BASE = envApiBase || runtimeDefaultApiBase;
 const API_ORIGIN = API_BASE.endsWith('/api') ? API_BASE.slice(0, -4) : API_BASE;
 
+/** Avoid browser HTTP cache serving stale workspace/project JSON (stuck "Loading page..."). */
+function withNoStore(init?: RequestInit): RequestInit {
+  const headers = new Headers(init?.headers || undefined);
+  if (!headers.has('Cache-Control')) headers.set('Cache-Control', 'no-cache');
+  if (!headers.has('Pragma')) headers.set('Pragma', 'no-cache');
+  return { ...init, cache: 'no-store', headers };
+}
+
 export function resolveAssetUrl(url: string): string {
   if (/^https?:\/\//i.test(url)) return url;
   if (url.startsWith('/')) return `${API_ORIGIN}${url}`;
@@ -120,7 +128,7 @@ export async function fetchWorkspace(): Promise<Workspace> {
   let response: Response;
 
   try {
-    response = await fetch(endpoint);
+    response = await fetch(endpoint, withNoStore());
   } catch (err) {
     throw makeNetworkError('Fetch workspace', endpoint, err);
   }
@@ -264,7 +272,7 @@ export async function fetchWorkspaceRevision(options?: {
   let response: Response;
 
   try {
-    response = await fetch(endpoint, { headers });
+    response = await fetch(endpoint, withNoStore({ headers }));
   } catch (err) {
     throw makeNetworkError('Fetch workspace revision', endpoint, err);
   }
@@ -298,7 +306,7 @@ export async function fetchWorkspaceNav(): Promise<WorkspaceNavResponse> {
   let response: Response;
 
   try {
-    response = await fetch(endpoint);
+    response = await fetch(endpoint, withNoStore());
   } catch (err) {
     throw makeNetworkError('Fetch workspace nav', endpoint, err);
   }
@@ -316,12 +324,15 @@ export async function fetchWorkspaceNav(): Promise<WorkspaceNavResponse> {
   return data as WorkspaceNavResponse;
 }
 
-export async function fetchProject(projectId: string): Promise<Project> {
+export async function fetchProject(
+  projectId: string,
+  options?: { signal?: AbortSignal }
+): Promise<Project> {
   const endpoint = `${API_BASE}/projects/${encodeURIComponent(projectId)}`;
   let response: Response;
 
   try {
-    response = await fetch(endpoint);
+    response = await fetch(endpoint, withNoStore({ signal: options?.signal }));
   } catch (err) {
     throw makeNetworkError('Fetch project', endpoint, err);
   }
@@ -610,7 +621,7 @@ export async function fetchUndoState(): Promise<WorkspaceUndoState> {
   let response: Response;
 
   try {
-    response = await fetch(endpoint);
+    response = await fetch(endpoint, withNoStore());
   } catch (err) {
     throw makeNetworkError('Fetch undo state', endpoint, err);
   }

@@ -227,13 +227,13 @@ export function hydrateWorkspaceProject(workspace: Workspace, project: Project):
 export async function loadProjectIntoWorkspace(
   workspace: Workspace,
   projectId: string,
-  options?: { prefetched?: Promise<Project> | Project | null }
+  options?: { prefetched?: Promise<Project> | Project | null; signal?: AbortSignal }
 ): Promise<Workspace> {
   const current = workspace.projects?.[projectId];
   if (isProjectHydrated(current)) return workspace;
   const project = options?.prefetched
     ? await Promise.resolve(options.prefetched)
-    : await fetchProject(projectId);
+    : await fetchProject(projectId, { signal: options?.signal });
   const next = hydrateWorkspaceProject(workspace, project);
   if (!isProjectHydrated(next.projects?.[projectId])) {
     throw new Error('Project body is missing');

@@ -12,6 +12,7 @@ from datetime import datetime
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Body, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
+from starlette.middleware.base import BaseHTTPMiddleware
 from typing import Optional, Any
 
 from modules.workspace import (
@@ -110,6 +111,19 @@ class FastAPIApp:
 _fastapi_inner = FastAPI()
 app = FastAPIApp(_fastapi_inner)
 
+class NoCacheAPIMiddleware(BaseHTTPMiddleware):
+    """Prevent browsers/proxies from caching API JSON (avoids stuck Loading page)."""
+
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        path = request.url.path or ""
+        if path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+        return response
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -117,6 +131,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(NoCacheAPIMiddleware)
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 WORKSPACE_PATH = os.path.join(PROJECT_ROOT, "data", "workspace", "workspace.json")
