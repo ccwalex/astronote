@@ -387,6 +387,49 @@ class TestSearchCorpusCache(unittest.TestCase):
                 self.assertEqual(response.json().get("status"), "ok")
                 mock_bump.assert_called_once()
 
+    def test_hydrate_text_assets_skips_reread_when_mtime_unchanged(self):
+        from modules import save_workspace as sw
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ws_path, assets_dir = _save_fixture(tmpdir)
+            with _search_env(ws_path):
+                sw._text_asset_file_cache.clear()
+                first = api._build_search_workspace()
+                md_asset = None
+                for project in first.projects.values():
+                    md_asset = project.assets.get("a_md")
+                    if md_asset is not None:
+                        break
+                self.assertIsNotNone(md_asset)
+                self.assertIn("quokka", md_asset.content)
+
+                md_path = os.path.abspath(_md_file_path(assets_dir))
+                reads = {"n": 0}
+                real_open = open
+
+                def counting_open(file, *args, **kwargs):
+                    path = file if isinstance(file, str) else getattr(file, "name", "")
+                    try:
+                        if os.path.abspath(str(path)) == md_path:
+                            reads["n"] += 1
+                    except OSError:
+                        pass
+                    return real_open(file, *args, **kwargs)
+
+                api._bump_search_cache_generation()
+                with patch("builtins.open", counting_open):
+                    second = api._build_search_workspace()
+                self.assertEqual(reads["n"], 0)
+                second_md = None
+                for project in second.projects.values():
+                    second_md = project.assets.get("a_md")
+                    if second_md is not None:
+                        break
+                self.assertIsNotNone(second_md)
+                self.assertEqual(second_md.content, md_asset.content)
+                self.assertTrue(hasattr(second_md, "_search_plain"))
+                self.assertTrue(hasattr(second_md, "_search_folded"))
+
 
 if __name__ == "__main__":
     unittest.main()

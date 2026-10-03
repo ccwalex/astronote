@@ -34,6 +34,15 @@ def _contains_fold(haystack: str, needle: str) -> bool:
     return folded_needle in _fold(haystack)
 
 
+def _snippet_from_match(plain: str, folded: str, fold_query: str, query: str, pad: int) -> str:
+    idx = folded.find(fold_query)
+    if idx < 0:
+        return ""
+    start = max(0, idx - pad)
+    end = min(len(plain), idx + len(query) + pad)
+    return plain[start:end].replace("\n", " ")
+
+
 def asset_plain_text_for_word_search(text: str) -> str:
     """Normalize markdown/HTML asset bodies to reader-visible plain text for word search."""
     if not isinstance(text, str) or not text:
@@ -60,6 +69,40 @@ def asset_plain_text_for_word_search(text: str) -> str:
     s = re.sub(r"[*_~`]+", "", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
+
+
+def _asset_search_plain_and_folded(asset, project_id: Optional[str] = None) -> tuple[str, str]:
+    cached_plain = getattr(asset, "_search_plain", None)
+    cached_folded = getattr(asset, "_search_folded", None)
+    if isinstance(cached_plain, str) and isinstance(cached_folded, str):
+        return cached_plain, cached_folded
+    if getattr(asset, "kind", None) == "markdown" and isinstance(getattr(asset, "content", None), str):
+        plain = asset_plain_text_for_word_search(asset.content)
+        return plain, _fold(plain)
+    if getattr(asset, "kind", None) == "pdf":
+        extracted = _safe_pdf_text(asset, project_id=project_id)
+        return extracted, _fold(extracted)
+    return "", ""
+
+
+def prepare_asset_search_texts(workspace: Workspace) -> None:
+    """Compute markdown/PDF search plain text and casefold once per corpus load."""
+    if not workspace:
+        return
+    for project_id, project in (workspace.projects or {}).items():
+        assets = getattr(project, "assets", None) or {}
+        if not isinstance(assets, dict):
+            continue
+        for asset in assets.values():
+            kind = getattr(asset, "kind", None)
+            if kind == "markdown" and isinstance(getattr(asset, "content", None), str):
+                plain = asset_plain_text_for_word_search(asset.content)
+                asset._search_plain = plain
+                asset._search_folded = _fold(plain)
+            elif kind == "pdf":
+                extracted = _safe_pdf_text(asset, project_id=project_id)
+                asset._search_plain = extracted
+                asset._search_folded = _fold(extracted)
 
 
 def _space_asset_ids(space) -> list[str]:
@@ -798,12 +841,11 @@ def search_workspace(
                 })
 
             if asset.kind == "markdown" and isinstance(asset.content, str):
-                plain_content = asset_plain_text_for_word_search(asset.content)
-                if plain_content and _contains_fold(plain_content, fold_query):
-                    idx = _fold(plain_content).find(fold_query)
-                    start = max(0, idx - 10)
-                    end = min(len(plain_content), idx + len(query) + 10)
-                    snippet = plain_content[start:end].replace("\n", " ")
+                plain_content, folded_content = _asset_search_plain_and_folded(asset, project_id)
+                if plain_content and fold_query in folded_content:
+                    snippet = _snippet_from_match(
+                        plain_content, folded_content, fold_query, query, 10
+                    )
                     markdown_results.append({
                         "id": f"md_{asset_id}",
                         "kind": "markdown_content",
@@ -814,13 +856,12 @@ def search_workspace(
                     })
 
             if asset.kind == "pdf":
-                extracted_text = _safe_pdf_text(asset, project_id=project_id)
+                extracted_text, folded_pdf = _asset_search_plain_and_folded(asset, project_id)
 
-                if extracted_text and _contains_fold(extracted_text, fold_query):
-                    idx = _fold(extracted_text).find(fold_query)
-                    start = max(0, idx - 20)
-                    end = min(len(extracted_text), idx + len(query) + 20)
-                    snippet = extracted_text[start:end].replace("\n", " ")
+                if extracted_text and fold_query in folded_pdf:
+                    snippet = _snippet_from_match(
+                        extracted_text, folded_pdf, fold_query, query, 20
+                    )
                     pdf_results.append({
                         "id": f"pdf_{asset_id}",
                         "kind": "pdf_content",

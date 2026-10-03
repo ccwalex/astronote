@@ -158,10 +158,42 @@ def test_get_project_complete_from_saved_workspace():
             api.ASSETS_DIR = old_assets
 
 
+def test_api_json_sets_no_cache_headers():
+    ws = Workspace.create_default("ws_1", "Test", True)
+    proj_id = list(ws.projects.keys())[0]
+    with tempfile.TemporaryDirectory() as tmp:
+        ws_dir = os.path.join(tmp, "workspace")
+        assets_dir = os.path.join(tmp, "assets")
+        os.makedirs(ws_dir)
+        os.makedirs(assets_dir)
+        path = os.path.join(ws_dir, "workspace.json")
+        old_path = api.WORKSPACE_PATH
+        old_assets = api.ASSETS_DIR
+        try:
+            save_workspace(ws, path)
+            api.WORKSPACE_PATH = path
+            api.ASSETS_DIR = assets_dir
+            client = _test_client()
+            res = client.get("/api/projects/" + proj_id)
+            assert res.status_code == 200
+            cache_control = (res.headers.get("cache-control") or "").lower()
+            assert "no-store" in cache_control
+            assert "no-cache" in cache_control
+            assert res.headers.get("pragma") == "no-cache"
+            nav = client.get("/api/workspace/nav")
+            assert nav.status_code == 200
+            nav_cc = (nav.headers.get("cache-control") or "").lower()
+            assert "no-store" in nav_cc
+        finally:
+            api.WORKSPACE_PATH = old_path
+            api.ASSETS_DIR = old_assets
+
+
 def main():
     tests = [
         test_get_project_stub_is_missing_body_not_empty_canvas,
         test_get_project_complete_from_saved_workspace,
+        test_api_json_sets_no_cache_headers,
     ]
     for test in tests:
         test()

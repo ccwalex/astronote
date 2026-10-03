@@ -250,6 +250,31 @@ def _hydrate_one_asset(asset, assets_dir: str) -> None:
     asset.content = f"data:{mime_type};base64,{b64}"
 
 
+_text_asset_file_cache: dict[tuple[str, float], str] = {}
+
+
+def _read_cached_text_asset(dest: str) -> Optional[str]:
+    """Read UTF-8 text, reusing content when (path, mtime) is unchanged."""
+    try:
+        mtime = os.path.getmtime(dest)
+    except OSError:
+        return None
+    key = (dest, mtime)
+    cached = _text_asset_file_cache.get(key)
+    if cached is not None:
+        return cached
+    try:
+        with open(dest, "r", encoding="utf-8") as handle:
+            text = handle.read()
+    except (OSError, UnicodeDecodeError):
+        return None
+    stale_keys = [existing for existing in _text_asset_file_cache if existing[0] == dest]
+    for stale in stale_keys:
+        _text_asset_file_cache.pop(stale, None)
+    _text_asset_file_cache[key] = text
+    return text
+
+
 def hydrate_assets(workspace: Workspace, assets_dir: str) -> None:
     if not workspace or not assets_dir:
         return
@@ -293,11 +318,10 @@ def hydrate_text_assets(workspace: Workspace, assets_dir: Optional[str]) -> None
         dest = os.path.join(assets_dir, rel_path)
         if not os.path.isfile(dest):
             continue
-        try:
-            with open(dest, "r", encoding="utf-8") as handle:
-                asset.content = handle.read()
-        except (OSError, UnicodeDecodeError):
+        text = _read_cached_text_asset(dest)
+        if text is None:
             continue
+        asset.content = text
 
 
 def strip_asset_content_from_dict(payload: dict) -> dict:

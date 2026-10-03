@@ -5,7 +5,7 @@ from modules.project import Project
 from modules.space import Space
 from modules.asset import Asset
 from modules.canvas_object import CanvasObject
-from modules.workspace_search import search_workspace
+from modules.workspace_search import prepare_asset_search_texts, search_workspace
 
 class TestWorkspaceSearch(unittest.TestCase):
     def setUp(self):
@@ -86,6 +86,32 @@ class TestWorkspaceSearch(unittest.TestCase):
     def test_case_insensitive(self):
         res = search_workspace(self.ws, "sEaRcHABLE LiBrary")
         self.assertEqual(len(res), 1)
+
+    def test_precomputed_matches_inline_results(self):
+        inline = search_workspace(self.ws, "markdown content")
+        prepare_asset_search_texts(self.ws)
+        prepared = search_workspace(self.ws, "markdown content")
+        self.assertEqual(inline, prepared)
+        self.assertEqual(prepared[0]["kind"], "markdown_content")
+        self.assertIn("markdown content", prepared[0]["label"].lower())
+
+    def test_precomputed_texts_used_without_restripping(self):
+        from modules import workspace_search as ws_mod
+
+        prepare_asset_search_texts(self.ws)
+        expected = search_workspace(self.ws, "markdown content")
+        original = ws_mod.asset_plain_text_for_word_search
+
+        def boom(_text):
+            raise AssertionError("should use precomputed search text")
+
+        ws_mod.asset_plain_text_for_word_search = boom
+        try:
+            actual = search_workspace(self.ws, "markdown content")
+        finally:
+            ws_mod.asset_plain_text_for_word_search = original
+        self.assertEqual(expected, actual)
+
 
 if __name__ == '__main__':
     unittest.main()

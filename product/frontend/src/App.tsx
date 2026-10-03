@@ -444,13 +444,14 @@ export default function App() {
           return;
         }
         console.error('Failed to load project', err);
-        removeProjectFromCache(projectId);
         const timedOut = isAbortError(err);
-        setProjectBodyError(
-          timedOut
-            ? 'Page load timed out. Retry, or clear cache if this keeps happening.'
-            : (err instanceof Error && err.message ? err.message : 'Project body is missing')
-        );
+        const message = timedOut
+          ? 'Page load timed out. Retry, or clear cache if this keeps happening.'
+          : (err instanceof Error && err.message ? err.message : 'Project body is missing');
+        if (timedOut || /missing/i.test(message)) {
+          removeProjectFromCache(projectId);
+        }
+        setProjectBodyError(message);
         launchSettledRef.current = true;
         schedulePostLaunchSideTraffic();
         flushDeferredPersistIfNeeded();
@@ -2813,11 +2814,8 @@ export default function App() {
                 </div>
               </div>
             ) : (selectedProjectId && !isProjectHydrated(selectedProject)) ? (
-              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: '#666', gap: '12px' }}>
-                <div>Loading page...</div>
-                <button type="button" style={recoveryButtonStyle} onClick={retryProjectHydrate}>
-                  Retry
-                </button>
+              <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#666' }}>
+                Loading page...
               </div>
             ) : (
               <>

@@ -12,7 +12,6 @@ from datetime import datetime
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Body, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
-from starlette.middleware.base import BaseHTTPMiddleware
 from typing import Optional, Any
 
 from modules.workspace import (
@@ -69,7 +68,11 @@ from modules.asset_tracking import (
 )
 from modules.embedding_index import WorkspaceEmbeddingIndex
 from modules.workspace_storage import load_library_config, save_library_config
-from modules.workspace_search import retrieve_rag_assets, search_workspace
+from modules.workspace_search import (
+    prepare_asset_search_texts,
+    retrieve_rag_assets,
+    search_workspace,
+)
 from modules.azure_llm import AzureLLMConfig, send_messages
 from modules.group_space_conversion import (
     GroupSpaceConversionError,
@@ -111,17 +114,40 @@ class FastAPIApp:
 _fastapi_inner = FastAPI()
 app = FastAPIApp(_fastapi_inner)
 
-class NoCacheAPIMiddleware(BaseHTTPMiddleware):
-    """Prevent browsers/proxies from caching API JSON (avoids stuck Loading page)."""
+class NoCacheAPIMiddleware:
+    """Set no-cache headers on /api/* without BaseHTTPMiddleware task wrapping."""
 
-    async def dispatch(self, request: Request, call_next):
-        response = await call_next(request)
-        path = request.url.path or ""
-        if path.startswith("/api/"):
-            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
-            response.headers["Pragma"] = "no-cache"
-            response.headers["Expires"] = "0"
-        return response
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        path = scope.get("path") or ""
+        if not path.startswith("/api/"):
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_no_cache(message):
+            if message["type"] == "http.response.start":
+                skip = {b"cache-control", b"pragma", b"expires"}
+                headers = [
+                    (name, value)
+                    for name, value in (message.get("headers") or [])
+                    if name.lower() not in skip
+                ]
+                headers.extend(
+                    [
+                        (b"cache-control", b"no-store, no-cache, must-revalidate"),
+                        (b"pragma", b"no-cache"),
+                        (b"expires", b"0"),
+                    ]
+                )
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, send_with_no_cache)
 
 
 app.add_middleware(
@@ -411,6 +437,7 @@ def _build_search_workspace() -> Workspace:
     workspace = load_workspace(WORKSPACE_PATH, hydrate=False, persist_repairs=False)
     assets_dir = assets_dir_from_workspace_path(WORKSPACE_PATH) or ASSETS_DIR
     hydrate_text_assets(workspace, assets_dir)
+    prepare_asset_search_texts(workspace)
     return workspace
 
 
