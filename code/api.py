@@ -20,7 +20,14 @@ from modules.workspace import (
     merge_concatenated_workspace_dicts,
     repair_workspace_dict,
 )
-from modules.workspace_lazy import incoming_would_wipe_page_bodies, is_project_incomplete, is_project_stub, merge_incoming_workspace_dict, workspace_nav_dict
+from modules.workspace_lazy import (
+    incoming_would_drop_stored_collections,
+    incoming_would_wipe_page_bodies,
+    is_project_incomplete,
+    is_project_stub,
+    merge_incoming_workspace_dict,
+    workspace_nav_dict,
+)
 from modules.page_view_lock import (
     check_write_allowed,
     force_unlock as force_page_write_unlock,
@@ -1278,6 +1285,24 @@ def _post_workspace_sync(
                 status_code=400,
                 detail="Incoming workspace would wipe on-disk page bodies",
             )
+        if previous_dict is not None:
+            dropped = incoming_would_drop_stored_collections(data, previous_dict)
+            if dropped:
+                logger.error(
+                    "REJECTING workspace save: client payload marks %d project(s) complete "
+                    "but empty of stored objects/assets (first: %s). A poisoned or partial "
+                    "client state must not erase stored bodies.",
+                    len(dropped),
+                    dropped[0],
+                )
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "message": "Incoming workspace would drop stored objects/assets",
+                        "projects": dropped[:10],
+                        "hint": "Reload the page to re-sync local state, then retry.",
+                    },
+                )
         data = repair_workspace_dict(data, fallback=previous_dict, assets_dir=ASSETS_DIR)
         if previous_dict is not None:
             data = merge_incoming_workspace_dict(data, previous_dict)

@@ -716,10 +716,18 @@ export default function App() {
       });
   };
 
-  const armDebouncedPersist = () => {
+  const flushWhenSettled = (retriesLeft: number) => {
     clearPersistTimer();
     persistTimerRef.current = window.setTimeout(() => {
       persistTimerRef.current = null;
+      if (persistInFlightRef.current > 0 && retriesLeft > 0) {
+        // Starting a flush aborts the in-flight one, and its abort handler
+        // re-arms — an endless save loop when the server is slow. Wait for the
+        // in-flight save to finish (bounded so a hung request cannot stall the
+        // indicator forever) before flushing.
+        flushWhenSettled(retriesLeft - 1);
+        return;
+      }
       if (suppressPersistRef.current || skipBackendPersistRef.current) return;
       if (!isWorkspaceDirty(workspaceDirtyGateRef.current)) return;
       const current = presentRef.current;
@@ -729,6 +737,10 @@ export default function App() {
         flushPersist(current, pendingCoalesceKeyRef.current);
       }
     }, 1000);
+  };
+
+  const armDebouncedPersist = () => {
+    flushWhenSettled(60);
   };
 
   useEffect(() => {

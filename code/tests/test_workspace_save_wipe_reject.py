@@ -9,6 +9,7 @@ if CODE_DIR not in sys.path:
 
 from fastapi.testclient import TestClient
 from modules.project import Project
+from modules.asset import Asset
 from modules.save_workspace import save_workspace
 from modules.workspace import Workspace
 from modules.workspace_lazy import incoming_would_wipe_page_bodies, workspace_nav_dict
@@ -85,11 +86,79 @@ def test_post_all_stubs_rejected_disk_unchanged():
             os.remove(path)
 
 
+def _complete_project_with_bodies(project_id="p1", space_id="s1"):
+    project = _complete_project(project_id, space_id)
+    project["objects"] = {
+        "o1": {"id": "o1", "kind": "Note", "transform_matrix": [1, 0, 0, 1, 0, 0]}
+    }
+    project["assets"] = {
+        "a1": {
+            "id": "a1",
+            "kind": "markdown",
+            "path": f"{project_id}_a1.md",
+            "filename": "a1.md",
+            "content": "stored text",
+            "mime_type": "text/markdown",
+        }
+    }
+    return project
+
+
+def test_incoming_complete_but_collections_empty_is_flagged():
+    from modules.workspace_lazy import incoming_would_drop_stored_collections
+
+    disk = {"projects": {"p1": _complete_project_with_bodies()}}
+    poisoned = _complete_project()  # complete (root + spaces) but no objects/assets
+    affected = incoming_would_drop_stored_collections({"projects": {"p1": poisoned}}, disk)
+    assert affected == ["p1"]
+    # A normal hydrated payload (entries kept, content null) is not flagged.
+    healthy = _complete_project_with_bodies()
+    healthy["assets"]["a1"]["content"] = None
+    assert incoming_would_drop_stored_collections({"projects": {"p1": healthy}}, disk) == []
+
+
+def test_post_collection_wipe_rejected_disk_unchanged():
+    ws = Workspace.create_default("ws_1", "Test", True)
+    extra = Project.create_default("proj_extra", "Extra")
+    extra.assets["a_keep"] = Asset(
+        id="a_keep",
+        kind="markdown",
+        path="a_keep.md",
+        filename="a_keep.md",
+        content="stored text",
+        mime_type="text/markdown",
+    )
+    ws.projects[extra.id] = extra
+    handle, path = tempfile.mkstemp(suffix=".json")
+    os.close(handle)
+    old_path = api.WORKSPACE_PATH
+    try:
+        save_workspace(ws, path)
+        before = open(path, "rb").read()
+        api.WORKSPACE_PATH = path
+        payload = workspace_nav_dict(ws)
+        payload["projects"][extra.id] = _complete_project(extra.id)
+        with patch.object(api, "save_workspace") as mock_save:
+            client = TestClient(api.app)
+            posted = client.post("/api/workspace", json=payload)
+            assert posted.status_code == 409, posted.text
+            assert "objects/assets" in str(posted.json().get("detail"))
+            mock_save.assert_not_called()
+        with open(path, "rb") as handle_in:
+            assert handle_in.read() == before
+    finally:
+        api.WORKSPACE_PATH = old_path
+        if os.path.exists(path):
+            os.remove(path)
+
+
 def main():
     tests = [
         test_incoming_would_wipe_all_stubs_against_complete_disk,
         test_incoming_would_not_wipe_one_hydrated_plus_stubs,
         test_post_all_stubs_rejected_disk_unchanged,
+        test_incoming_complete_but_collections_empty_is_flagged,
+        test_post_collection_wipe_rejected_disk_unchanged,
     ]
     for test in tests:
         test()
