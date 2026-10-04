@@ -21,11 +21,13 @@ from modules.workspace import (
     repair_workspace_dict,
 )
 from modules.workspace_lazy import (
+    apply_collection_restore,
     incoming_would_drop_stored_collections,
     incoming_would_wipe_page_bodies,
     is_project_incomplete,
     is_project_stub,
     merge_incoming_workspace_dict,
+    plan_collection_restore,
     workspace_nav_dict,
 )
 from modules.page_view_lock import (
@@ -1286,23 +1288,29 @@ def _post_workspace_sync(
                 detail="Incoming workspace would wipe on-disk page bodies",
             )
         if previous_dict is not None:
-            dropped = incoming_would_drop_stored_collections(data, previous_dict)
-            if dropped:
-                logger.error(
-                    "REJECTING workspace save: client payload marks %d project(s) complete "
-                    "but empty of stored objects/assets (first: %s). A poisoned or partial "
-                    "client state must not erase stored bodies.",
-                    len(dropped),
-                    dropped[0],
-                )
-                raise HTTPException(
-                    status_code=409,
-                    detail={
-                        "message": "Incoming workspace would drop stored objects/assets",
-                        "projects": dropped[:10],
-                        "hint": "Reload the page to re-sync local state, then retry.",
-                    },
-                )
+            flagged = incoming_would_drop_stored_collections(data, previous_dict)
+            if flagged:
+                restore_plan = plan_collection_restore(data, previous_dict)
+                if restore_plan:
+                    data = apply_collection_restore(data, previous_dict, restore_plan)
+                    restored_count = sum(len(collections) for collections in restore_plan.values())
+                    logger.warning(
+                        "RESTORED %d stored collection(s) from disk during save (projects: %s): "
+                        "client carried empty collections for projects whose body never came "
+                        "from the disk page (dangling references, or fabricated layout on a "
+                        "total wipe).",
+                        restored_count,
+                        ", ".join(sorted(restore_plan)[:10]),
+                    )
+                trusted = [pid for pid in flagged if pid not in restore_plan]
+                if trusted:
+                    logger.warning(
+                        "Trusting client wipe of stored collections for %d project(s) "
+                        "(first: %s): layout matches disk and no references dangle, so the "
+                        "empty page is treated as an intentional edit.",
+                        len(trusted),
+                        trusted[0],
+                    )
         data = repair_workspace_dict(data, fallback=previous_dict, assets_dir=ASSETS_DIR)
         if previous_dict is not None:
             data = merge_incoming_workspace_dict(data, previous_dict)

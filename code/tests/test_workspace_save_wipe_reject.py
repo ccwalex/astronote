@@ -10,9 +10,15 @@ if CODE_DIR not in sys.path:
 from fastapi.testclient import TestClient
 from modules.project import Project
 from modules.asset import Asset
+from modules.canvas_object import CanvasObject
 from modules.save_workspace import save_workspace
 from modules.workspace import Workspace
-from modules.workspace_lazy import incoming_would_wipe_page_bodies, workspace_nav_dict
+from modules.workspace_lazy import (
+    apply_collection_restore,
+    incoming_would_wipe_page_bodies,
+    plan_collection_restore,
+    workspace_nav_dict,
+)
 import api
 
 
@@ -117,7 +123,90 @@ def test_incoming_complete_but_collections_empty_is_flagged():
     assert incoming_would_drop_stored_collections({"projects": {"p1": healthy}}, disk) == []
 
 
-def test_post_collection_wipe_rejected_disk_unchanged():
+def test_plan_restore_synthesized_default_body_over_edited_layout():
+    # A synthesized default body arriving for a page whose real layout differs
+    # from the default is a fabricated body: total wipe + layout mismatch.
+    disk = {"projects": {"p1": _complete_project_with_bodies()}}
+    disk["projects"]["p1"]["spaces"]["s1"]["width"] = 555
+    synthesized = Project.create_default("p1", "Page").to_dict()
+    plan = plan_collection_restore({"projects": {"p1": synthesized}}, disk)
+    assert plan == {"p1": {"objects": True, "assets": True}}
+    restored = apply_collection_restore({"projects": {"p1": synthesized}}, disk, plan)
+    assert restored["projects"]["p1"]["assets"]["a1"]["content"] == "stored text"
+    assert "o1" in restored["projects"]["p1"]["objects"]
+
+
+def test_plan_trust_synthesized_shape_on_pristine_layout():
+    # A pristine-layout page that really is empty is indistinguishable from a
+    # synthesized stub: trust the client (last-write-wins), never 409.
+    pristine = Project.create_default("p1", "Page")
+    pristine.objects["o1"] = CanvasObject(id="o1", kind="Note")
+    pristine.assets["a1"] = Asset(
+        id="a1", kind="markdown", path="p1_a1.md",
+        filename="a1.md", content="stored text", mime_type="text/markdown",
+    )
+    disk = {"projects": {"p1": pristine.to_dict()}}
+    synthesized = Project.create_default("p1", "Page").to_dict()
+    assert plan_collection_restore({"projects": {"p1": synthesized}}, disk) == {}
+
+
+def test_plan_restore_dangling_references():
+    disk = {"projects": {"p1": _complete_project_with_bodies()}}
+    client = _complete_project()
+    client["spaces"]["s1"]["object_ids"] = ["o1"]
+    client["spaces"]["s1"]["asset_ids"] = ["a1"]
+    plan = plan_collection_restore({"projects": {"p1": client}}, disk)
+    assert plan == {"p1": {"objects": True, "assets": True}}
+
+
+def test_plan_trust_legitimate_empty_page():
+    # Client holds the real layout (spaces match disk modulo references) and
+    # emptied the page on purpose: no dangling ids, not a synthesized default.
+    disk = {"projects": {"p1": _complete_project_with_bodies()}}
+    client = _complete_project()
+    plan = plan_collection_restore({"projects": {"p1": client}}, disk)
+    assert plan == {}
+
+
+def test_plan_trust_partial_user_wipe():
+    # User deleted every asset but kept objects: only the asset collection is
+    # empty, layout matches, no dangling asset references -> trusted wipe.
+    disk = {"projects": {"p1": _complete_project_with_bodies()}}
+    client = _complete_project()
+    client["objects"] = {"o1": {"id": "o1", "kind": "Note"}}
+    plan = plan_collection_restore({"projects": {"p1": client}}, disk)
+    assert plan == {}
+
+
+def test_plan_restore_fabricated_layout_on_total_wipe():
+    # Client never saw the real page: layout ids differ from disk and both
+    # collections are empty -> restore instead of trusting the wipe.
+    disk = {"projects": {"p1": _complete_project_with_bodies()}}
+    client = _complete_project("p1", "fabricated_root")
+    plan = plan_collection_restore({"projects": {"p1": client}}, disk)
+    assert plan == {"p1": {"objects": True, "assets": True}}
+
+
+def _setup_temp_store(ws):
+    tmp = tempfile.TemporaryDirectory()
+    path = os.path.join(tmp.name, "workspace", "workspace.json")
+    os.makedirs(os.path.dirname(path))
+    save_workspace(ws, path)
+    old_path = api.WORKSPACE_PATH
+    old_assets = api.ASSETS_DIR
+    api.WORKSPACE_PATH = path
+    api.ASSETS_DIR = os.path.join(tmp.name, "assets")
+    os.makedirs(api.ASSETS_DIR, exist_ok=True)
+    return tmp, old_path, old_assets
+
+
+def _teardown_temp_store(tmp, old_path, old_assets):
+    api.WORKSPACE_PATH = old_path
+    api.ASSETS_DIR = old_assets
+    tmp.cleanup()
+
+
+def _workspace_with_bodied_page():
     ws = Workspace.create_default("ws_1", "Test", True)
     extra = Project.create_default("proj_extra", "Extra")
     extra.assets["a_keep"] = Asset(
@@ -129,27 +218,85 @@ def test_post_collection_wipe_rejected_disk_unchanged():
         mime_type="text/markdown",
     )
     ws.projects[extra.id] = extra
-    handle, path = tempfile.mkstemp(suffix=".json")
-    os.close(handle)
-    old_path = api.WORKSPACE_PATH
+    return ws, extra
+
+
+def test_post_stale_empty_body_restored_not_rejected():
+    """A save carrying a fabricated empty body must not 409 or wipe: the stored
+    collections are restored and the save (e.g. a page deletion elsewhere)
+    succeeds."""
+    ws, extra = _workspace_with_bodied_page()
+    tmp, old_path, old_assets = _setup_temp_store(ws)
     try:
-        save_workspace(ws, path)
-        before = open(path, "rb").read()
-        api.WORKSPACE_PATH = path
-        payload = workspace_nav_dict(ws)
+        client = TestClient(api.app)
+        payload = ws.to_dict()
         payload["projects"][extra.id] = _complete_project(extra.id)
-        with patch.object(api, "save_workspace") as mock_save:
-            client = TestClient(api.app)
-            posted = client.post("/api/workspace", json=payload)
-            assert posted.status_code == 409, posted.text
-            assert "objects/assets" in str(posted.json().get("detail"))
-            mock_save.assert_not_called()
-        with open(path, "rb") as handle_in:
-            assert handle_in.read() == before
+        posted = client.post("/api/workspace", json=payload)
+        assert posted.status_code == 200, posted.text
+        disk = api._load_workspace_from_disk()
+        saved_extra = disk.projects[extra.id]
+        assert "a_keep" in saved_extra.assets
+        assert saved_extra.assets["a_keep"].content == "stored text"
     finally:
-        api.WORKSPACE_PATH = old_path
-        if os.path.exists(path):
-            os.remove(path)
+        _teardown_temp_store(tmp, old_path, old_assets)
+
+
+def test_post_synthesized_body_over_edited_layout_restored():
+    ws, extra = _workspace_with_bodied_page()
+    extra.spaces[f"{extra.id}_root"].width = 555.0
+    tmp, old_path, old_assets = _setup_temp_store(ws)
+    try:
+        client = TestClient(api.app)
+        payload = ws.to_dict()
+        payload["projects"][extra.id] = Project.create_default(extra.id, extra.name).to_dict()
+        posted = client.post("/api/workspace", json=payload)
+        assert posted.status_code == 200, posted.text
+        disk = api._load_workspace_from_disk()
+        saved_extra = disk.projects[extra.id]
+        assert "a_keep" in saved_extra.assets
+        assert saved_extra.assets["a_keep"].content == "stored text"
+    finally:
+        _teardown_temp_store(tmp, old_path, old_assets)
+
+
+def test_post_legitimate_page_emptying_is_trusted():
+    ws, extra = _workspace_with_bodied_page()
+    tmp, old_path, old_assets = _setup_temp_store(ws)
+    try:
+        client = TestClient(api.app)
+        payload = ws.to_dict()
+        emptied = extra.to_dict()
+        emptied["assets"] = {}
+        emptied["objects"] = {}
+        for space in emptied["spaces"].values():
+            space["asset_ids"] = []
+            space["object_ids"] = []
+            space["reference_asset_id"] = None
+        payload["projects"][extra.id] = emptied
+        posted = client.post("/api/workspace", json=payload)
+        assert posted.status_code == 200, posted.text
+        disk = api._load_workspace_from_disk()
+        saved_extra = disk.projects[extra.id]
+        assert "a_keep" not in saved_extra.assets
+    finally:
+        _teardown_temp_store(tmp, old_path, old_assets)
+
+
+def test_post_delete_page_succeeds_and_drops_project():
+    """Deleting a page removes its project from the client payload; the save
+    must succeed and drop the project without touching sibling content."""
+    ws, extra = _workspace_with_bodied_page()
+    tmp, old_path, old_assets = _setup_temp_store(ws)
+    try:
+        client = TestClient(api.app)
+        payload = ws.to_dict()
+        del payload["projects"][extra.id]
+        posted = client.post("/api/workspace", json=payload)
+        assert posted.status_code == 200, posted.text
+        disk = api._load_workspace_from_disk()
+        assert extra.id not in disk.projects
+    finally:
+        _teardown_temp_store(tmp, old_path, old_assets)
 
 
 def main():
@@ -158,7 +305,16 @@ def main():
         test_incoming_would_not_wipe_one_hydrated_plus_stubs,
         test_post_all_stubs_rejected_disk_unchanged,
         test_incoming_complete_but_collections_empty_is_flagged,
-        test_post_collection_wipe_rejected_disk_unchanged,
+        test_plan_restore_synthesized_default_body_over_edited_layout,
+        test_plan_trust_synthesized_shape_on_pristine_layout,
+        test_plan_restore_dangling_references,
+        test_plan_trust_legitimate_empty_page,
+        test_plan_trust_partial_user_wipe,
+        test_plan_restore_fabricated_layout_on_total_wipe,
+        test_post_stale_empty_body_restored_not_rejected,
+        test_post_synthesized_body_over_edited_layout_restored,
+        test_post_legitimate_page_emptying_is_trusted,
+        test_post_delete_page_succeeds_and_drops_project,
     ]
     for test in tests:
         test()
