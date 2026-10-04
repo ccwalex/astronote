@@ -2,11 +2,10 @@ import { forcePageWriteUnlock, postPagePresence, type PagePresenceStatus } from 
 
 export type { PagePresenceStatus };
 
-export type WriteProtectionState = {
-  readOnly: boolean;
-  bannerText: string | null;
-  canForceUnlock: boolean;
-};
+export {
+  deriveWriteProtection,
+  type WriteProtectionState,
+} from './pagePresenceCore';
 
 const SESSION_STORAGE_KEY = 'astronote_page_session';
 
@@ -22,20 +21,6 @@ export function getOrCreatePageSessionId(): string {
   } catch {
     return `page_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
   }
-}
-
-export function deriveWriteProtection(
-  status: PagePresenceStatus | null
-): WriteProtectionState {
-  if (!status || status.can_write) {
-    return { readOnly: false, bannerText: null, canForceUnlock: false };
-  }
-  const count = Math.max(1, status.viewer_count || 1);
-  return {
-    readOnly: true,
-    bannerText: `Another viewer is editing this page (${count} viewers). Editing is locked.`,
-    canForceUnlock: true,
-  };
 }
 
 export type PagePresenceController = {

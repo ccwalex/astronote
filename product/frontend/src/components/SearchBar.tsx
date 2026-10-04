@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { marked } from 'marked';
-import { searchWorkspaceServer } from '../api';
+import { searchWorkspaceServer, type BackendSearchResultRow } from '../api';
 import DOMPurify from 'dompurify';
 import { Workspace } from '../types';
 import {
@@ -30,6 +30,37 @@ import {
 
 type SearchMode = 'plain' | 'rag';
 type RAGRetrievalMode = BackendRetrievalMode;
+
+/** Hard cap for a plain search request so a hung request cannot pin the UI. */
+const PLAIN_SEARCH_TIMEOUT_MS = 30000;
+
+/** Delay before the single retry of a failed server search (ms). */
+const PLAIN_SEARCH_RETRY_DELAY_MS = 800;
+
+/**
+ * Bound for each RAG call (retrieval + LLM). LLM responses can be slow, so
+ * this is generous — it only exists so a hung request cannot pin the button.
+ */
+const RAG_SEARCH_TIMEOUT_MS = 120000;
+
+/** Reject after `ms` if `p` has not settled; the underlying promise keeps running. */
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const id = window.setTimeout(() => {
+      reject(new Error(`${label} timed out.`));
+    }, ms);
+    p.then(
+      (value) => {
+        window.clearTimeout(id);
+        resolve(value);
+      },
+      (err) => {
+        window.clearTimeout(id);
+        reject(err);
+      }
+    );
+  });
+}
 
 interface SearchBarProps {
   workspace: Workspace;
@@ -136,13 +167,26 @@ export function SearchBar({ workspace, onOpenProject, onSelectSpace }: SearchBar
     void load();
   }, []);
 
+  const localResults = useMemo(
+    () => (submittedQuery.trim() ? searchWorkspace(workspace, submittedQuery) : []),
+    [workspace, submittedQuery]
+  );
+
   const results = useMemo(() => {
     if (!submittedQuery.trim()) return [];
-    const base =
-      serverResults ??
-      (plainSearchFailed ? searchWorkspace(workspace, submittedQuery) : []);
+    // Keep previous results visible while a new search is pending (serverResults
+    // is left untouched). A server miss ([]) or failure falls back to matches on
+    // pages already loaded in memory, including the open page.
+    let base: SearchResult[];
+    if (serverResults && serverResults.length > 0) {
+      base = serverResults;
+    } else if (serverResults === null && !plainSearchFailed) {
+      base = [];
+    } else {
+      base = localResults;
+    }
     return filterResultsByFolders(workspace, base, submittedFolderIds);
-  }, [workspace, submittedQuery, submittedFolderIds, serverResults, plainSearchFailed]);
+  }, [workspace, submittedQuery, submittedFolderIds, serverResults, plainSearchFailed, localResults]);
 
   const ragResponse = useMemo<RAGResponseViewModel | null>(() => {
     if (searchMode !== 'rag' || !submittedQuery.trim()) {
@@ -223,21 +267,43 @@ export function SearchBar({ workspace, onOpenProject, onSelectSpace }: SearchBar
       abortPlainSearch();
       const controller = new AbortController();
       plainSearchAbortRef.current = controller;
+      let timedOut = false;
+      const timeoutId = window.setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, PLAIN_SEARCH_TIMEOUT_MS);
       setIsPlainSearching(true);
       setPlainSearchFailed(false);
       setPlainSearchError('');
-      setServerResults(null);
+      // One retry before falling back: the fallback only scans pages already
+      // loaded in memory, so a transient server failure would silently miss
+      // pages that were never opened.
+      const attempt = (): Promise<BackendSearchResultRow[]> => {
+        const retry = new Promise<BackendSearchResultRow[]>((resolve, reject) => {
+          window.setTimeout(() => {
+            searchWorkspaceServer(normalized, { signal: controller.signal }).then(resolve, reject);
+          }, PLAIN_SEARCH_RETRY_DELAY_MS);
+        });
+        return searchWorkspaceServer(normalized, { signal: controller.signal })
+          .catch((firstErr: unknown) => {
+            if (controller.signal.aborted) throw firstErr;
+            return retry;
+          });
+      };
       try {
-        const rows = await searchWorkspaceServer(normalized, { signal: controller.signal });
+        const rows = await attempt();
         if (plainSearchSeqRef.current !== seq) return;
         setServerResults(convertBackendSearchResults(rows, workspace));
       } catch (err: any) {
         if (plainSearchSeqRef.current !== seq) return;
-        if (err?.name === 'AbortError') return;
+        if (err?.name === 'AbortError' && !timedOut) return;
         setServerResults(null);
         setPlainSearchFailed(true);
-        setPlainSearchError(err?.message || 'Server search failed.');
+        setPlainSearchError(
+          timedOut ? 'Search timed out.' : err?.message || 'Server search failed.'
+        );
       } finally {
+        window.clearTimeout(timeoutId);
         if (plainSearchSeqRef.current === seq) {
           setIsPlainSearching(false);
         }
@@ -266,12 +332,20 @@ export function SearchBar({ workspace, onOpenProject, onSelectSpace }: SearchBar
 
     try {
       const [, result] = await Promise.all([
-        searchRAG({ query: normalized, ...ragPayload }).catch(() => null),
-        callLLM({
-          prompt: normalized,
-          maxTokens: 2048,
-          ...ragPayload,
-        }),
+        withTimeout(
+          searchRAG({ query: normalized, ...ragPayload }).catch(() => null),
+          RAG_SEARCH_TIMEOUT_MS,
+          'RAG retrieval'
+        ),
+        withTimeout(
+          callLLM({
+            prompt: normalized,
+            maxTokens: 2048,
+            ...ragPayload,
+          }),
+          RAG_SEARCH_TIMEOUT_MS,
+          'RAG request'
+        ),
       ]);
       setRagAnswer(result.response);
       setRagMasterNodeLinks(result.masterNodeLinks || []);
@@ -494,7 +568,9 @@ export function SearchBar({ workspace, onOpenProject, onSelectSpace }: SearchBar
                 ))
               ) : (
                 <div style={{ padding: '0.5rem', color: '#666', fontSize: '0.9rem', borderBottom: searchMode === 'rag' ? '1px solid #eee' : 'none' }}>
-                  No results found.
+                  {searchMode === 'plain' && isPlainSearching
+                    ? 'Searching...'
+                    : 'No results found.'}
                 </div>
               )}
             </>

@@ -14,13 +14,11 @@ import {
   noteHydratedMarkdownAssets,
 } from './workspaceLoad';
 
-const envPollMs = (import.meta as { env?: { VITE_WORKSPACE_REVISION_POLL_MS?: string } }).env
-  ?.VITE_WORKSPACE_REVISION_POLL_MS;
-const parsedPollMs = typeof envPollMs === 'string' ? Number(envPollMs) : NaN;
-
-/** Poll interval for server revision checks (ms). Override with VITE_WORKSPACE_REVISION_POLL_MS. */
-export const WORKSPACE_REVISION_POLL_MS =
-  Number.isFinite(parsedPollMs) && parsedPollMs >= 2000 ? parsedPollMs : 5000;
+export {
+  WORKSPACE_REVISION_POLL_MS,
+  WORKSPACE_REVISION_POLL_MAX_BACKOFF_MS,
+  computeRevisionPollDelayMs,
+} from './revisionPoll';
 
 export type RefreshWorkspaceFromServerResult = {
   present: Workspace;

@@ -65,9 +65,12 @@ import { collectDirtyMarkdownAssets, isProjectHydrated, loadProjectIntoWorkspace
 import { bootstrapWorkspaceLoad, type BootstrapWorkspaceResult } from './model/bootstrapWorkspace';
 import {
   refreshWorkspaceFromServer,
-  WORKSPACE_REVISION_POLL_MS,
   type RefreshWorkspaceFromServerResult,
 } from './model/workspaceServerSync';
+import {
+  createRevisionPollLoop,
+  decideRevisionPollAction,
+} from './model/revisionPoll';
 import {
   clearWorkspaceDirty,
   createWorkspaceDirtyGate,
@@ -940,84 +943,69 @@ export default function App() {
 
   useEffect(() => {
     if (loading) return;
-    let cancelled = false;
-    let timer: number | null = null;
-
-    const schedule = () => {
-      if (!cancelled) {
-        timer = window.setTimeout(() => {
-          void poll();
-        }, WORKSPACE_REVISION_POLL_MS);
-      }
-    };
-
-    const poll = async () => {
-      if (cancelled || loading) return;
-      if (typeof document !== 'undefined' && document.hidden) {
-        schedule();
-        return;
-      }
-      if (persistInFlightRef.current > 0 || serverRefreshInFlightRef.current) {
-        schedule();
-        return;
-      }
-      try {
+    const loop = createRevisionPollLoop({
+      isActive: () => true,
+      shouldFetch: () =>
+        !(typeof document !== 'undefined' && document.hidden) &&
+        persistInFlightRef.current === 0 &&
+        !serverRefreshInFlightRef.current,
+      fetch: async (signal) => {
         const { workspace_revision: serverRev, page_presence: pagePresence } =
           await fetchWorkspaceRevision({
             projectId: selectedProjectIdRef.current,
             sessionId: getOrCreatePageSessionId(),
+            signal,
           });
+        if (signal.aborted) return;
         if (pagePresence) {
           applyPagePresenceStatus(pagePresence);
         }
-        if (cancelled || serverRev == null) {
-          schedule();
-          return;
-        }
-        const clientRev = serverRevisionRef.current;
-        if (clientRev == null) {
-          serverRevisionRef.current = serverRev;
-          schedule();
-          return;
-        }
-        if (serverRev <= clientRev) {
-          setServerAheadNotice(null);
-          schedule();
-          return;
-        }
+        if (serverRev == null) return;
         const dirty =
           isWorkspaceDirty(workspaceDirtyGateRef.current) || hasUnsavedLocalRef.current;
-        if (dirty) {
-          // Save already failed / page locked — reload would discard local edits.
-          if (!persistBlockedRef.current && !pageWriteProtectedRef.current) {
-            setServerAheadNotice(
-              `Server workspace updated (revision ${serverRev}). Reload to sync your view.`
-            );
-          }
-          schedule();
+        const decision = decideRevisionPollAction(serverRevisionRef.current, serverRev, dirty);
+        if (decision.action === 'idle') {
+          setServerAheadNotice(null);
           return;
         }
+        if (decision.action === 'notice') {
+          // Save already failed / page locked — reload would discard local edits.
+          if (!persistBlockedRef.current && !pageWriteProtectedRef.current) {
+            setServerAheadNotice(decision.message);
+          }
+          return;
+        }
+        // 'refresh' — including the first observed revision: adopting the
+        // server revision without fetching the tree would leave later polls
+        // believing they are up to date.
         serverRefreshInFlightRef.current = true;
         setServerAheadNotice(null);
-        const result = await refreshWorkspaceFromServer(selectedProjectIdRef.current, {
-          forceProjectRefresh: true,
-        });
-        if (cancelled) return;
-        applyServerRefresh(result, { flashSynced: true });
-      } catch (err) {
+        try {
+          const result = await refreshWorkspaceFromServer(selectedProjectIdRef.current, {
+            forceProjectRefresh: true,
+          });
+          if (signal.aborted) return;
+          applyServerRefresh(result, { flashSynced: true });
+        } finally {
+          serverRefreshInFlightRef.current = false;
+        }
+      },
+      onError: (err) => {
         console.warn('Workspace revision poll failed', err);
-      } finally {
-        serverRefreshInFlightRef.current = false;
-        schedule();
+      },
+    });
+
+    const handleVisibilityChange = () => {
+      if (!document.hidden) {
+        loop.pollNow();
       }
     };
 
-    void poll();
+    loop.start();
+    document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => {
-      cancelled = true;
-      if (timer !== null) {
-        window.clearTimeout(timer);
-      }
+      loop.stop();
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, [loading, selectedProjectId]);
 

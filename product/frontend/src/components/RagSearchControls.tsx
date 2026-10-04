@@ -98,9 +98,18 @@ export function filterResultsByFolders(
   if (folderIds.length === 0) return [];
   const scope = collectFolderScope(workspace, folderIds);
   return results.filter((result) => {
-    if (result.libraryNodeId && scope.nodeIds.has(result.libraryNodeId)) return true;
-    if (result.projectId && scope.projectIds.has(result.projectId)) return true;
-    return false;
+    // A result whose page/project is absent from the (possibly stale) local
+    // tree cannot be placed in a folder; keep it rather than silently drop
+    // a server hit. Only provably out-of-scope results are filtered.
+    if (result.libraryNodeId) {
+      if (!workspace.library_nodes?.[result.libraryNodeId]) return true;
+      return scope.nodeIds.has(result.libraryNodeId);
+    }
+    if (result.projectId) {
+      if (!workspace.projects?.[result.projectId]) return true;
+      return scope.projectIds.has(result.projectId);
+    }
+    return true;
   });
 }
 

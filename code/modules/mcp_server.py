@@ -281,7 +281,7 @@ def _load_workspace_for_rag():
 
 
 def tool_get_workspace() -> dict[str, Any]:
-    return _load_mcp_workspace().to_dict()
+    return _call_api(lambda: _load_mcp_workspace().to_dict())
 
 
 def tool_get_text_format_schema() -> dict[str, Any]:
@@ -289,7 +289,10 @@ def tool_get_text_format_schema() -> dict[str, Any]:
 
 
 def tool_get_asset(id: str) -> dict[str, Any]:
+    import copy as _copy
+
     from api import ASSETS_DIR
+    from modules.save_workspace import _hydrate_one_asset
 
     asset_id = str(id or "").strip()
     if not asset_id:
@@ -302,7 +305,17 @@ def tool_get_asset(id: str) -> dict[str, Any]:
         asset = _dict_get(assets, asset_id)
         if asset is None:
             continue
-        workspace_payload = asset.to_dict() if hasattr(asset, "to_dict") else dict(asset)
+        # The MCP read cache is loaded without hydration, so markdown/text
+        # content is missing there. Hydrate a throwaway copy for the response
+        # so the shared cache stays untouched.
+        try:
+            asset_copy = _copy.copy(asset)
+            _hydrate_one_asset(asset_copy, ASSETS_DIR)
+            workspace_payload = (
+                asset_copy.to_dict() if hasattr(asset_copy, "to_dict") else dict(asset_copy)
+            )
+        except Exception:
+            workspace_payload = asset.to_dict() if hasattr(asset, "to_dict") else dict(asset)
         workspace_payload["project_id"] = project_id
         break
 

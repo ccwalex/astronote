@@ -3,7 +3,7 @@
  *   node --experimental-strip-types product/frontend/src/model/pagePresence.test.ts
  */
 
-import { deriveWriteProtection } from './pagePresence.ts';
+import { deriveWriteProtection } from './pagePresenceCore.ts';
 
 function assert(cond: unknown, msg: string): void {
   if (!cond) throw new Error(msg);

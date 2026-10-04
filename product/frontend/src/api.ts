@@ -256,6 +256,7 @@ function parsePagePresenceStatus(data: unknown): PagePresenceStatus | null {
 export async function fetchWorkspaceRevision(options?: {
   projectId?: string | null;
   sessionId?: string | null;
+  signal?: AbortSignal;
 }): Promise<WorkspaceRevisionResponse> {
   const params = new URLSearchParams();
   const projectId = options?.projectId?.trim();
@@ -272,7 +273,7 @@ export async function fetchWorkspaceRevision(options?: {
   let response: Response;
 
   try {
-    response = await fetch(endpoint, withNoStore({ headers }));
+    response = await fetch(endpoint, withNoStore({ headers, signal: options?.signal }));
   } catch (err) {
     throw makeNetworkError('Fetch workspace revision', endpoint, err);
   }

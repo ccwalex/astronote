@@ -1,4 +1,7 @@
+import os
 import unittest
+import shutil
+import tempfile
 from unittest.mock import patch
 
 import numpy as np
@@ -12,6 +15,9 @@ from modules.workspace import Workspace
 
 class TestEmbeddingSearch(unittest.TestCase):
     def setUp(self):
+        self._tmp_dir = tempfile.mkdtemp(prefix="embed_test_")
+        # Keep tracking/embedding state out of the real data/ directory.
+        self.persist_path = os.path.join(self._tmp_dir, "embeddings.pkl")
         self.workspace = Workspace(id="w_embed", name="Embedding Workspace")
         project = Project(id="p1", name="Project 1")
         self.workspace.projects[project.id] = project
@@ -38,6 +44,9 @@ class TestEmbeddingSearch(unittest.TestCase):
             content="data:application/pdf;base64,BBBB",
         )
 
+    def tearDown(self):
+        shutil.rmtree(self._tmp_dir, ignore_errors=True)
+
     @staticmethod
     def _fake_embed(text: str, input_type: str) -> np.ndarray:
         lower = text.lower()
@@ -56,7 +65,7 @@ class TestEmbeddingSearch(unittest.TestCase):
     def test_embed_workspace_skips_image_and_embeds_extractable_pdf(self, mock_pdf_extract):
         mock_pdf_extract.return_value = "General relativity and spacetime curvature"
 
-        index = WorkspaceEmbeddingIndex(embed_fn=self._fake_embed, persist_path="")
+        index = WorkspaceEmbeddingIndex(embed_fn=self._fake_embed, persist_path=self.persist_path)
         index.embed_workspace(self.workspace)
 
         self.assertTrue(index.has_embeddings)
@@ -79,7 +88,7 @@ class TestEmbeddingSearch(unittest.TestCase):
         self.assertIn("p1:a_pdf", matrix)
 
     def test_embed_asset_stores_and_updates_lookup_without_duplicates(self):
-        index = WorkspaceEmbeddingIndex(embed_fn=self._fake_embed, persist_path="")
+        index = WorkspaceEmbeddingIndex(embed_fn=self._fake_embed, persist_path=self.persist_path)
         asset = self.workspace.projects["p1"].assets["a_md"]
 
         embedded = index.embed_asset("p1", "a_md", asset)
@@ -99,7 +108,7 @@ class TestEmbeddingSearch(unittest.TestCase):
     def test_embedding_search_assets_returns_ranked_results(self, mock_pdf_extract):
         mock_pdf_extract.return_value = "General relativity and spacetime curvature"
 
-        index = WorkspaceEmbeddingIndex(embed_fn=self._fake_embed, persist_path="")
+        index = WorkspaceEmbeddingIndex(embed_fn=self._fake_embed, persist_path=self.persist_path)
         index.embed_workspace(self.workspace)
 
         results = embedding_search_assets(

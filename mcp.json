@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "astronote": {
+      "url": "http://localhost:5173/mcp"
+    }
+  }
+}

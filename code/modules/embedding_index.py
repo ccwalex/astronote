@@ -320,20 +320,39 @@ class WorkspaceEmbeddingIndex:
             return str(Path(self.persist_path).parent)
         return str(Path(DEFAULT_PERSIST_PATH).parent)
 
-    def _asset_requires_reembed(self, project_id: str, asset_id: str) -> bool:
+    def _asset_requires_reembed(
+        self,
+        project_id: str,
+        asset_id: str,
+        asset: object,
+    ) -> bool:
         try:
-            from modules.asset_tracking import get_asset_tracking_rows
+            from modules.asset_tracking import (
+                compute_asset_checksum,
+                get_asset_tracking_rows,
+            )
         except Exception:
             return True
         tracking_rows = get_asset_tracking_rows(data_dir=self._tracking_data_dir())
         row = self._tracking_row_for_asset(tracking_rows, project_id, asset_id)
-        return _tracking_requires_embed(row)
+        if _tracking_requires_embed(row):
+            return True
+        # The tracking row can be internally consistent yet describe stale
+        # content — compare the live asset checksum before skipping a re-embed.
+        try:
+            current_checksum = compute_asset_checksum(asset)
+        except Exception:
+            return True
+        embedded_checksum = (row.get("embedded_checksum") or "").strip()
+        if embedded_checksum and current_checksum != embedded_checksum:
+            return True
+        return False
 
     def embed_asset(self, project_id: str, asset_id: str, asset) -> bool:
         text = self._asset_text_for_embedding(asset, project_id=project_id)
         existing_keys = self._lookup_keys_for_asset(project_id, asset_id)
 
-        if existing_keys and not self._asset_requires_reembed(project_id, asset_id):
+        if existing_keys and not self._asset_requires_reembed(project_id, asset_id, asset):
             return False
 
         if not text:

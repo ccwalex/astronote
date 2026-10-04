@@ -350,7 +350,17 @@ def test_search_default_distance_costs():
 
 
 def test_get_workspace_and_conversion_delegate():
-    with patch("api.get_workspace", return_value={"id": "ws_1"}) as mocked:
+    class Dummy:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def to_dict(self):
+            return self._payload
+
+    with patch(
+        "modules.mcp_server._load_mcp_workspace",
+        return_value=Dummy({"id": "ws_1"}),
+    ) as mocked:
         assert tool_get_workspace() == {"id": "ws_1"}
         mocked.assert_called_once_with()
 
@@ -368,7 +378,10 @@ def test_get_workspace_and_conversion_delegate():
 def test_tool_raises_http_detail():
     from starlette.exceptions import HTTPException
 
-    with patch("api.get_workspace", side_effect=HTTPException(status_code=500, detail="boom")):
+    with patch(
+        "modules.mcp_server._load_mcp_workspace",
+        side_effect=HTTPException(status_code=500, detail="boom"),
+    ):
         try:
             tool_get_workspace()
             raise AssertionError("expected ValueError")
@@ -400,7 +413,7 @@ def test_resources_read_loaded_workspace():
     project.spaces = {"s1": space}
     workspace = type("WS", (), {"projects": {"p1": project}})()
 
-    with patch("modules.mcp_server._load_workspace", return_value=workspace):
+    with patch("modules.mcp_server._load_mcp_workspace", return_value=workspace):
         assert json.loads(resource_project("p1"))["id"] == "p1"
         space_payload = json.loads(resource_space("s1"))
         assert space_payload["id"] == "s1"
