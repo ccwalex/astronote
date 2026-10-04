@@ -151,7 +151,12 @@ def force_unlock(project_id: str, session_id: str) -> PresenceStatus:
 
 
 def check_write_allowed(project_id: str, session_id: str) -> bool:
+    now = _now()
     with _registry_lock:
+        # Prune expired sessions before deciding: a lease whose holder stopped
+        # heartbeating (closed/hidden tab) must not block writers indefinitely.
+        _prune_stale(project_id, now)
+        _ensure_lock_for_project(project_id, now)
         lock = _write_locks.get(project_id)
         if lock is None:
             return True
@@ -162,6 +167,26 @@ def get_holder_session_id(project_id: str) -> Optional[str]:
     with _registry_lock:
         lock = _write_locks.get(project_id)
         return lock.session_id if lock else None
+
+
+def get_holder_info(project_id: str) -> dict:
+    """Holder metadata for 423 responses: who holds the lease and for how long.
+
+    ttl_remaining_sec is the seconds left before the holder expires unless it
+    heartbeats again (VIEWER_TTL_SEC window since its last heartbeat).
+    """
+    now = _now()
+    with _registry_lock:
+        _prune_stale(project_id, now)
+        lock = _write_locks.get(project_id)
+        if lock is None:
+            return {"session_id": None, "ttl_remaining_sec": None}
+        viewers = _viewers.get(project_id) or {}
+        record = viewers.get(lock.session_id)
+        remaining = None
+        if record is not None:
+            remaining = max(0.0, VIEWER_TTL_SEC - (now - record.last_seen))
+        return {"session_id": lock.session_id, "ttl_remaining_sec": remaining}
 
 
 def get_viewed_project_ids(session_id: str) -> set[str]:

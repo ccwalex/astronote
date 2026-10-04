@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import mimetypes
 import os
 import shutil
@@ -23,6 +24,7 @@ from modules.workspace_lazy import incoming_would_wipe_page_bodies, is_project_i
 from modules.page_view_lock import (
     check_write_allowed,
     force_unlock as force_page_write_unlock,
+    get_holder_info,
     get_holder_session_id,
     get_viewed_project_ids,
     heartbeat as page_presence_heartbeat,
@@ -49,6 +51,7 @@ from modules.workspace_working_undo import (
     redo as redo_working_period,
     revert_working_period_to_baseline,
     save_workspace_and_snapshot,
+    save_workspace_scoped_and_snapshot,
     undo as undo_working_period,
     workspace_revision_info,
 )
@@ -170,6 +173,20 @@ RAG_LAST_RESPONSE_KEY = "last_rag_response"
 _page_load_inflight = 0
 _page_load_gate = threading.Condition()
 
+logger = logging.getLogger("astronote.api")
+
+# MCP writes and human saves wait behind in-flight browser page loads. A page
+# load is normally ~0.3s, but never let a writer hang forever on the gate:
+# after the timeout the write proceeds (actual writes stay serialized by
+# workspace_write_lock, and on-disk writes are atomic temp+rename).
+PAGE_LOAD_PRIORITY_WAIT_SEC = float(os.getenv("ASTRONOTE_PAGE_LOAD_WAIT_SEC", "10"))
+
+
+def _log_slow_step(step: str, started: float, threshold: float = 5.0) -> None:
+    duration = time.monotonic() - started
+    if duration >= threshold:
+        logger.warning("slow workspace %s: %.1fs", step, duration)
+
 
 def _asset_tracking_data_dir() -> str:
     return data_dir_from_workspace_path(WORKSPACE_PATH) or os.path.join(PROJECT_ROOT, "data")
@@ -188,10 +205,20 @@ def _release_page_load_priority():
         _page_load_gate.notify_all()
 
 
-def _wait_while_page_load_priority():
+def _wait_while_page_load_priority(timeout: Optional[float] = None) -> None:
+    wait_timeout = PAGE_LOAD_PRIORITY_WAIT_SEC if timeout is None else timeout
+    started = time.monotonic()
     with _page_load_gate:
-        while _page_load_inflight > 0:
-            _page_load_gate.wait()
+        settled = _page_load_gate.wait_for(
+            lambda: _page_load_inflight == 0, timeout=wait_timeout
+        )
+    if not settled:
+        logger.warning(
+            "page-load priority wait timed out after %.1fs (inflight=%s); proceeding",
+            wait_timeout,
+            _page_load_inflight,
+        )
+    _log_slow_step("page_load_priority_wait", started)
 
 
 
@@ -395,7 +422,10 @@ def _rag_retriever_kwargs(data: dict) -> dict[str, Any]:
 
 
 def _load_workspace_for_rag(hydrate: bool = True) -> Workspace:
-    if not os.path.exists(WORKSPACE_PATH):
+    # Store-existence must consider the sqlite backend: when only the .sqlite
+    # file exists, treating the store as missing here would replace the whole
+    # workspace with a fresh default and wipe every project.
+    if not _workspace_store_exists():
         ws = Workspace.create_default("ws_1", "Default Workspace", True)
         os.makedirs(os.path.dirname(WORKSPACE_PATH), exist_ok=True)
         save_workspace(ws, WORKSPACE_PATH)
@@ -406,6 +436,61 @@ def _load_workspace_for_rag(hydrate: bool = True) -> Workspace:
     with workspace_write_lock():
         ensure_baseline(ws, workspace_path=WORKSPACE_PATH)
     return ws
+
+
+def _load_workspace_nav() -> Workspace:
+    """Cheap nav-only load (~stubs for every project) for path resolution."""
+    return load_workspace(
+        WORKSPACE_PATH,
+        hydrate=False,
+        nav_only=True,
+        persist_repairs=False,
+        synthesize_library_bodies=False,
+    )
+
+
+def _synthesize_scoped_target_body(workspace: Workspace, project_id: Optional[str]) -> Workspace:
+    """Give the target project a usable body if the store only has a stub.
+
+    Mirrors the synthesize_library_bodies=True behavior of the full-load write
+    path, but only for the project being mutated so undo snapshots never record
+    empty synthesized bodies for sibling projects.
+    """
+    if not project_id:
+        return workspace
+    from modules.project import Project
+
+    project = workspace.projects.get(project_id)
+    if project is not None and not is_project_stub(project.to_dict()):
+        return workspace
+    name = ""
+    for node in (getattr(workspace, "library_nodes", None) or {}).values():
+        node_dict = node.to_dict() if hasattr(node, "to_dict") else node
+        if isinstance(node_dict, dict) and node_dict.get("target_project_id") == project_id:
+            node_name = node_dict.get("name")
+            if isinstance(node_name, str) and node_name.strip():
+                name = node_name.strip()
+            break
+    workspace.projects[project_id] = Project.create_default(project_id, name or "Untitled")
+    return workspace
+
+
+def _load_workspace_scoped_for_write(project_id: Optional[str]) -> Workspace:
+    """Load stubs for every project plus the full body for the target project.
+
+    A scoped read is ~0.3s versus ~30s for the full hydrate on large stores;
+    sibling projects are saved back untouched by the scoped save. Baselines the
+    pre-mutation state so the first write in a working period is undoable.
+    """
+    workspace = load_workspace(
+        WORKSPACE_PATH,
+        hydrate=True,
+        project_id=project_id or None,
+        persist_repairs=False,
+        synthesize_library_bodies=False,
+    )
+    ensure_baseline(workspace, workspace_path=WORKSPACE_PATH)
+    return _synthesize_scoped_target_body(workspace, project_id)
 
 
 SEARCH_CORPUS_TTL_SECONDS = 10.0
@@ -823,12 +908,15 @@ def _enforce_project_view_lock(
     if check_write_allowed(pid, sid):
         return
     holder = get_holder_session_id(pid)
+    holder_info = get_holder_info(pid)
     raise HTTPException(
         status_code=423,
         detail={
             "message": "Page write lock held by another viewer",
             "project_id": pid,
             "write_holder_session_id": holder,
+            "write_holder_ttl_remaining_sec": holder_info.get("ttl_remaining_sec"),
+            "hint": "The holder lease expires automatically once it stops heartbeating (TTL window); retry after it lapses.",
         },
     )
 
@@ -1167,7 +1255,8 @@ def _post_workspace_sync(
     with workspace_write_lock():
         previous_workspace: Optional[Workspace] = None
         previous_dict = None
-        if os.path.exists(WORKSPACE_PATH):
+        if _workspace_store_exists():
+            load_started = time.monotonic()
             try:
                 previous_workspace = _load_workspace_from_disk()
                 previous_dict = previous_workspace.to_dict()
@@ -1183,6 +1272,7 @@ def _post_workspace_sync(
                     status_code=400,
                     detail="On-disk workspace could not be loaded: " + str(e),
                 )
+            _log_slow_step("human_save_previous_load", load_started)
         if previous_dict is not None and incoming_would_wipe_page_bodies(data, previous_dict):
             raise HTTPException(
                 status_code=400,
@@ -1200,7 +1290,9 @@ def _post_workspace_sync(
         _drop_removed_asset_embeddings(previous_workspace, ws)
 
         os.makedirs(os.path.dirname(WORKSPACE_PATH), exist_ok=True)
+        save_started = time.monotonic()
         save_workspace_and_snapshot(ws, WORKSPACE_PATH, "save", coalesce_key=coalesce_key)
+        _log_slow_step("human_save_write", save_started)
         _bump_search_cache_generation()
         return {
             "status": "ok",
@@ -1337,7 +1429,7 @@ def post_workspace_revert_to_baseline():
 @app.get("/api/workspace/export.zip")
 def get_workspace_export_zip():
     try:
-        if not os.path.exists(WORKSPACE_PATH):
+        if not _workspace_store_exists():
             raise HTTPException(status_code=400, detail="Live workspace cannot be loaded")
         zip_bytes = pack_workspace_zip(WORKSPACE_PATH, ASSETS_DIR)
         return Response(
@@ -1954,6 +2046,33 @@ def get_asset(asset_id: str):
     return FileResponse(file_path, media_type=media_type)
 
 
+def _save_scoped_library_write(
+    workspace: Workspace,
+    reason: str,
+    *,
+    changed_project_ids=(),
+    library_nodes_changed: bool = False,
+    coalesce_key: Optional[str] = None,
+) -> dict:
+    """Persist an MCP library write without rewriting the whole store.
+
+    Sibling projects loaded as stubs keep their on-disk bodies; on the sqlite
+    backend only the changed projects' rows are replaced.
+    """
+    started = time.monotonic()
+    result = save_workspace_scoped_and_snapshot(
+        workspace,
+        WORKSPACE_PATH,
+        reason,
+        changed_project_ids=changed_project_ids,
+        library_nodes_changed=library_nodes_changed,
+        coalesce_key=coalesce_key,
+        assets_dir=ASSETS_DIR,
+    )
+    _log_slow_step(f"{reason}_save", started)
+    return result
+
+
 @app.post("/api/library/folder")
 def post_library_folder(data: dict = Body(...)):
     path = str(data.get("path") or "").strip()
@@ -1962,9 +2081,11 @@ def post_library_folder(data: dict = Body(...)):
     try:
         _wait_while_page_load_priority()
         with workspace_write_lock():
-            workspace = _load_workspace_for_rag()
+            started = time.monotonic()
+            workspace = _load_workspace_nav()
+            _log_slow_step("create_folder_nav_load", started)
             result = create_folder_in_workspace(workspace, path)
-            save_workspace_and_snapshot(workspace, WORKSPACE_PATH, "create_folder")
+            _save_scoped_library_write(workspace, "create_folder", library_nodes_changed=True)
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1983,12 +2104,20 @@ def post_library_page(data: dict = Body(...)):
     try:
         _wait_while_page_load_priority()
         with workspace_write_lock():
-            workspace = _load_workspace_for_rag()
+            workspace = _load_workspace_nav()
             target_pid = _project_id_for_page_path(workspace, path)
             if target_pid:
                 _enforce_project_view_lock(target_pid)
             result = create_page_in_workspace(workspace, path)
-            save_workspace_and_snapshot(workspace, WORKSPACE_PATH, "create_page")
+            if result.get("created"):
+                changed_pids = [result["project_id"]]
+            else:
+                # Existing page: the node tree may have gained folders, but the
+                # project body was not touched and must not be rewritten.
+                changed_pids = []
+            _save_scoped_library_write(
+                workspace, "create_page", changed_project_ids=changed_pids, library_nodes_changed=True
+            )
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1997,6 +2126,35 @@ def post_library_page(data: dict = Body(...)):
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _create_content_space_scoped(
+    page_path: str,
+    create_fn,
+    reason: str,
+    **create_kwargs,
+):
+    """Shared scoped write path for text/image/pdf creates on an existing page."""
+    _wait_while_page_load_priority()
+    with workspace_write_lock():
+        workspace = _load_workspace_nav()
+        target_pid = _project_id_for_page_path(workspace, page_path)
+        if target_pid:
+            _enforce_project_view_lock(target_pid)
+        if not target_pid:
+            # Page without a target project: keep the legacy full-load behavior.
+            workspace = _load_workspace_for_rag()
+            result = create_fn(workspace, page_path, **create_kwargs)
+            save_workspace_and_snapshot(workspace, WORKSPACE_PATH, reason)
+            return result
+        started = time.monotonic()
+        workspace = _load_workspace_scoped_for_write(target_pid)
+        _log_slow_step(f"{reason}_scoped_load", started)
+        result = create_fn(workspace, page_path, **create_kwargs)
+        _save_scoped_library_write(
+            workspace, reason, changed_project_ids=[result["project_id"]]
+        )
+        return result
 
 
 @app.post("/api/text/create")
@@ -2008,15 +2166,14 @@ def post_text_create(data: dict = Body(...)):
     if not page_path:
         raise HTTPException(status_code=400, detail="page_path is required")
     try:
-        _wait_while_page_load_priority()
-        with workspace_write_lock():
-            workspace = _load_workspace_for_rag()
-            target_pid = _project_id_for_page_path(workspace, page_path)
-            if target_pid:
-                _enforce_project_view_lock(target_pid)
-            result = create_text_in_workspace(workspace, page_path, str(markdown), assets_dir=ASSETS_DIR)
-            save_workspace_and_snapshot(workspace, WORKSPACE_PATH, "create_text")
-        return result
+        return _create_content_space_scoped(
+            page_path,
+            lambda ws, p_path, markdown: create_text_in_workspace(
+                ws, p_path, str(markdown), assets_dir=ASSETS_DIR
+            ),
+            "create_text",
+            markdown=markdown,
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
@@ -2046,15 +2203,16 @@ def _media_create_fields(data: dict):
 def post_image_create(data: dict = Body(...)):
     page_path, filename, mime_type, content = _media_create_fields(data)
     try:
-        _wait_while_page_load_priority()
-        with workspace_write_lock():
-            workspace = _load_workspace_for_rag()
-            target_pid = _project_id_for_page_path(workspace, page_path)
-            if target_pid:
-                _enforce_project_view_lock(target_pid)
-            result = create_image_in_workspace(workspace, page_path, filename, mime_type, content, assets_dir=ASSETS_DIR)
-            save_workspace_and_snapshot(workspace, WORKSPACE_PATH, "create_image")
-        return result
+        return _create_content_space_scoped(
+            page_path,
+            lambda ws, p_path, filename, mime_type, content: create_image_in_workspace(
+                ws, p_path, filename, mime_type, content, assets_dir=ASSETS_DIR
+            ),
+            "create_image",
+            filename=filename,
+            mime_type=mime_type,
+            content=content,
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
@@ -2068,15 +2226,16 @@ def post_image_create(data: dict = Body(...)):
 def post_pdf_create(data: dict = Body(...)):
     page_path, filename, mime_type, content = _media_create_fields(data)
     try:
-        _wait_while_page_load_priority()
-        with workspace_write_lock():
-            workspace = _load_workspace_for_rag()
-            target_pid = _project_id_for_page_path(workspace, page_path)
-            if target_pid:
-                _enforce_project_view_lock(target_pid)
-            result = create_pdf_in_workspace(workspace, page_path, filename, mime_type, content, assets_dir=ASSETS_DIR)
-            save_workspace_and_snapshot(workspace, WORKSPACE_PATH, "create_pdf")
-        return result
+        return _create_content_space_scoped(
+            page_path,
+            lambda ws, p_path, filename, mime_type, content: create_pdf_in_workspace(
+                ws, p_path, filename, mime_type, content, assets_dir=ASSETS_DIR
+            ),
+            "create_pdf",
+            filename=filename,
+            mime_type=mime_type,
+            content=content,
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:

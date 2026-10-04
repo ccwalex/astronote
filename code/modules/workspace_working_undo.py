@@ -99,8 +99,13 @@ from tempfile import NamedTemporaryFile
 from typing import Any, Optional
 
 from modules.load_workspace import load_workspace
-from modules.save_workspace import save_workspace, strip_asset_content_from_dict
+from modules.save_workspace import (
+    assets_dir_from_workspace_path,
+    save_workspace,
+    strip_asset_content_from_dict,
+)
 from modules.workspace import Workspace
+from modules.workspace_lazy import merge_incoming_workspace_dict
 
 UNDO_STATE_FILENAME = "undo_state.json"
 OBJECTS_DIRNAME = "objects"
@@ -394,14 +399,13 @@ def record_after_mutation(
     return save_undo_state(workspace.id, state, workspace_path, snapshot_root)
 
 
-def save_workspace_and_snapshot(
+def _record_revision_after_save(
     workspace: Workspace,
     path: str,
     reason: str,
     coalesce_key: Optional[str] = None,
     snapshot_root: Optional[str] = None,
 ) -> dict:
-    save_workspace(workspace, path)
     state = record_after_mutation(
         workspace,
         reason=reason,
@@ -418,6 +422,105 @@ def save_workspace_and_snapshot(
     )
 
 
+def save_workspace_and_snapshot(
+    workspace: Workspace,
+    path: str,
+    reason: str,
+    coalesce_key: Optional[str] = None,
+    snapshot_root: Optional[str] = None,
+) -> dict:
+    save_workspace(workspace, path)
+    return _record_revision_after_save(
+        workspace, path, reason, coalesce_key=coalesce_key, snapshot_root=snapshot_root
+    )
+
+
+def _workspace_store_exists(path: str) -> bool:
+    if os.path.exists(path):
+        return True
+    from modules.workspace_sqlite import sqlite_path_from_workspace_path
+
+    return os.path.isfile(sqlite_path_from_workspace_path(path))
+
+
+def _merge_workspace_over_disk(
+    workspace: Workspace,
+    path: str,
+    assets_dir: Optional[str] = None,
+) -> Workspace:
+    """Merge a scoped/stub-laden workspace over the on-disk store.
+
+    Stub projects that library nodes still reference keep their on-disk bodies,
+    so a project-scoped save cannot wipe sibling projects (JSON backend). On a
+    missing store the workspace is saved as-is.
+    """
+    from modules.load_workspace import load_workspace
+    from modules.workspace import repair_workspace_dict
+
+    if _workspace_store_exists(path):
+        previous = load_workspace(
+            path,
+            hydrate=False,
+            persist_repairs=False,
+            synthesize_library_bodies=False,
+        )
+        merged = merge_incoming_workspace_dict(workspace.to_dict(), previous.to_dict())
+        merged = repair_workspace_dict(merged, assets_dir=assets_dir)
+        return Workspace.from_dict(merged)
+    return workspace
+
+
+def save_workspace_scoped_and_snapshot(
+    workspace: Workspace,
+    path: str,
+    reason: str,
+    changed_project_ids,
+    library_nodes_changed: bool = False,
+    coalesce_key: Optional[str] = None,
+    snapshot_root: Optional[str] = None,
+    assets_dir: Optional[str] = None,
+) -> dict:
+    """Persist a project-scoped workspace mutation without a full-store rewrite.
+
+    On the sqlite backend only the changed projects' rows (and optionally the
+    library node tree) are replaced inside one transaction. Every other project
+    keeps its stored body, so callers may work with a scoped load (stubs for
+    siblings) instead of the full ~30s hydrate. Other backends fall back to a
+    merge-protected full save.
+    """
+    from modules.save_workspace import spill_project_assets
+    from modules.workspace_sqlite import (
+        detect_workspace_backend,
+        save_workspace_project_sqlite,
+    )
+
+    ids = [str(pid) for pid in (changed_project_ids or []) if str(pid or "").strip()]
+    if assets_dir:
+        for pid in ids:
+            spill_project_assets(workspace, assets_dir, pid)
+    workspace.validate()
+
+    if detect_workspace_backend(path) == "sqlite":
+        try:
+            save_workspace_project_sqlite(
+                workspace,
+                path,
+                ids,
+                include_library_nodes=library_nodes_changed,
+            )
+            return _record_revision_after_save(
+                workspace, path, reason, coalesce_key=coalesce_key, snapshot_root=snapshot_root
+            )
+        except FileNotFoundError:
+            pass  # No sqlite store yet — fall through to the merge-protected full save.
+
+    merged = _merge_workspace_over_disk(workspace, path, assets_dir=assets_dir)
+    save_workspace(merged, path)
+    return _record_revision_after_save(
+        merged, path, reason, coalesce_key=coalesce_key, snapshot_root=snapshot_root
+    )
+
+
 def restore_hash_to_workspace_file(
     workspace_id: str,
     digest: str,
@@ -425,7 +528,18 @@ def restore_hash_to_workspace_file(
     snapshot_root: Optional[str] = None,
 ) -> Workspace:
     src = object_path(workspace_id, digest, dest_workspace_path, snapshot_root)
-    restored = load_workspace(src)
+    restored = load_workspace(
+        src,
+        persist_repairs=False,
+        synthesize_library_bodies=False,
+    )
+    assets_dir = assets_dir_from_workspace_path(dest_workspace_path)
+    # Undo/redo entries recorded from project-scoped saves contain stubs for
+    # sibling projects; merging over the live store keeps their bodies while
+    # still reverting the projects the entry covers.
+    restored = _merge_workspace_over_disk(
+        restored, dest_workspace_path, assets_dir=assets_dir
+    )
     save_workspace(restored, dest_workspace_path)
     return restored
 

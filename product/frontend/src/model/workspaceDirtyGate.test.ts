@@ -216,12 +216,17 @@ function testDecideDebouncedPersistMatrix() {
     'no hydrated project => no schedule'
   );
   assert(
-    decideDebouncedPersist({ ...base, skipBackendPersist: true }).shouldSchedule === false,
-    'skip blocks schedule'
+    decideDebouncedPersist({ ...base, skipBackendPersist: true }).shouldSchedule === true,
+    'dirty + skip still schedules (first post-refresh edit is saved)'
   );
   assert(
     decideDebouncedPersist({ ...base, skipBackendPersist: true }).consumeSkip === true,
     'skip consumed when dirty'
+  );
+  assert(
+    decideDebouncedPersist({ ...base, skipBackendPersist: true, suppressPersist: true })
+      .shouldSchedule === false,
+    'suppress blocks even with skip'
   );
   assert(
     decideDebouncedPersist({ ...base, suppressPersist: true }).shouldSchedule === false,
@@ -238,9 +243,45 @@ function testDecideDebouncedPersistMatrix() {
   );
 }
 
+/**
+ * Regression: after hydrate/server refresh, skipBackendPersist consumed the
+ * user's first edit without scheduling a save — the toolbar sat on "Unsaved
+ * changes" until the next history change. The decision must consume the skip
+ * AND schedule.
+ */
+function testSkipDoesNotEatFirstEditAfterRefresh() {
+  const gate = createWorkspaceDirtyGate();
+  const workspace = buildBootstrapWorkspace(600);
+  let skipBackendPersist = true;
+  let persistCalls = 0;
+
+  const runPersistEffect = () => {
+    const decision = decideDebouncedPersist({
+      launchSettled: true,
+      hasUserMutation: isWorkspaceDirty(gate),
+      shouldPersistWorkspace: shouldPersistWorkspace(workspace),
+      skipBackendPersist,
+      suppressPersist: false,
+      persistBlocked: false,
+    });
+    if (decision.drainSkip || decision.consumeSkip) {
+      skipBackendPersist = false;
+    }
+    if (decision.shouldSchedule) {
+      persistCalls += 1;
+    }
+  };
+
+  markUserMutation(gate);
+  runPersistEffect();
+  assert(skipBackendPersist === false, 'skip consumed by first mutation');
+  assert(persistCalls === 1, 'first mutation after refresh schedules a save');
+}
+
 function main() {
   testGateDefaultsClean();
   testDecideDebouncedPersistMatrix();
+  testSkipDoesNotEatFirstEditAfterRefresh();
   testBootstrap600NoPersistUntilMutation();
   testHeightAutoResizeChurnNoPersist();
   console.log('workspaceDirtyGate.test.ts: all passed');

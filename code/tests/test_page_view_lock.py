@@ -241,12 +241,50 @@ def test_presence_endpoint_round_trip():
     assert leave_res.json()["status"] == "left"
 
 
+def test_stale_holder_lease_expires_without_any_heartbeat():
+    """Regression: a lease whose holder stopped heartbeating must expire on its own.
+
+    check_write_allowed used to compare session ids without pruning stale
+    sessions, so a closed/hidden tab could block MCP writes with 423 forever.
+    """
+    from modules import page_view_lock
+
+    reset_registry_for_tests()
+    now = time.monotonic()
+    with patch("modules.page_view_lock._now", return_value=now):
+        heartbeat("proj_a", "session_a")
+    assert page_view_lock.check_write_allowed("proj_a", "") is False
+
+    # No further heartbeat from anyone: after the TTL the lease must lapse.
+    with patch("modules.page_view_lock._now", return_value=now + VIEWER_TTL_SEC + 1):
+        assert page_view_lock.check_write_allowed("proj_a", "") is True
+        holder = page_view_lock.get_holder_info("proj_a")
+        assert holder["session_id"] is None
+
+
+def test_stale_holder_lease_transfers_to_active_viewer():
+    from modules import page_view_lock
+
+    reset_registry_for_tests()
+    now = time.monotonic()
+    with patch("modules.page_view_lock._now", return_value=now):
+        heartbeat("proj_a", "session_a")
+        heartbeat("proj_a", "session_b")
+    with patch("modules.page_view_lock._now", return_value=now + VIEWER_TTL_SEC + 1):
+        # session_b heartbeats again (fresh last_seen), session_a stays stale.
+        heartbeat("proj_a", "session_b")
+        assert page_view_lock.check_write_allowed("proj_a", "session_b") is True
+        assert page_view_lock.get_holder_session_id("proj_a") == "session_b"
+
+
 def main():
     test_first_heartbeat_grants_write()
     test_second_viewer_is_read_only()
     test_force_unlock_transfers_holder()
     test_leave_releases_lock_for_remaining_viewer()
     test_stale_viewer_ttl_prunes_and_releases_lock()
+    test_stale_holder_lease_expires_without_any_heartbeat()
+    test_stale_holder_lease_transfers_to_active_viewer()
     test_save_rejected_when_non_holder_posts_workspace()
     test_save_allowed_when_only_other_page_locked()
     test_revision_poll_registers_presence()

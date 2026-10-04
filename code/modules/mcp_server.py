@@ -1,12 +1,32 @@
 import asyncio
+import concurrent.futures
 import inspect
 import json
+import logging
 import mimetypes
 import os
 import sys
+import threading
 from typing import Any, Optional
 
 from modules.library_write import TEXT_FORMAT_GUIDE, get_text_format_schema
+
+logger = logging.getLogger("astronote.mcp")
+
+# Dedicated, bounded executor for MCP tool dispatch. asyncio.to_thread shares
+# the loop's default executor with human saves; when MCP workers got stuck in
+# unbounded waits, every subsequent POST /mcp (including initialize) queued
+# behind them and the whole transport appeared dead. Saturation here degrades
+# to an immediate retryable error instead.
+_MCP_DISPATCH_MAX_WORKERS = int(os.getenv("ASTRONOTE_MCP_WORKERS", "4"))
+_MCP_DISPATCH_QUEUE_LIMIT = int(os.getenv("ASTRONOTE_MCP_QUEUE_LIMIT", "8"))
+_MCP_DISPATCH_TIMEOUT_SEC = float(os.getenv("ASTRONOTE_MCP_TIMEOUT", "120"))
+_mcp_dispatch_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=_MCP_DISPATCH_MAX_WORKERS, thread_name_prefix="mcp-dispatch"
+)
+_mcp_dispatch_slots = threading.BoundedSemaphore(
+    _MCP_DISPATCH_MAX_WORKERS + _MCP_DISPATCH_QUEUE_LIMIT
+)
 
 
 def _dict_get(mapping, key, default=None):
@@ -265,6 +285,36 @@ def _call_api(fn, *args, **kwargs):
         return fn(*args, **kwargs)
     except (FastAPIHTTPException, StarletteHTTPException) as exc:
         raise ValueError(str(exc.detail)) from exc
+
+
+def _run_mcp_sync(fn, *args, **kwargs):
+    """Run a sync MCP job on the dedicated bounded executor (call from async)."""
+    if not _mcp_dispatch_slots.acquire(blocking=False):
+        raise MCPServerBusy("MCP server busy; retry shortly")
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        _mcp_dispatch_slots.release()
+
+
+class MCPServerBusy(RuntimeError):
+    """Raised when the bounded MCP dispatch queue is saturated or timed out."""
+
+
+async def _run_mcp_sync_async(fn, *args, **kwargs):
+    loop = asyncio.get_running_loop()
+    try:
+        fut = loop.run_in_executor(
+            _mcp_dispatch_executor, lambda: _run_mcp_sync(fn, *args, **kwargs)
+        )
+        return await asyncio.wait_for(fut, timeout=_MCP_DISPATCH_TIMEOUT_SEC)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "MCP dispatch timed out after %.1fs (%s)",
+            _MCP_DISPATCH_TIMEOUT_SEC,
+            getattr(fn, "__name__", "tool"),
+        )
+        raise MCPServerBusy("MCP tool timed out server-side; retry") from None
 
 
 def _load_mcp_workspace():
@@ -747,7 +797,17 @@ def _stub_fastmcp(name="Astronote"):
                     return
                 # Sync tool/resource execution must not block the event loop,
                 # otherwise human requests freeze while MCP work runs.
-                result = await asyncio.to_thread(self._jsonrpc_from_payload, payload)
+                try:
+                    result = await _run_mcp_sync_async(self._jsonrpc_from_payload, payload)
+                except MCPServerBusy as exc:
+                    await _send_json(
+                        send,
+                        503,
+                        _jsonrpc_error_message(
+                            _jsonrpc_request_id(payload), -32000, str(exc)
+                        ),
+                    )
+                    return
                 await _send_json(send, 200, result)
             return asgi_app
 
@@ -786,23 +846,44 @@ def _make_fastmcp():
 
 def create_mcp():
     mcp = _make_fastmcp()
+    # The stub invokes tool bodies from its dispatch worker thread (already off
+    # the event loop). Real FastMCP 1.x calls sync tools directly on the loop,
+    # so wrap them to run on the bounded MCP dispatch executor instead.
+    real_fastmcp = type(mcp).__name__ != "_StubFastMCP"
 
-    @mcp.tool()
+    def register_tool(fn):
+        if not real_fastmcp:
+            return mcp.tool()(fn)
+        signature = inspect.signature(fn)
+
+        async def wrapper(*args, **kwargs):
+            try:
+                return await _run_mcp_sync_async(fn, *args, **kwargs)
+            except MCPServerBusy as exc:
+                return {"content": [{"type": "text", "text": str(exc)}], "isError": True}
+
+        wrapper.__name__ = fn.__name__
+        wrapper.__doc__ = fn.__doc__
+        wrapper.__qualname__ = fn.__qualname__
+        wrapper.__signature__ = signature
+        return mcp.tool()(wrapper)
+
+    @register_tool
     def get_workspace() -> dict[str, Any]:
         """Return the current workspace (GET /api/workspace)."""
         return tool_get_workspace()
 
-    @mcp.tool()
+    @register_tool
     def get_asset(id: str) -> dict[str, Any]:
         """Get an asset by id, including workspace payload when present (GET /api/assets/{id})."""
         return tool_get_asset(id)
 
-    @mcp.tool()
+    @register_tool
     def get_text_format_schema() -> dict[str, Any]:
         """Return the create_text markdown grammar guide, allowed HTML tags, and feature flags."""
         return tool_get_text_format_schema()
 
-    @mcp.tool()
+    @register_tool
     def search(
         query: str,
         mode: str = "mixed",
@@ -825,37 +906,37 @@ def create_mcp():
             max_distance=max_distance,
         )
 
-    @mcp.tool()
+    @register_tool
     def convert_group_to_photo(project_id: str, group_space_id: str) -> dict[str, Any]:
         """Convert a group space to a photo (POST /api/spaces/convert-group-to-image)."""
         return tool_convert_group_to_photo(project_id, group_space_id)
 
-    @mcp.tool()
+    @register_tool
     def revert_photo_to_group(project_id: str, image_space_id: str) -> dict[str, Any]:
         """Restore a group photo to a group (POST /api/spaces/restore-image-to-group)."""
         return tool_revert_photo_to_group(project_id, image_space_id)
 
-    @mcp.tool()
+    @register_tool
     def create_folder(path: str) -> dict[str, Any]:
         """Create library folders along a slash-separated path (POST /api/library/folder)."""
         return tool_create_folder(path)
 
-    @mcp.tool()
+    @register_tool
     def create_page(path: str) -> dict[str, Any]:
         """Create parent folders and a page with a default project (POST /api/library/page)."""
         return tool_create_page(path)
 
-    @mcp.tool()
+    @register_tool
     def create_text(page_path: str, markdown: str) -> dict[str, Any]:
         """Create a TextSpace on an existing page (POST /api/text/create). markdown accepts nested lists, headerless pipe tables, lists-in-cells, nested tables-in-cells, and literal inline marks. Full grammar: get_text_format_schema or astronote://text-format"""
         return tool_create_text(page_path, markdown)
 
-    @mcp.tool()
+    @register_tool
     def create_image(page_path: str, filename: str, mime_type: str, content: str) -> dict[str, Any]:
         """Create an ImageSpace on an existing page (POST /api/image/create)."""
         return tool_create_image(page_path, filename, mime_type, content)
 
-    @mcp.tool()
+    @register_tool
     def create_pdf(page_path: str, filename: str, mime_type: str, content: str) -> dict[str, Any]:
         """Create a single-page turn-page PDFSpace on an existing page (POST /api/pdf/create)."""
         return tool_create_pdf(page_path, filename, mime_type, content)

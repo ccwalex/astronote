@@ -206,12 +206,207 @@ def test_mcp_write_waits_for_page_load_priority():
         _teardown_workspace(tmp, old_path, old_assets)
 
 
+def test_mcp_write_proceeds_after_gate_timeout():
+    """A page-load stuck in flight must not hang MCP writes forever.
+
+    The gate wait is bounded (PAGE_LOAD_PRIORITY_WAIT_SEC); after the timeout
+    the write proceeds — actual writes stay serialized by workspace_write_lock.
+    """
+    tmp, old_path, old_assets = _setup_workspace()
+    try:
+        mcp_server.tool_create_page("notes/todo")
+        api._acquire_page_load_priority()
+        done = threading.Event()
+        error = {}
+
+        def mcp_write():
+            try:
+                mcp_server.tool_create_text("notes/todo", "proceeded after timeout")
+            except Exception as exc:
+                error["exc"] = str(exc)
+            finally:
+                done.set()
+
+        with patch.object(api, "PAGE_LOAD_PRIORITY_WAIT_SEC", 0.5):
+            worker = threading.Thread(target=mcp_write)
+            worker.start()
+            assert done.wait(timeout=15), "MCP write hung past the bounded gate wait"
+            worker.join(timeout=5)
+        assert not error, error
+        final = api._load_workspace_from_disk()
+        page = _page_for_path(final, "notes/todo")
+        texts = [
+            space
+            for space in page.spaces.values()
+            if getattr(space, "kind", "") == "TextSpace"
+        ]
+        assert len(texts) == 1
+    finally:
+        api._release_page_load_priority()
+        _teardown_workspace(tmp, old_path, old_assets)
+
+
+def test_scoped_write_preserves_sibling_project_bodies():
+    """A project-scoped MCP write must not wipe sibling projects' bodies."""
+    from modules.workspace_sqlite import (
+        detect_workspace_backend,
+        save_workspace_sqlite,
+    )
+
+    tmp, old_path, old_assets = _setup_workspace()
+    try:
+        ws = api._load_workspace_from_disk()
+        page_a = None
+        from modules.library_write import create_page_in_workspace
+
+        page_a = create_page_in_workspace(ws, "Alpha")
+        page_b = create_page_in_workspace(ws, "Beta")
+        from modules.library_write import create_text_in_workspace
+
+        create_text_in_workspace(ws, "Alpha", "alpha original", assets_dir=api.ASSETS_DIR)
+        create_text_in_workspace(ws, "Beta", "beta original", assets_dir=api.ASSETS_DIR)
+        save_workspace_sqlite(ws, api.WORKSPACE_PATH)
+        assert detect_workspace_backend(api.WORKSPACE_PATH) == "sqlite"
+
+        client = TestClient(ASGI_APP)
+        res = client.post(
+            "/api/text/create",
+            json={"page_path": "Alpha", "markdown": "alpha new text"},
+        )
+        assert res.status_code == 200, res.text
+
+        final = api._load_workspace_from_disk()
+        alpha = _page_for_path(final, "Alpha")
+        beta = _page_for_path(final, "Beta")
+        alpha_texts = [
+            space for space in alpha.spaces.values() if getattr(space, "kind", "") == "TextSpace"
+        ]
+        beta_texts = [
+            space for space in beta.spaces.values() if getattr(space, "kind", "") == "TextSpace"
+        ]
+        assert len(alpha_texts) == 2, "scoped write lost the original Alpha text"
+        assert len(beta_texts) == 1, "scoped write wiped the sibling Beta body"
+        beta_asset = next(iter(beta.assets.values()))
+        assert beta_asset.path, "sibling Beta asset lost its stored path"
+    finally:
+        _teardown_workspace(tmp, old_path, old_assets)
+
+
+def test_mcp_initialize_responds_while_tool_call_is_busy():
+    """A slow tool call must not take down the whole MCP transport."""
+    tmp, old_path, old_assets = _setup_workspace()
+    try:
+        mcp_server.tool_create_page("notes/todo")
+        original_load = api._load_workspace_nav
+
+        def slow_nav_load(*args, **kwargs):
+            time.sleep(2.0)
+            return original_load(*args, **kwargs)
+
+        with patch.object(api, "_load_workspace_nav", slow_nav_load):
+            busy = threading.Thread(
+                target=lambda: mcp_server.tool_create_text("notes/todo", "slow")
+            )
+            busy.start()
+            time.sleep(0.2)
+            client = TestClient(ASGI_APP)
+            started = time.monotonic()
+            res = client.post(
+                "/mcp",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {},
+                        "clientInfo": {"name": "t", "version": "0"},
+                    },
+                },
+                headers={"Accept": "application/json, text/event-stream"},
+            )
+            elapsed = time.monotonic() - started
+            busy.join(timeout=30)
+            assert res.status_code == 200, res.text
+            assert elapsed < 5, f"initialize waited {elapsed:.1fs} behind a busy tool call"
+    finally:
+        _teardown_workspace(tmp, old_path, old_assets)
+
+
+def test_mcp_dispatch_saturated_returns_retryable_error():
+    """When the bounded dispatch queue is saturated, /mcp must 503, not hang."""
+    tmp, old_path, old_assets = _setup_workspace()
+    try:
+        import modules.mcp_server as mcp_module
+
+        held = []
+        while mcp_module._mcp_dispatch_slots.acquire(blocking=False):
+            held.append(True)
+        try:
+            client = TestClient(ASGI_APP)
+            res = client.post(
+                "/mcp",
+                json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+                headers={"Accept": "application/json, text/event-stream"},
+            )
+            assert res.status_code == 503, res.status_code
+            body = res.json()
+            assert body["error"]["code"] == -32000
+        finally:
+            for _ in held:
+                mcp_module._mcp_dispatch_slots.release()
+    finally:
+        _teardown_workspace(tmp, old_path, old_assets)
+
+
+def test_full_read_does_not_reset_sqlite_only_store():
+    """Regression: _load_workspace_for_rag treated a sqlite-only store (no
+    workspace.json on disk) as missing and replaced it with a fresh default,
+    wiping every project on the first full read."""
+    from modules.workspace_sqlite import save_workspace_sqlite, detect_workspace_backend
+
+    tmp, old_path, old_assets = _setup_workspace()
+    try:
+        ws = api._load_workspace_from_disk()
+        from modules.library_write import create_page_in_workspace
+
+        page = create_page_in_workspace(ws, "Persisted")
+        from modules.library_write import create_text_in_workspace
+
+        create_text_in_workspace(ws, "Persisted", "keep me", assets_dir=api.ASSETS_DIR)
+        save_workspace_sqlite(ws, api.WORKSPACE_PATH)
+        assert detect_workspace_backend(api.WORKSPACE_PATH) == "sqlite"
+        if os.path.exists(api.WORKSPACE_PATH):
+            os.remove(api.WORKSPACE_PATH)
+        assert not os.path.exists(api.WORKSPACE_PATH), "test expects a sqlite-only store"
+
+        client = TestClient(ASGI_APP)
+        res = client.get("/api/workspace")
+        assert res.status_code == 200
+        body = res.json()
+        assert page["project_id"] in body.get("projects", {}), (
+            "GET /api/workspace reset a sqlite-only store to the default workspace"
+        )
+
+        res = client.post("/api/workspace/undo")
+        assert res.status_code == 200
+        final = api._load_workspace_from_disk()
+        assert page["project_id"] in final.projects, "undo path reset a sqlite-only store"
+    finally:
+        _teardown_workspace(tmp, old_path, old_assets)
+
+
 def main():
     tests = [
         test_human_save_and_mcp_write_both_applied,
         test_two_concurrent_mcp_writes_both_applied,
         test_mcp_read_cache_hit_and_invalidation,
         test_mcp_write_waits_for_page_load_priority,
+        test_mcp_write_proceeds_after_gate_timeout,
+        test_scoped_write_preserves_sibling_project_bodies,
+        test_mcp_initialize_responds_while_tool_call_is_busy,
+        test_mcp_dispatch_saturated_returns_retryable_error,
+        test_full_read_does_not_reset_sqlite_only_store,
     ]
     for test in tests:
         test()

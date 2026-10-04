@@ -241,6 +241,50 @@ def _loads(raw: Any, default: Any) -> Any:
         return default
 
 
+def _write_project_rows(conn: sqlite3.Connection, project_id: str, project: Dict[str, Any]) -> None:
+    spaces = project.get("spaces") if isinstance(project.get("spaces"), dict) else {}
+    objects = project.get("objects") if isinstance(project.get("objects"), dict) else {}
+    assets = project.get("assets") if isinstance(project.get("assets"), dict) else {}
+    header = {
+        key: value
+        for key, value in project.items()
+        if key not in {"spaces", "objects", "assets"}
+    }
+    root = header.get("root_space_id")
+    conn.execute(
+        "INSERT INTO projects(id, name, root_space_id, payload) VALUES (?, ?, ?, ?)",
+        (
+            str(project_id),
+            str(header.get("name") or ""),
+            "" if root is None else str(root),
+            _dumps(header),
+        ),
+    )
+    for space_id, space in spaces.items():
+        conn.execute(
+            "INSERT INTO spaces(project_id, id, payload) VALUES (?, ?, ?)",
+            (str(project_id), str(space_id), _dumps(space)),
+        )
+    for object_id, obj in objects.items():
+        conn.execute(
+            "INSERT INTO objects(project_id, id, payload) VALUES (?, ?, ?)",
+            (str(project_id), str(object_id), _dumps(obj)),
+        )
+    for asset_id, asset in assets.items():
+        if isinstance(asset, dict):
+            stored = dict(asset)
+            stored.pop("content", None)
+            path_value = stored.get("path")
+            if isinstance(path_value, str) and path_value.startswith("data:"):
+                raise ValueError("Refusing to persist data-URL blob")
+        else:
+            stored = asset
+        conn.execute(
+            "INSERT INTO assets(project_id, id, payload) VALUES (?, ?, ?)",
+            (str(project_id), str(asset_id), _dumps(stored)),
+        )
+
+
 def _write_payload(conn: sqlite3.Connection, payload: Dict[str, Any]) -> None:
     conn.execute("DELETE FROM meta")
     conn.execute("DELETE FROM library_nodes")
@@ -273,47 +317,7 @@ def _write_payload(conn: sqlite3.Connection, payload: Dict[str, Any]) -> None:
     for project_id, project in projects.items():
         if not isinstance(project, dict):
             continue
-        spaces = project.get("spaces") if isinstance(project.get("spaces"), dict) else {}
-        objects = project.get("objects") if isinstance(project.get("objects"), dict) else {}
-        assets = project.get("assets") if isinstance(project.get("assets"), dict) else {}
-        header = {
-            key: value
-            for key, value in project.items()
-            if key not in {"spaces", "objects", "assets"}
-        }
-        root = header.get("root_space_id")
-        conn.execute(
-            "INSERT INTO projects(id, name, root_space_id, payload) VALUES (?, ?, ?, ?)",
-            (
-                str(project_id),
-                str(header.get("name") or ""),
-                "" if root is None else str(root),
-                _dumps(header),
-            ),
-        )
-        for space_id, space in spaces.items():
-            conn.execute(
-                "INSERT INTO spaces(project_id, id, payload) VALUES (?, ?, ?)",
-                (str(project_id), str(space_id), _dumps(space)),
-            )
-        for object_id, obj in objects.items():
-            conn.execute(
-                "INSERT INTO objects(project_id, id, payload) VALUES (?, ?, ?)",
-                (str(project_id), str(object_id), _dumps(obj)),
-            )
-        for asset_id, asset in assets.items():
-            if isinstance(asset, dict):
-                stored = dict(asset)
-                stored.pop("content", None)
-                path_value = stored.get("path")
-                if isinstance(path_value, str) and path_value.startswith("data:"):
-                    raise ValueError("Refusing to persist data-URL blob")
-            else:
-                stored = asset
-            conn.execute(
-                "INSERT INTO assets(project_id, id, payload) VALUES (?, ?, ?)",
-                (str(project_id), str(asset_id), _dumps(stored)),
-            )
+        _write_project_rows(conn, str(project_id), project)
 
 
 def _read_meta_and_nodes(conn: sqlite3.Connection) -> Dict[str, Any]:
@@ -480,6 +484,59 @@ def save_workspace_sqlite(workspace: Workspace, path: str) -> str:
         backend="sqlite",
         extra={"sqlite_path": dest, "json_path": json_path_from_workspace_path(path)},
     )
+    return dest
+
+
+def save_workspace_project_sqlite(
+    workspace: Workspace,
+    path: str,
+    project_ids,
+    include_library_nodes: bool = False,
+) -> str:
+    """Atomically replace stored rows for the given projects only.
+
+    Unlike save_workspace_sqlite (which rebuilds the whole database from the
+    payload and would wipe sibling projects loaded as stubs), this updates the
+    live WAL database in a single transaction: readers keep seeing the previous
+    state until commit, and a crash rolls the whole update back. library_nodes
+    rows are replaced only when the caller says the nav tree changed.
+    """
+    from modules.save_workspace import strip_asset_content_from_dict
+
+    dest = sqlite_path_from_workspace_path(path)
+    if not os.path.isfile(dest):
+        raise FileNotFoundError(dest)
+    payload = workspace.to_dict()
+    strip_asset_content_from_dict(payload)
+    projects = payload.get("projects") if isinstance(payload.get("projects"), dict) else {}
+    nodes = payload.get("library_nodes") if isinstance(payload.get("library_nodes"), dict) else {}
+    ids = [str(pid) for pid in (project_ids or []) if str(pid or "").strip()]
+    conn = connect_workspace_sqlite(dest, readonly=False)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            _init_schema(conn)
+            if include_library_nodes:
+                conn.execute("DELETE FROM library_nodes")
+                for node_id, node in nodes.items():
+                    conn.execute(
+                        "INSERT INTO library_nodes(id, payload) VALUES (?, ?)",
+                        (str(node_id), _dumps(node)),
+                    )
+            for pid in ids:
+                conn.execute("DELETE FROM spaces WHERE project_id = ?", (pid,))
+                conn.execute("DELETE FROM objects WHERE project_id = ?", (pid,))
+                conn.execute("DELETE FROM assets WHERE project_id = ?", (pid,))
+                conn.execute("DELETE FROM projects WHERE id = ?", (pid,))
+                project = projects.get(pid)
+                if isinstance(project, dict):
+                    _write_project_rows(conn, pid, project)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    finally:
+        conn.close()
     return dest
 
 

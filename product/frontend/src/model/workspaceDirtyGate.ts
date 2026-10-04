@@ -38,7 +38,7 @@ export type DebouncedPersistInput = {
 export type DebouncedPersistDecision = {
   /** Schedule the ~1s debounced saveWorkspace / POST /api/workspace. */
   shouldSchedule: boolean;
-  /** Consume one-shot skipBackendPersist without saving. */
+  /** Consume one-shot skipBackendPersist (a real mutation may also schedule). */
   consumeSkip: boolean;
   /**
    * When the workspace is not user-dirty, drain a stale bootstrap skip so the
@@ -65,11 +65,16 @@ export function decideDebouncedPersist(
       drainSkip: input.skipBackendPersist,
     };
   }
-  if (input.skipBackendPersist) {
-    return { shouldSchedule: false, consumeSkip: true, drainSkip: false };
-  }
   if (input.suppressPersist || input.persistBlocked || input.writeProtected) {
     return { shouldSchedule: false, consumeSkip: false, drainSkip: false };
+  }
+  if (input.skipBackendPersist) {
+    // The one-shot skip exists to avoid echoing server-provided state back
+    // right after a refresh/hydrate. When the user actually mutated, consume
+    // the skip AND schedule the save for that mutation — otherwise the
+    // indicator would sit on "Unsaved changes" with no save pending until the
+    // next history change.
+    return { shouldSchedule: true, consumeSkip: true, drainSkip: false };
   }
   return { shouldSchedule: true, consumeSkip: false, drainSkip: false };
 }

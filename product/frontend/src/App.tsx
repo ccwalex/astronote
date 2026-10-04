@@ -185,6 +185,19 @@ export default function App() {
   const serverRevisionRef = useRef<number | null>(null);
   const hasUnsavedLocalRef = useRef(false);
   const workspaceDirtyGateRef = useRef(createWorkspaceDirtyGate());
+  // Version counter so effects can re-run on gate-only changes (the gate lives
+  // in a ref and would otherwise be invisible to React's dependency tracking).
+  const [dirtyGateVersion, setDirtyGateVersion] = useState(0);
+  const bumpDirtyGateVersion = () => setDirtyGateVersion((version) => version + 1);
+  const markGateUserMutation = () => {
+    markUserMutation(workspaceDirtyGateRef.current);
+    bumpDirtyGateVersion();
+  };
+  const clearGateDirty = () => {
+    if (!isWorkspaceDirty(workspaceDirtyGateRef.current)) return;
+    clearWorkspaceDirty(workspaceDirtyGateRef.current);
+    bumpDirtyGateVersion();
+  };
   const persistInFlightRef = useRef(0);
   const savedFlashTimerRef = useRef<number | null>(null);
   const serverRefreshInFlightRef = useRef(false);
@@ -541,7 +554,7 @@ export default function App() {
     postHydrateQuietUntilRef.current = Date.now() + 2000;
     persistBlockedRef.current = false;
     suppressPersistRef.current = false;
-    clearWorkspaceDirty(workspaceDirtyGateRef.current);
+    clearGateDirty();
     presentRef.current = result.present;
     setHistoryState(presentOnlyHistory(result.present));
     setProjectBodyError(result.projectBodyError);
@@ -654,7 +667,7 @@ export default function App() {
         }
         setPersistError(null);
         hasUnsavedLocalRef.current = false;
-        clearWorkspaceDirty(workspaceDirtyGateRef.current);
+        clearGateDirty();
         persistDeferredRef.current = false;
         const rev = extractWorkspaceRevision(saveResult);
         if (rev != null) {
@@ -674,6 +687,20 @@ export default function App() {
           // Navigation cancelled save — keep dirty + pending; retry after hydrate.
           const dirtyAfterAbort = isWorkspaceDirty(workspaceDirtyGateRef.current);
           setPersistStatus(dirtyAfterAbort ? 'unsaved' : 'idle');
+          if (
+            dirtyAfterAbort &&
+            !persistDeferredRef.current &&
+            launchSettledRef.current &&
+            !suppressPersistRef.current &&
+            !persistBlockedRef.current &&
+            !pageWriteProtectedRef.current &&
+            presentRef.current &&
+            shouldPersistWorkspace(presentRef.current)
+          ) {
+            // Overlapping saves abort the previous request; re-arm the debounced
+            // save so "Unsaved changes" never sits with nothing pending.
+            armDebouncedPersist();
+          }
           return;
         }
         const message = err instanceof Error && err.message ? err.message : 'Failed to save workspace';
@@ -687,6 +714,21 @@ export default function App() {
       .finally(() => {
         persistInFlightRef.current = Math.max(0, persistInFlightRef.current - 1);
       });
+  };
+
+  const armDebouncedPersist = () => {
+    clearPersistTimer();
+    persistTimerRef.current = window.setTimeout(() => {
+      persistTimerRef.current = null;
+      if (suppressPersistRef.current || skipBackendPersistRef.current) return;
+      if (!isWorkspaceDirty(workspaceDirtyGateRef.current)) return;
+      const current = presentRef.current;
+      if (persistBlockedRef.current || pageWriteProtectedRef.current) return;
+      if (current && shouldPersistWorkspace(current)) {
+        hasUnsavedLocalRef.current = true;
+        flushPersist(current, pendingCoalesceKeyRef.current);
+      }
+    }, 1000);
   };
 
   useEffect(() => {
@@ -704,20 +746,9 @@ export default function App() {
       skipBackendPersistRef.current = false;
     }
     if (!decision.shouldSchedule) return;
-    clearPersistTimer();
-    persistTimerRef.current = window.setTimeout(() => {
-      persistTimerRef.current = null;
-      if (suppressPersistRef.current || skipBackendPersistRef.current) return;
-      if (!isWorkspaceDirty(workspaceDirtyGateRef.current)) return;
-      const current = presentRef.current;
-      if (persistBlockedRef.current || pageWriteProtectedRef.current) return;
-      if (current && shouldPersistWorkspace(current)) {
-        hasUnsavedLocalRef.current = true;
-        flushPersist(current, pendingCoalesceKeyRef.current);
-      }
-    }, 1000);
+    armDebouncedPersist();
     return () => clearPersistTimer();
-  }, [historyState.present, loading]);
+  }, [historyState.present, loading, dirtyGateVersion]);
 
   const setWorkspaceState = (
     action: Workspace | ((prev: Workspace) => Workspace),
@@ -743,6 +774,11 @@ export default function App() {
       const coalesceKey = usePendingCoalesceKey ? pendingCoalesceKeyRef.current : null;
       return pushLocalHistory(prevState, nextPresent, coalesceKey);
     });
+    if (markDirty && !pageWriteProtectedRef.current) {
+      // Updaters must stay pure, so notify gate observers out-of-band. A rare
+      // spurious bump is harmless: effects re-read the actual gate state.
+      queueMicrotask(bumpDirtyGateVersion);
+    }
   };
 
   const applyServerWorkspace = (workspace: Workspace) => {
@@ -802,7 +838,7 @@ export default function App() {
       const present = response.workspace;
       applyServerWorkspace(present);
       hasUnsavedLocalRef.current = false;
-      clearWorkspaceDirty(workspaceDirtyGateRef.current);
+      clearGateDirty();
       persistBlockedRef.current = false;
       suppressPersistRef.current = false;
       const rev = extractWorkspaceRevision(present);
@@ -939,7 +975,7 @@ export default function App() {
       if (prev === 'saving' || prev === 'saved' || prev === 'synced') return prev;
       return isWorkspaceDirty(workspaceDirtyGateRef.current) ? 'unsaved' : 'idle';
     });
-  }, [historyState.present, loading]);
+  }, [historyState.present, loading, dirtyGateVersion]);
 
   useEffect(() => {
     if (loading) return;
@@ -1181,7 +1217,7 @@ export default function App() {
     setSnapGuides([]);
     suppressPersistRef.current = false;
     // User pointer resize/scale/rotate ended — mark dirty and flush.
-    markUserMutation(workspaceDirtyGateRef.current);
+    markGateUserMutation();
     const coalesceKey = pendingCoalesceKeyRef.current;
     queueMicrotask(() => {
       flushPersist(presentRef.current, coalesceKey);
