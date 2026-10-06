@@ -237,6 +237,10 @@ def _post_delete_and_assert_counts(leftover_stub):
         incoming = _incoming_without_page_b(
             ws, proj_a, proj_b, root_id, page_b, leftover_stub=leftover_stub
         )
+        # The UI's delete flow sends the fresh base revision with its save; a
+        # matching revision makes the client body authoritative over the disk
+        # (deletion is intentional, not a stale snapshot).
+        incoming["base_revision"] = api._current_workspace_revision(ws.id)
         res = client.post("/api/workspace", json=incoming)
         assert res.status_code == 200
 

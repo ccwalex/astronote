@@ -1,4 +1,9 @@
+from __future__ import annotations
+
+import logging
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 
 
 def _spaces_empty(project: dict) -> bool:
@@ -324,7 +329,53 @@ def apply_collection_restore(data: dict, disk: dict, plan: dict) -> dict:
     return result
 
 
-def merge_incoming_workspace_dict(incoming: Optional[dict], disk: Optional[dict]) -> dict:
+def _merge_project_body(client_proj: dict, disk_proj: dict) -> dict:
+    """Union-restore disk entries a complete client body omits.
+
+    Used only for saves that carry no base revision (untrusted staleness): a
+    client body missing spaces/objects/assets that exist on disk is treated as
+    a stale snapshot (e.g. a tab that loaded before MCP writes landed), so the
+    stored entries are unioned back instead of being overwritten. A client
+    whose spaces layout mirrors disk keeps authority for its empty collections
+    (intentional emptying), matching plan_collection_restore's trust rule.
+    """
+    merged = _merge_project_asset_content(client_proj, disk_proj)
+    if _spaces_layout_fingerprint(merged) == _spaces_layout_fingerprint(disk_proj):
+        return merged
+    restored_keys = []
+    for key in ("spaces", "objects", "assets"):
+        disk_collection = disk_proj.get(key)
+        if not isinstance(disk_collection, dict) or not disk_collection:
+            continue
+        client_collection = merged.get(key)
+        client_collection = client_collection if isinstance(client_collection, dict) else {}
+        client_ids = {str(entry_id) for entry_id in client_collection}
+        missing = {
+            entry_id: entry
+            for entry_id, entry in disk_collection.items()
+            if str(entry_id) not in client_ids
+        }
+        if not missing:
+            continue
+        merged = dict(merged)
+        merged[key] = {**client_collection, **missing}
+        restored_keys.append(key)
+    if restored_keys:
+        logger.warning(
+            "RESTORED disk %s for a client body that omitted them (project %s): "
+            "save carries no base revision and its layout differs from disk, so "
+            "it is treated as stale.",
+            ", ".join(restored_keys),
+            str(disk_proj.get("id") or ""),
+        )
+    return merged
+
+
+def merge_incoming_workspace_dict(
+    incoming: Optional[dict],
+    disk: Optional[dict],
+    preserve_disk_only: bool = False,
+) -> dict:
     if not isinstance(incoming, dict):
         return disk if isinstance(disk, dict) else {}
     if not isinstance(disk, dict):
@@ -332,12 +383,27 @@ def merge_incoming_workspace_dict(incoming: Optional[dict], disk: Optional[dict]
     incoming_projects = incoming.get("projects") if isinstance(incoming.get("projects"), dict) else {}
     disk_projects = disk.get("projects") if isinstance(disk.get("projects"), dict) else {}
     referenced = _referenced_project_ids(incoming)
+    disk_referenced = _referenced_project_ids(disk)
     merged_projects = dict(incoming_projects)
+    restored_disk_only = []
     for project_id, disk_proj in disk_projects.items():
         client_proj = incoming_projects.get(project_id)
         if client_proj is None:
             if project_id in referenced:
                 merged_projects[project_id] = disk_proj
+            elif (
+                preserve_disk_only
+                and disk_referenced
+                and project_id in disk_referenced
+                and not is_project_stub(disk_proj)
+            ):
+                # A hydrated body the payload omits entirely, while the stored
+                # library tree still references it, is a stale or partial save
+                # (e.g. a tab that loaded before a server-side page creation):
+                # keep the stored body. Saves carrying a fresh base revision are
+                # trusted to delete instead.
+                merged_projects[project_id] = disk_proj
+                restored_disk_only.append(str(project_id))
             continue
         if is_project_stub(client_proj) and not is_project_stub(disk_proj):
             if project_id in referenced:
@@ -347,7 +413,18 @@ def merge_incoming_workspace_dict(incoming: Optional[dict], disk: Optional[dict]
         elif is_project_stub(client_proj) and project_id not in referenced:
             merged_projects.pop(project_id, None)
         elif not is_project_stub(client_proj):
-            merged_projects[project_id] = _merge_project_asset_content(client_proj, disk_proj)
+            merged_projects[project_id] = (
+                _merge_project_body(client_proj, disk_proj)
+                if preserve_disk_only
+                else _merge_project_asset_content(client_proj, disk_proj)
+            )
+    if restored_disk_only:
+        logger.warning(
+            "RESTORED %d disk-only project body(s) the client save omitted "
+            "(first: %s): payload looks stale or partial; stored bodies kept.",
+            len(restored_disk_only),
+            ", ".join(sorted(restored_disk_only)[:10]),
+        )
     result = dict(incoming)
     result["projects"] = merged_projects
     return result

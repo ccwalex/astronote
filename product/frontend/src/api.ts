@@ -71,6 +71,7 @@ export async function fetchPageLoad(options?: {
 
 import { Workspace, Project } from './types';
 import { extractWorkspaceRevision } from './model/workspaceCache';
+import { buildSavePayload, parseStaleSaveRevision, StaleWorkspaceSaveError } from './model/staleSaveRecovery';
 
 const envApiBase = ((import.meta as any).env?.VITE_API_BASE as string | undefined)?.replace(/\/$/, '');
 const runtimeDefaultApiBase = '/api';
@@ -538,10 +539,13 @@ export type SaveWorkspaceResponse = {
   workspace_revision?: number;
 };
 
+export { StaleWorkspaceSaveError } from './model/staleSaveRecovery';
+
 export async function saveWorkspace(
   workspace: Workspace,
   options?: {
     coalesce_key?: string;
+    baseRevision?: number | null;
     signal?: AbortSignal;
     keepalive?: boolean;
     pageWriteSessionId?: string;
@@ -549,9 +553,10 @@ export async function saveWorkspace(
 ): Promise<SaveWorkspaceResponse> {
   const endpoint = `${API_BASE}/workspace`;
   let response: Response;
-  const payload = options && options.coalesce_key
-    ? { ...workspace, coalesce_key: options.coalesce_key }
-    : workspace;
+  const payload = buildSavePayload(workspace, {
+    coalesceKey: options?.coalesce_key,
+    baseRevision: options?.baseRevision,
+  });
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   };
@@ -573,7 +578,11 @@ export async function saveWorkspace(
   }
 
   if (!response.ok) {
-    const snippet = await getResponseBodySnippet(response);
+    const bodyText = await response.text();
+    if (response.status === 409) {
+      throw new StaleWorkspaceSaveError(parseStaleSaveRevision(bodyText));
+    }
+    const snippet = bodyText.slice(0, 400);
     throw new Error(`Failed to save workspace (${response.status} ${response.statusText}) at ${endpoint}${snippet ? `: ${snippet}` : ''}`);
   }
 

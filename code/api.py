@@ -1249,10 +1249,33 @@ def get_workspace_page_load(
         _release_page_load_priority()
 
 
+def _coerce_base_revision(value) -> Optional[int]:
+    """Parse a client-supplied base revision; None when absent or unparseable."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, float):
+        return int(value) if value >= 0 and value.is_integer() else None
+    text = str(value).strip().strip('"')
+    if text.startswith("W/"):
+        text = text[2:].strip().strip('"')
+    if not text:
+        return None
+    try:
+        revision = int(text)
+    except ValueError:
+        return None
+    return revision if revision >= 0 else None
+
+
 def _post_workspace_sync(
     data: dict,
     coalesce_key: Optional[str],
     write_session_id: Optional[str] = None,
+    base_revision: Optional[int] = None,
 ):
     """Heavy save work off the asyncio event loop (see post_workspace).
 
@@ -1282,6 +1305,28 @@ def _post_workspace_sync(
                     detail="On-disk workspace could not be loaded: " + str(e),
                 )
             _log_slow_step("human_save_previous_load", load_started)
+        if base_revision is not None and previous_workspace is not None:
+            stored_revision = _current_workspace_revision(
+                getattr(previous_workspace, "id", None)
+            )
+            if base_revision < stored_revision:
+                logger.warning(
+                    "Rejected stale workspace save: client base_revision %d is older "
+                    "than stored revision %d.",
+                    base_revision,
+                    stored_revision,
+                )
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "message": (
+                            "Stale save rejected: the workspace has advanced since "
+                            "this view was loaded."
+                        ),
+                        "workspace_revision": stored_revision,
+                        "base_revision": base_revision,
+                    },
+                )
         if previous_dict is not None and incoming_would_wipe_page_bodies(data, previous_dict):
             raise HTTPException(
                 status_code=400,
@@ -1313,7 +1358,11 @@ def _post_workspace_sync(
                     )
         data = repair_workspace_dict(data, fallback=previous_dict, assets_dir=ASSETS_DIR)
         if previous_dict is not None:
-            data = merge_incoming_workspace_dict(data, previous_dict)
+            # Saves without a base revision cannot prove freshness: keep stored
+            # bodies the payload omits instead of trusting a possible stale copy.
+            data = merge_incoming_workspace_dict(
+                data, previous_dict, preserve_disk_only=base_revision is None
+            )
             data = repair_workspace_dict(data, fallback=previous_dict, assets_dir=ASSETS_DIR)
         ws = Workspace.from_dict(data)
 
@@ -1354,10 +1403,13 @@ async def post_workspace(request: Request):
             coalesce_key = data.pop("coalesce_key")
             if coalesce_key is not None:
                 coalesce_key = str(coalesce_key).strip() or None
+        base_revision = _coerce_base_revision(data.pop("base_revision", None))
+        if base_revision is None:
+            base_revision = _coerce_base_revision(request.headers.get("If-Match"))
         write_session_id = request.headers.get("X-Page-Write-Session")
         # Sync merge/save must not block the event loop (interactive GETs stall otherwise).
         return await asyncio.to_thread(
-            _post_workspace_sync, data, coalesce_key, write_session_id
+            _post_workspace_sync, data, coalesce_key, write_session_id, base_revision
         )
     except HTTPException:
         raise

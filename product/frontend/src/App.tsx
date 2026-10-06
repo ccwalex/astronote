@@ -51,7 +51,8 @@ import {
 import { insertVerticalPageGap } from './model/insertVerticalPageGap';
 import { createStrokeObject, StrokeDrawStyle } from './model/canvasObjectFactory';
 import { probeCanvas, ProbeMode, ProbeResult } from './model/probeCanvas';
-import { fetchWorkspaceRevision, saveWorkspace, putAssetText, isAssetTrackingPersistError, uploadAsset, convertGroupSpaceToImage, restoreImageToGroup, postCommit, postRevertToBaseline, fetchAssetTrackingStorageStatus, migrateAssetTrackingStore, skipAssetTrackingMigration, type AssetTrackingStorageStatus, fetchWorkspaceStorageStatus, migrateWorkspaceStorage, skipWorkspaceStorageMigration, type WorkspaceStorageStatus, isAbortError } from './api';
+import { fetchWorkspaceRevision, saveWorkspace, StaleWorkspaceSaveError, putAssetText, isAssetTrackingPersistError, uploadAsset, convertGroupSpaceToImage, restoreImageToGroup, postCommit, postRevertToBaseline, fetchAssetTrackingStorageStatus, migrateAssetTrackingStore, skipAssetTrackingMigration, type AssetTrackingStorageStatus, fetchWorkspaceStorageStatus, migrateWorkspaceStorage, skipWorkspaceStorageMigration, type WorkspaceStorageStatus, isAbortError } from './api';
+import { decideStaleSaveRecovery } from './model/staleSaveRecovery';
 import {
   clearAstronoteLoadCaches,
   extractWorkspaceRevision,
@@ -183,6 +184,9 @@ export default function App() {
   const lastViewPrefetchRef = useRef<{ projectId: string; promise: Promise<import('./types').Project> } | null>(null);
   const bootSideTrafficStartedRef = useRef(false);
   const serverRevisionRef = useRef<number | null>(null);
+  // Guards the 409 stale-save recovery: exactly one automatic refresh-and-retry
+  // per save attempt; a second rejection surfaces the error instead of looping.
+  const staleSaveRecoveryRef = useRef(false);
   const hasUnsavedLocalRef = useRef(false);
   const workspaceDirtyGateRef = useRef(createWorkspaceDirtyGate());
   // Version counter so effects can re-run on gate-only changes (the gate lives
@@ -615,6 +619,59 @@ export default function App() {
     }, 50);
   };
 
+  const recoverFromStaleSave = (err: StaleWorkspaceSaveError) => {
+    const decision = decideStaleSaveRecovery(staleSaveRecoveryRef.current);
+    if (decision.action === 'surface-error') {
+      // The refreshed re-save was also rejected as stale: stop auto-retrying
+      // and surface the failure so the user can reload manually.
+      staleSaveRecoveryRef.current = false;
+      setPersistError(err.message);
+      persistBlockedRef.current = true;
+      suppressPersistRef.current = true;
+      clearPersistTimer();
+      const dirtyAfterError = isWorkspaceDirty(workspaceDirtyGateRef.current);
+      setPersistStatus(dirtyAfterError ? 'unsaved' : 'idle');
+      return;
+    }
+    staleSaveRecoveryRef.current = true;
+    setPersistStatus('saving');
+    void (async () => {
+      try {
+        // Snapshot the current local state into the undroppable pending cache
+        // before adopting the server workspace, so no edit is lost in the swap.
+        const current = presentRef.current;
+        if (
+          current &&
+          shouldPersistWorkspace(current) &&
+          isWorkspaceDirty(workspaceDirtyGateRef.current)
+        ) {
+          writeWorkspaceDirtyToPendingPersist(current, collectDirtyMarkdownAssets(current));
+        }
+        const result = await refreshWorkspaceFromServer(selectedProjectIdRef.current, {
+          forceProjectRefresh: true,
+        });
+        applyServerRefresh(result);
+        flushPendingPersistInBackground();
+        if (listPendingProjectIds().length === 0) {
+          // Nothing pending to re-apply: the refreshed server view stands.
+          staleSaveRecoveryRef.current = false;
+        }
+      } catch (refreshErr) {
+        staleSaveRecoveryRef.current = false;
+        const message =
+          refreshErr instanceof Error && refreshErr.message
+            ? refreshErr.message
+            : 'Failed to sync with the server after a stale save';
+        setPersistError(message);
+        persistBlockedRef.current = true;
+        suppressPersistRef.current = true;
+        clearPersistTimer();
+        const dirtyAfterError = isWorkspaceDirty(workspaceDirtyGateRef.current);
+        setPersistStatus(dirtyAfterError ? 'unsaved' : 'idle');
+      }
+    })();
+  };
+
   const flushPersist = (
     workspace: Workspace | null | undefined,
     coalesceKey?: string | null,
@@ -651,6 +708,7 @@ export default function App() {
       }
       return saveWorkspace(prepareWorkspaceForSave(workspace), {
         coalesce_key: coalesceKey || pendingCoalesceKeyRef.current || undefined,
+        baseRevision: serverRevisionRef.current,
         signal: options?.keepalive ? undefined : signal,
         keepalive: options?.keepalive,
         pageWriteSessionId: getOrCreatePageSessionId(),
@@ -673,6 +731,7 @@ export default function App() {
         if (rev != null) {
           serverRevisionRef.current = rev;
         }
+        staleSaveRecoveryRef.current = false;
         updateCacheAfterSave(
           rev ?? serverRevisionRef.current,
           { workspace }
@@ -701,6 +760,12 @@ export default function App() {
             // save so "Unsaved changes" never sits with nothing pending.
             armDebouncedPersist();
           }
+          return;
+        }
+        if (err instanceof StaleWorkspaceSaveError) {
+          // Server is ahead of the revision this save was based on: refresh,
+          // overlay the pending dirty state, and re-save once.
+          recoverFromStaleSave(err);
           return;
         }
         const message = err instanceof Error && err.message ? err.message : 'Failed to save workspace';
@@ -1205,7 +1270,13 @@ export default function App() {
         const body = JSON.stringify(prepared);
         // ~60k sendBeacon / keepalive budget; pending localStorage already written above.
         if (body.length < 60000) {
-          void saveWorkspace(prepared, { keepalive: true });
+          void saveWorkspace(prepared, {
+            keepalive: true,
+            baseRevision: serverRevisionRef.current,
+          }).catch(() => {
+            // Unload save: 409/network failures are expected; the pending
+            // localStorage snapshot above keeps the dirty state for next launch.
+          });
         }
       } catch {
         // pending already written
