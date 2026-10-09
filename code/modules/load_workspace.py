@@ -7,6 +7,7 @@ from modules.save_workspace import (
     assets_dir_from_workspace_path,
     hydrate_assets,
     hydrate_project_assets,
+    hydrate_text_project_assets,
     payload_has_inline_assets,
     save_workspace,
     spill_assets,
@@ -91,6 +92,7 @@ def _finish_load(
     project_id: Optional[str],
     persist_repairs: bool = True,
     synthesize_library_bodies: bool = True,
+    hydrate_text_only: bool = False,
 ) -> Workspace:
     assets_dir = assets_dir_from_workspace_path(path)
     huge_before = _huge_data_url_count(data)
@@ -111,7 +113,10 @@ def _finish_load(
     if assets_dir and hydrate:
         if project_id:
             spill_project_assets(workspace, assets_dir, project_id)
-            hydrate_project_assets(workspace, assets_dir, project_id)
+            if hydrate_text_only:
+                hydrate_text_project_assets(workspace, assets_dir, project_id)
+            else:
+                hydrate_project_assets(workspace, assets_dir, project_id)
         else:
             spill_assets(workspace, assets_dir)
             hydrate_assets(workspace, assets_dir)
@@ -152,6 +157,7 @@ def load_workspace(
     nav_only: bool = False,
     persist_repairs: bool = True,
     synthesize_library_bodies: bool = True,
+    hydrate_text_only: bool = False,
 ) -> Workspace:
     """Load, repair, and validate a workspace from the given path.
 
@@ -159,6 +165,8 @@ def load_workspace(
     and avoids writing on the GET hot path unless concatenated JSON was repaired
     and persist_repairs=True.
     project_id, when set with hydrate=True, spills/hydrates only that project's assets.
+    hydrate_text_only (with project_id): hydrate text assets only, skipping
+    binary base64 inlining so page-load payloads stay small.
     nav_only (sqlite): load project stubs only; project_id (sqlite): stubs + one project body.
     persist_repairs=False: never call save_workspace (GET handlers),
     except when TextSpace layout normalization mutates geometry (cheap durable fix).
@@ -181,6 +189,7 @@ def load_workspace(
             project_id=project_id,
             persist_repairs=persist_repairs,
             synthesize_library_bodies=synthesize_library_bodies,
+            hydrate_text_only=hydrate_text_only,
         )
 
     with open(path, "r", encoding="utf-8") as f:
@@ -211,4 +220,5 @@ def load_workspace(
         project_id=project_id,
         persist_repairs=persist_repairs,
         synthesize_library_bodies=synthesize_library_bodies,
+        hydrate_text_only=hydrate_text_only,
     )

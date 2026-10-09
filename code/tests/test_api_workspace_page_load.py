@@ -2,6 +2,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -107,8 +108,9 @@ def test_page_load_returns_nav_revision_and_hydrated_project():
             assert project.get("spaces")
             assert project.get("root_space_id")
             asset = project["assets"]["asset_big"]
-            assert isinstance(asset.get("content"), str)
-            assert asset["content"].startswith("data:image/png")
+            # Binary bodies are no longer inlined; the frontend resolves them
+            # via /api/assets/{id} when content is null.
+            assert asset.get("content") is None
 
             by_node = client.get(
                 "/api/workspace/page-load",
@@ -117,9 +119,7 @@ def test_page_load_returns_nav_revision_and_hydrated_project():
             assert by_node.status_code == 200
             node_body = by_node.json()
             assert node_body["resolved_project_id"] == proj_id
-            assert node_body["project"]["assets"]["asset_big"]["content"].startswith(
-                "data:image/png"
-            )
+            assert node_body["project"]["assets"]["asset_big"]["content"] is None
 
             assert extra_id not in (project.get("assets") or {})
         finally:
@@ -156,9 +156,7 @@ def test_interactive_gets_do_not_call_save_workspace():
                     assert page.status_code == 200
                     body = page.json()
                     assert body["nav"]["projects"][proj_id]["assets"] == {}
-                    assert body["project"]["assets"]["asset_big"]["content"].startswith(
-                        "data:image/png"
-                    )
+                    assert body["project"]["assets"]["asset_big"]["content"] is None
                     assert mocked_save.call_count == 0
                     assert api_save.call_count == 0
         finally:
@@ -224,9 +222,8 @@ def _assert_page_load_single_scoped_load(path, assets_dir, proj_id, extra_id):
                 assert body["nav"]["projects"][extra_id]["assets"] == {}
                 assert body["project"] is not None
                 assert body["project"]["id"] == proj_id
-                assert body["project"]["assets"]["asset_big"]["content"].startswith(
-                    "data:image/png"
-                )
+                # Binary bodies are not inlined on page-load anymore.
+                assert body["project"]["assets"]["asset_big"]["content"] is None
                 assert mocked_save.call_count == 0
     finally:
         api.WORKSPACE_PATH = old_path
@@ -288,7 +285,8 @@ def test_embed_all_waits_while_page_load_holds_priority():
                         return_value=False,
                     ):
                         res = client.post("/api/asset-tracking/embed-all")
-                        if res.status_code != 200:
+                        # Background job: 202 immediately after the priority wait.
+                        if res.status_code != 202:
                             errors.append(res.status_code)
                 except Exception as exc:
                     errors.append(exc)
@@ -308,6 +306,17 @@ def test_embed_all_waits_while_page_load_holds_priority():
             assert finished.wait(5.0)
             thread.join(timeout=2.0)
             assert not errors
+
+            # The spawned background job must finish before the temp
+            # WORKSPACE_PATH below is restored to the real one.
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline:
+                with api._embed_all_state_lock:
+                    if not api._embed_all_state.get("running"):
+                        break
+                time.sleep(0.05)
+            with api._embed_all_state_lock:
+                assert not api._embed_all_state.get("running")
         finally:
             while getattr(api, "_page_load_inflight", 0) > 0:
                 api._release_page_load_priority()

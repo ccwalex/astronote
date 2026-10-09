@@ -1,6 +1,18 @@
 import { useState } from 'react';
 import { LibraryNode } from '../types';
-import { embedAllAssets, fetchEmbeddingTrackingStatus, type EmbeddingTrackingStatus } from '../api';
+import {
+  embedAllAssets,
+  fetchEmbedAllStatus,
+  fetchEmbeddingTrackingStatus,
+  type EmbedAllStatusResponse,
+  type EmbeddingTrackingStatus
+} from '../api';
+
+const EMBED_ALL_POLL_INTERVAL_MS = 2000;
+const EMBED_ALL_POLL_TIMEOUT_MS = 10 * 60 * 1000;
+const EMBED_ALL_MAX_CONSECUTIVE_POLL_ERRORS = 5;
+
+const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
 interface LibrarySidebarProps {
   libraryNodes: Record<string, LibraryNode>;
@@ -84,16 +96,65 @@ export function LibrarySidebar({
       if (onEmbedAssets) {
         await onEmbedAssets();
       } else {
-        const res = await embedAllAssets();
-        if (res.failed_assets && res.failed_assets.length > 0) {
-          window.alert(`Embedding failed for ${res.failed_assets.length} assets:\n` + res.failed_assets.map(f => f.error).join('\n'));
-        }
+        await runEmbedAllJob();
       }
       await refreshEmbeddingStatus();
     } catch (err) {
       setStatusError(err instanceof Error ? err.message : String(err));
     } finally {
       setIsEmbedding(false);
+    }
+  };
+
+  // The backend runs embed-all as a background job: POST returns 202 with job
+  // coordinates and the real outcome is only available from the status
+  // endpoint once the job finishes. Keep the spinner up while polling, then
+  // surface failures/refresh exactly like the old synchronous flow did.
+  const runEmbedAllJob = async () => {
+    const started = await embedAllAssets();
+
+    if (started.status === 'ok') {
+      // Legacy synchronous payload from a pre-background-job backend.
+      if (started.failed_assets && started.failed_assets.length > 0) {
+        window.alert(`Embedding failed for ${started.failed_assets.length} assets:\n` + started.failed_assets.map(f => f.error).join('\n'));
+      }
+      return;
+    }
+
+    // 202 "started"/"already_running": poll until the job is no longer running.
+    const pollDeadline = Date.now() + EMBED_ALL_POLL_TIMEOUT_MS;
+    let consecutivePollErrors = 0;
+
+    while (true) {
+      await sleep(EMBED_ALL_POLL_INTERVAL_MS);
+
+      if (Date.now() >= pollDeadline) {
+        window.alert('Embedding is taking longer than 10 minutes. Stopped waiting, but the job may still be running in the background. Check the embedding status later.');
+        return;
+      }
+
+      let status: EmbedAllStatusResponse;
+      try {
+        status = await fetchEmbedAllStatus();
+        consecutivePollErrors = 0;
+      } catch (err) {
+        // Tolerate transient status-fetch failures; the job keeps running.
+        consecutivePollErrors += 1;
+        if (consecutivePollErrors >= EMBED_ALL_MAX_CONSECUTIVE_POLL_ERRORS) {
+          throw err;
+        }
+        continue;
+      }
+
+      if (status.running) continue;
+
+      const failures = status.result?.failed_assets ?? status.failed_assets;
+      if (failures.length > 0) {
+        window.alert(`Embedding failed for ${failures.length} assets:\n` + failures.map(f => f.error).join('\n'));
+      } else if (status.last_error) {
+        window.alert(`Embedding failed: ${status.last_error}`);
+      }
+      return;
     }
   };
 

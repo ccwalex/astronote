@@ -3,6 +3,9 @@ import type { Workspace, Project, Asset } from '../types';
 /** Distinct from last-view (`astronote_last_view`) — never reuse that key. */
 export const WORKSPACE_CACHE_STORAGE_KEY = 'astronote_workspace_cache';
 
+/** Max cached project bodies persisted to storage (localStorage growth bound). */
+const WORKSPACE_CACHE_PROJECT_CAP = 30;
+
 export type RevisionCompareResult = 'match' | 'server_ahead' | 'client_diverged' | 'missing';
 
 export type WorkspaceCacheSnapshot = {
@@ -70,6 +73,24 @@ function stripAssetContentForCache(asset: Asset): Asset {
     (next as Asset).content = null;
   }
   return next;
+}
+
+/**
+ * Evict the oldest inserted cached project bodies beyond the cap so
+ * localStorage cannot grow unboundedly. Readers accept any count, so older
+ * (pre-cap) snapshots remain readable.
+ */
+function evictOldestCachedProjects(
+  projects: Record<string, Project>,
+  cap: number
+): Record<string, Project> {
+  const ids = Object.keys(projects);
+  if (ids.length <= cap) return projects;
+  const kept = { ...projects };
+  for (const id of ids.slice(0, ids.length - cap)) {
+    delete kept[id];
+  }
+  return kept;
 }
 
 export function projectForCache(project: Project): Project {
@@ -235,14 +256,16 @@ export function writeProjectToCache(
       clearWorkspaceCache(storage);
       return null;
     }
+    // Re-insert so the written project counts as most recent, then evict the
+    // oldest cached bodies beyond the cap.
+    const projects = { ...prev.projects };
+    delete projects[project.id];
+    projects[project.id] = clonedProject;
     const snapshot = emptyWorkspaceCache({
       serverRevision: revision,
       workspaceId: prev.workspaceId,
       nav: prev.nav,
-      projects: {
-        ...prev.projects,
-        [project.id]: clonedProject
-      },
+      projects: evictOldestCachedProjects(projects, WORKSPACE_CACHE_PROJECT_CAP),
       updatedAt: Date.now()
     });
     persistCache(snapshot, storage);
@@ -302,7 +325,7 @@ export function updateCacheAfterSave(
       serverRevision: revision,
       workspaceId: asWorkspaceId(workspace?.id) ?? prev.workspaceId,
       nav,
-      projects,
+      projects: evictOldestCachedProjects(projects, WORKSPACE_CACHE_PROJECT_CAP),
       updatedAt: Date.now()
     });
     persistCache(snapshot, storage);

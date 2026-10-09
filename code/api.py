@@ -12,7 +12,7 @@ import threading
 from datetime import datetime
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Body, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from typing import Optional, Any
 
 from modules.workspace import (
@@ -46,6 +46,7 @@ from modules.save_workspace import (
     hydrate_text_assets,
     save_workspace,
     strip_asset_content_from_dict,
+    strip_binary_asset_content_from_payload,
 )
 from modules.workspace_zip import (
     apply_imported_workspace,
@@ -1171,9 +1172,12 @@ def get_workspace_page_load(
         known_project_id = str(project_id or "").strip() or None
         if known_project_id:
             # One scoped load: stubs for all projects + hydrated body for known project_id.
+            # Text hydrates inline; binaries resolve via /api/assets/{id} so the
+            # JSON payload never carries base64 blobs.
             ws = load_workspace(
                 WORKSPACE_PATH,
                 hydrate=True,
+                hydrate_text_only=True,
                 project_id=known_project_id,
                 persist_repairs=False,
                 synthesize_library_bodies=False,
@@ -1187,8 +1191,9 @@ def get_workspace_page_load(
             project_payload = None
             if resolved_project_id and resolved_project_id in ws.projects:
                 proj = ws.projects.get(resolved_project_id)
-                if proj is not None and not is_project_stub(proj.to_dict()):
-                    project_payload = proj.to_dict()
+                proj_dict = proj.to_dict() if proj is not None else None
+                if proj_dict is not None and not is_project_stub(proj_dict):
+                    project_payload = strip_binary_asset_content_from_payload(proj_dict)
                     project_payload["workspace_revision"] = revision
             return _with_page_presence(
                 {
@@ -1219,13 +1224,16 @@ def get_workspace_page_load(
             ws_body = load_workspace(
                 WORKSPACE_PATH,
                 hydrate=True,
+                hydrate_text_only=True,
                 project_id=resolved_project_id,
                 persist_repairs=False,
                 synthesize_library_bodies=False,
             )
             proj = ws_body.projects.get(resolved_project_id)
-            if proj is not None and not is_project_stub(proj.to_dict()):
-                project_payload = proj.to_dict()
+            proj_dict = proj.to_dict() if proj is not None else None
+            if proj_dict is not None and not is_project_stub(proj_dict):
+                # Text hydrates inline; binaries resolve via /api/assets/{id}.
+                project_payload = strip_binary_asset_content_from_payload(proj_dict)
                 project_payload["workspace_revision"] = revision
         return _with_page_presence(
             {
@@ -1447,8 +1455,11 @@ def get_workspace_undo_state():
 @app.post("/api/workspace/undo")
 def post_workspace_undo():
     try:
+        # Wait while interactive page-loads hold priority BEFORE taking the
+        # global write lock, matching the save path (never hold the lock while
+        # waiting up to 10s on a click hydrate).
+        _wait_while_page_load_priority()
         with workspace_write_lock():
-            _wait_while_page_load_priority()
             ws = _load_workspace_for_rag()
             state = undo_working_period(ws.id, WORKSPACE_PATH)
             restored = _load_workspace_from_disk()
@@ -1463,8 +1474,9 @@ def post_workspace_undo():
 @app.post("/api/workspace/redo")
 def post_workspace_redo():
     try:
+        # Same ordering as undo: priority wait first, then the write lock.
+        _wait_while_page_load_priority()
         with workspace_write_lock():
-            _wait_while_page_load_priority()
             ws = _load_workspace_for_rag()
             state = redo_working_period(ws.id, WORKSPACE_PATH)
             restored = _load_workspace_from_disk()
@@ -1479,8 +1491,9 @@ def post_workspace_redo():
 @app.post("/api/workspace/commit")
 def post_workspace_commit():
     try:
+        # Same ordering as undo: priority wait first, then the write lock.
+        _wait_while_page_load_priority()
         with workspace_write_lock():
-            _wait_while_page_load_priority()
             ws = _load_workspace_for_rag()
             state = commit_working_period(
                 ws.id,
@@ -1499,8 +1512,9 @@ def post_workspace_commit():
 @app.post("/api/workspace/revert-to-baseline")
 def post_workspace_revert_to_baseline():
     try:
+        # Same ordering as undo: priority wait first, then the write lock.
+        _wait_while_page_load_priority()
         with workspace_write_lock():
-            _wait_while_page_load_priority()
             ws = _load_workspace_for_rag()
             restored, state = revert_working_period_to_baseline(ws.id, WORKSPACE_PATH)
             return {"workspace": restored.to_dict(), "undo_state": _undo_state_payload(state, ws.id)}
@@ -1653,53 +1667,203 @@ def get_asset_tracking_embeddable_log():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# Embed-all runs as a background job: the network-bound embedding loop must
+# never hold workspace_write_lock (saves/reads would queue for minutes) and
+# the POST must return immediately so the UI is not blocked either.
+_embed_all_state_lock = threading.Lock()
+_embed_all_state: dict[str, Any] = {
+    "running": False,
+    "job_id": None,
+    "started_at": None,
+    "finished_at": None,
+    "progress": {},
+    "result": None,
+    "last_error": None,
+}
+_embed_all_job_seq = 0
+
+
+def _embed_all_progress_defaults() -> dict[str, Any]:
+    return {
+        "total_assets": 0,
+        "processed_assets": 0,
+        "embeddable_assets_total": 0,
+        "non_embeddable_assets": 0,
+        "embedded_assets": 0,
+        "up_to_date_assets": 0,
+        "failed_assets": [],
+    }
+
+
+def _set_embed_all_progress(**fields: Any) -> None:
+    with _embed_all_state_lock:
+        progress = _embed_all_state.setdefault("progress", {})
+        progress.update(fields)
+
+
+def _set_embed_all_last_error(error: Optional[str]) -> None:
+    with _embed_all_state_lock:
+        _embed_all_state["last_error"] = error
+
+
 @app.post("/api/asset-tracking/embed-all")
 def post_embed_all_assets():
     try:
+        # Yield to click hydrates before spawning the job (same priority family
+        # as POST /api/workspace); the job itself runs without the write lock.
         _wait_while_page_load_priority()
-        with workspace_write_lock():
-            return _embed_all_assets_locked()
+        job_id, already_running = _start_embed_all_job()
+        if already_running:
+            return JSONResponse(
+                status_code=202,
+                content={
+                    "status": "already_running",
+                    "job_id": job_id,
+                    "status_url": "/api/asset-tracking/embed-all/status",
+                },
+            )
+        return JSONResponse(
+            status_code=202,
+            content={
+                "status": "started",
+                "job_id": job_id,
+                "status_url": "/api/asset-tracking/embed-all/status",
+            },
+        )
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _embed_all_assets_locked():
-        workspace = _load_workspace_for_rag()
-        reconcile_workspace_asset_tracking(workspace=workspace, data_dir=os.path.join(PROJECT_ROOT, "data"))
+@app.get("/api/asset-tracking/embed-all/status")
+def get_embed_all_status():
+    try:
+        with _embed_all_state_lock:
+            progress = dict(_embed_all_state.get("progress") or {})
+            failed_assets = progress.get("failed_assets") or []
+            progress["failed_assets"] = [
+                dict(item) if isinstance(item, dict) else item for item in failed_assets
+            ]
+            running = bool(_embed_all_state.get("running"))
+            return {
+                "running": running,
+                "done": not running and _embed_all_state.get("job_id") is not None,
+                "job_id": _embed_all_state.get("job_id"),
+                "started_at": _embed_all_state.get("started_at"),
+                "finished_at": _embed_all_state.get("finished_at"),
+                "last_error": _embed_all_state.get("last_error"),
+                "total_assets": progress.get("total_assets"),
+                "processed_assets": progress.get("processed_assets"),
+                "embeddable_assets_total": progress.get("embeddable_assets_total"),
+                "non_embeddable_assets": progress.get("non_embeddable_assets"),
+                "embedded_assets": progress.get("embedded_assets"),
+                "up_to_date_assets": progress.get("up_to_date_assets"),
+                "failed_assets": progress.get("failed_assets"),
+                "result": _embed_all_state.get("result"),
+            }
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
-        tracking_rows = get_asset_tracking_rows(data_dir=os.path.join(PROJECT_ROOT, "data"))
-        snapshot_before = _workspace_embedding_tracking_snapshot(workspace, tracking_rows)
 
-        embedding_index = WorkspaceEmbeddingIndex(prompt_for_missing=False, persist_path=os.path.join(PROJECT_ROOT, "data", "embeddings.pkl"))
+def _start_embed_all_job():
+    """Spawn the embed-all background job; returns (job_id, already_running)."""
+    global _embed_all_job_seq
+    with _embed_all_state_lock:
+        if _embed_all_state.get("running"):
+            return _embed_all_state.get("job_id"), True
+        _embed_all_job_seq += 1
+        job_id = f"embed-all-{int(time.time() * 1000)}-{_embed_all_job_seq}"
+        _embed_all_state.update(
+            {
+                "running": True,
+                "job_id": job_id,
+                "started_at": datetime.utcnow().isoformat() + "Z",
+                "finished_at": None,
+                "progress": _embed_all_progress_defaults(),
+                "result": None,
+                "last_error": None,
+            }
+        )
+    thread = threading.Thread(
+        target=_embed_all_job_thread, args=(job_id,), name="embed-all", daemon=True
+    )
+    thread.start()
+    return job_id, False
 
-        total_assets = 0
-        embeddable_assets_total = 0
-        non_embeddable_assets = 0
-        embedded_assets = 0
-        up_to_date_assets = 0
-        failed_assets = []
 
-        for project_id, project in workspace.projects.items():
-            for asset_id, asset in project.assets.items():
-                total_assets += 1
+def _embed_all_job_thread(job_id: str) -> None:
+    try:
+        result = _embed_all_assets(job_id=job_id)
+        with _embed_all_state_lock:
+            _embed_all_state["running"] = False
+            _embed_all_state["finished_at"] = datetime.utcnow().isoformat() + "Z"
+            _embed_all_state["result"] = result
+            _embed_all_state["last_error"] = None
+    except Exception as e:
+        # Must flip the single-flight guard even on crash, or every later
+        # trigger would report already_running forever.
+        traceback.print_exc()
+        with _embed_all_state_lock:
+            _embed_all_state["running"] = False
+            _embed_all_state["finished_at"] = datetime.utcnow().isoformat() + "Z"
+            _embed_all_state["last_error"] = str(e)
 
-                properties = get_asset_embedding_properties(asset)
-                if not bool(properties.get("embeddable")):
-                    non_embeddable_assets += 1
-                    continue
 
-                embeddable_assets_total += 1
+def _embed_all_assets(job_id: Optional[str] = None) -> dict:
+    """Embed every outdated asset WITHOUT holding workspace_write_lock.
 
-                row = _find_tracking_row(tracking_rows, project_id, asset_id)
-                if row is not None and not _tracking_requires_embed(row):
-                    up_to_date_assets += 1
-                    continue
+    The write lock is taken briefly around per-asset tracking persistence
+    only; the network-bound embed calls run unlocked so saves/reads never
+    queue behind this job for the length of a whole run.
+    """
+    workspace = _load_workspace_for_rag()
+    reconcile_workspace_asset_tracking(workspace=workspace, data_dir=os.path.join(PROJECT_ROOT, "data"))
 
-                try:
-                    embedded = embedding_index.embed_asset(project_id, asset_id, asset)
-                    if embedded:
-                        embedded_assets += 1
+    tracking_rows = get_asset_tracking_rows(data_dir=os.path.join(PROJECT_ROOT, "data"))
+    snapshot_before = _workspace_embedding_tracking_snapshot(workspace, tracking_rows)
+
+    embedding_index = WorkspaceEmbeddingIndex(prompt_for_missing=False, persist_path=os.path.join(PROJECT_ROOT, "data", "embeddings.pkl"))
+
+    progress = _embed_all_progress_defaults()
+
+    def _report_progress() -> None:
+        _set_embed_all_progress(
+            job_id=job_id,
+            processed_assets=progress["total_assets"],
+            total_assets=progress["total_assets"],
+            embeddable_assets_total=progress["embeddable_assets_total"],
+            non_embeddable_assets=progress["non_embeddable_assets"],
+            embedded_assets=progress["embedded_assets"],
+            up_to_date_assets=progress["up_to_date_assets"],
+            failed_assets=list(progress["failed_assets"]),
+        )
+
+    for project_id, project in workspace.projects.items():
+        for asset_id, asset in project.assets.items():
+            progress["total_assets"] += 1
+
+            properties = get_asset_embedding_properties(asset)
+            if not bool(properties.get("embeddable")):
+                progress["non_embeddable_assets"] += 1
+                _report_progress()
+                continue
+
+            progress["embeddable_assets_total"] += 1
+
+            row = _find_tracking_row(tracking_rows, project_id, asset_id)
+            if row is not None and not _tracking_requires_embed(row):
+                progress["up_to_date_assets"] += 1
+                _report_progress()
+                continue
+
+            try:
+                embedded = embedding_index.embed_asset(project_id, asset_id, asset)
+                if embedded:
+                    progress["embedded_assets"] += 1
+                    # Persist tracking under a short lock; never hold the
+                    # write lock across the network-bound embed itself.
+                    with workspace_write_lock():
                         mark_asset_embedded(
                             data_dir=os.path.join(PROJECT_ROOT, "data"),
                             asset_id=asset_id,
@@ -1707,39 +1871,41 @@ def _embed_all_assets_locked():
                             filename=getattr(asset, "filename", None),
                             embedded_checksum=compute_asset_checksum(asset),
                         )
-                except Exception as e:
-                    failed_assets.append({"asset_id": asset_id, "error": str(e)})
+            except Exception as e:
+                progress["failed_assets"].append({"asset_id": asset_id, "error": str(e)})
+                _set_embed_all_last_error(str(e))
+            _report_progress()
 
+    try:
+        embedding_index.drop_unkept_assets(_kept_asset_ids_for_embeddings(workspace))
+    except Exception:
+        pass
+
+    nearest_neighbor_matrix: dict[str, Any] = {}
+    if progress["embedded_assets"] > 0:
         try:
-            embedding_index.drop_unkept_assets(_kept_asset_ids_for_embeddings(workspace))
+            nearest_neighbor_matrix = embedding_index.build_neighbor_matrix(max_neighbors=5)
         except Exception:
-            pass
+            nearest_neighbor_matrix = {}
 
-        nearest_neighbor_matrix: dict[str, Any] = {}
-        if embedded_assets > 0:
-            try:
-                nearest_neighbor_matrix = embedding_index.build_neighbor_matrix(max_neighbors=5)
-            except Exception:
-                nearest_neighbor_matrix = {}
+    tracking_rows_after = get_asset_tracking_rows(data_dir=os.path.join(PROJECT_ROOT, "data"))
+    snapshot_after = _workspace_embedding_tracking_snapshot(workspace, tracking_rows_after)
 
-        tracking_rows_after = get_asset_tracking_rows(data_dir=os.path.join(PROJECT_ROOT, "data"))
-        snapshot_after = _workspace_embedding_tracking_snapshot(workspace, tracking_rows_after)
-
-        return {
-            "status": "ok",
-            "total_assets": total_assets,
-            "embeddable_assets_total": embeddable_assets_total,
-            "non_embeddable_assets": non_embeddable_assets,
-            "outdated_before": snapshot_before["outdated_count"],
-            "embedded_assets": embedded_assets,
-            "up_to_date_assets": up_to_date_assets,
-            "skipped_assets": embeddable_assets_total - embedded_assets,
-            "outdated_after": snapshot_after["outdated_count"],
-            "nearest_neighbor_entry_count": len(nearest_neighbor_matrix),
-            "nearest_neighbor_matrix": nearest_neighbor_matrix,
-            "failed_assets": failed_assets,
-            "last_embedded_time": datetime.utcnow().isoformat() + "Z",
-        }
+    return {
+        "status": "ok",
+        "total_assets": progress["total_assets"],
+        "embeddable_assets_total": progress["embeddable_assets_total"],
+        "non_embeddable_assets": progress["non_embeddable_assets"],
+        "outdated_before": snapshot_before["outdated_count"],
+        "embedded_assets": progress["embedded_assets"],
+        "up_to_date_assets": progress["up_to_date_assets"],
+        "skipped_assets": progress["embeddable_assets_total"] - progress["embedded_assets"],
+        "outdated_after": snapshot_after["outdated_count"],
+        "nearest_neighbor_entry_count": len(nearest_neighbor_matrix),
+        "nearest_neighbor_matrix": nearest_neighbor_matrix,
+        "failed_assets": progress["failed_assets"],
+        "last_embedded_time": datetime.utcnow().isoformat() + "Z",
+    }
 
 
 @app.get("/api/rag-config")

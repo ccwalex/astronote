@@ -21,6 +21,19 @@ const ALL_PAGES_LIST_PADDING = 16;
 const ALL_PAGES_GAP = 10;
 const ALL_PAGES_PAGE_LABEL_HEIGHT = 24;
 
+const PDF_LOAD_TIMEOUT_MS = 30_000;
+
+/** Reject when the wrapped promise does not settle within `ms` (surface renderError UI). */
+function withPdfTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
+}
+
 type PageDimension = { width: number; height: number };
 
 type PdfSource = { url: string } | { data: Uint8Array };
@@ -340,7 +353,11 @@ export const PDFSpaceView: React.FC<PDFSpaceViewProps> = ({
 
         const source = buildPdfSource(baseSrc);
         const loadingTask = pdfjsLib.getDocument(source);
-        loadedDocument = await loadingTask.promise;
+        loadedDocument = await withPdfTimeout(
+          loadingTask.promise,
+          PDF_LOAD_TIMEOUT_MS,
+          'PDF load'
+        );
 
         if (cancelled) {
           if (loadedDocument && typeof loadedDocument.destroy === 'function') {
@@ -377,7 +394,13 @@ export const PDFSpaceView: React.FC<PDFSpaceViewProps> = ({
     }
 
     const renderActive = async () => {
-      const dataUrl = await renderPdfPageToDataUrl(pdfDocument, activePage);
+      // First-render timeout: a hung PDF.js render must surface the error UI
+      // instead of leaving "Rendering page N..." forever.
+      const dataUrl = await withPdfTimeout(
+        renderPdfPageToDataUrl(pdfDocument, activePage),
+        PDF_LOAD_TIMEOUT_MS,
+        `Page ${activePage} render`
+      );
       if (cancelled || !dataUrl) return;
       try {
         const pdfPage = await pdfDocument.getPage(activePage);
@@ -402,7 +425,10 @@ export const PDFSpaceView: React.FC<PDFSpaceViewProps> = ({
       }
     };
 
-    void renderActive();
+    renderActive().catch((err) => {
+      if (cancelled) return;
+      setRenderError(err instanceof Error && err.message ? err.message : 'Failed to render PDF');
+    });
 
     return () => {
       cancelled = true;

@@ -38,6 +38,7 @@ export function TextAssetBody({
   const [loaded, setLoaded] = useState<string>(inline || '');
   const [error, setError] = useState<string | null>(null);
   const [ready, setReady] = useState(inline !== null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
 
   useEffect(() => {
     if (inline !== null) {
@@ -70,7 +71,7 @@ export function TextAssetBody({
     return () => {
       cancelled = true;
     };
-  }, [asset.id, inline]);
+  }, [asset.id, inline, loadAttempt]);
 
   if (!ready) {
     return <div style={{ color: '#666', fontSize: '13px' }}>Loading text...</div>;
@@ -80,7 +81,18 @@ export function TextAssetBody({
     <>
       {error ? (
         <div role="alert" style={{ color: '#c00', fontSize: '12px', marginBottom: '6px' }}>
-          {error}
+          Text failed to load: {error}
+          <button
+            type="button"
+            onClick={() => {
+              setError(null);
+              setReady(false);
+              setLoadAttempt((n) => n + 1);
+            }}
+            style={{ marginLeft: '8px', cursor: 'pointer' }}
+          >
+            Retry
+          </button>
         </div>
       ) : null}
       <TextSpaceArea

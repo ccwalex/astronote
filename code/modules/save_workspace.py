@@ -1,6 +1,8 @@
 import base64
 import json
 import os
+import threading
+from collections import OrderedDict
 from tempfile import NamedTemporaryFile
 from typing import Optional
 from urllib.parse import unquote
@@ -120,9 +122,16 @@ def _markdown_rel_path(asset) -> str:
     return _asset_rel_path(asset)
 
 
+def _asset_field(asset, name: str):
+    """Read an asset field from either a model object or a serialized dict."""
+    if isinstance(asset, dict):
+        return asset.get(name)
+    return getattr(asset, name, None)
+
+
 def _is_text_asset(asset, mime: Optional[str] = None) -> bool:
-    kind = str(getattr(asset, "kind", None) or "").lower()
-    mime_type = (mime or str(getattr(asset, "mime_type", None) or "")).lower()
+    kind = str(_asset_field(asset, "kind") or "").lower()
+    mime_type = (mime or str(_asset_field(asset, "mime_type") or "")).lower()
     if kind == "markdown":
         return True
     if kind in {"image", "pdf"}:
@@ -224,7 +233,7 @@ def spill_project_assets(workspace: Workspace, assets_dir: str, project_id: str)
     return spilled
 
 
-def _hydrate_one_asset(asset, assets_dir: str) -> None:
+def _hydrate_one_asset(asset, assets_dir: str, text_only: bool = False) -> None:
     content = getattr(asset, "content", None)
     if isinstance(content, str) and content != "":
         return
@@ -240,8 +249,12 @@ def _hydrate_one_asset(asset, assets_dir: str) -> None:
     if not os.path.isfile(dest):
         return
     if _is_text_asset(asset):
-        with open(dest, "r", encoding="utf-8") as handle:
-            asset.content = handle.read()
+        text = _read_cached_text_asset(dest)
+        if text is not None:
+            asset.content = text
+        return
+    if text_only:
+        # Binaries are served via /api/assets/{id}; skip inlining base64 blobs.
         return
     with open(dest, "rb") as handle:
         blob = handle.read()
@@ -250,28 +263,40 @@ def _hydrate_one_asset(asset, assets_dir: str) -> None:
     asset.content = f"data:{mime_type};base64,{b64}"
 
 
-_text_asset_file_cache: dict[tuple[str, float], str] = {}
+_TEXT_ASSET_CACHE_MAX = 256
+_text_asset_cache_lock = threading.Lock()
+_text_asset_file_cache: "OrderedDict[tuple[str, float], str]" = OrderedDict()
 
 
 def _read_cached_text_asset(dest: str) -> Optional[str]:
-    """Read UTF-8 text, reusing content when (path, mtime) is unchanged."""
+    """Read UTF-8 text, reusing content when (path, mtime) is unchanged.
+
+    Capped at _TEXT_ASSET_CACHE_MAX entries with oldest-insertion eviction so
+    very large workspaces cannot grow the cache without bound (mirrors the LRU
+    style used by modules/asset_resolve.py).
+    """
     try:
         mtime = os.path.getmtime(dest)
     except OSError:
         return None
     key = (dest, mtime)
-    cached = _text_asset_file_cache.get(key)
-    if cached is not None:
-        return cached
+    with _text_asset_cache_lock:
+        cached = _text_asset_file_cache.get(key)
+        if cached is not None:
+            _text_asset_file_cache.move_to_end(key)
+            return cached
     try:
         with open(dest, "r", encoding="utf-8") as handle:
             text = handle.read()
     except (OSError, UnicodeDecodeError):
         return None
-    stale_keys = [existing for existing in _text_asset_file_cache if existing[0] == dest]
-    for stale in stale_keys:
-        _text_asset_file_cache.pop(stale, None)
-    _text_asset_file_cache[key] = text
+    with _text_asset_cache_lock:
+        stale_keys = [existing for existing in _text_asset_file_cache if existing[0] == dest]
+        for stale in stale_keys:
+            _text_asset_file_cache.pop(stale, None)
+        _text_asset_file_cache[key] = text
+        while len(_text_asset_file_cache) > _TEXT_ASSET_CACHE_MAX:
+            _text_asset_file_cache.popitem(last=False)
     return text
 
 
@@ -295,6 +320,25 @@ def hydrate_project_assets(workspace: Workspace, assets_dir: str, project_id: st
         return
     for asset in assets.values():
         _hydrate_one_asset(asset, assets_dir)
+
+
+def hydrate_text_project_assets(workspace: Workspace, assets_dir: str, project_id: str) -> None:
+    """Hydrate text-asset content for a single project only; skip binaries.
+
+    Binaries stay on disk and are served via /api/assets/{id}; inlining their
+    base64 into page-load JSON bloats the payload and starves the threadpool.
+    """
+    if not workspace or not assets_dir or not project_id:
+        return
+    projects = getattr(workspace, "projects", None) or {}
+    project = projects.get(project_id)
+    if project is None:
+        return
+    assets = getattr(project, "assets", None) or {}
+    if not isinstance(assets, dict):
+        return
+    for asset in assets.values():
+        _hydrate_one_asset(asset, assets_dir, text_only=True)
 
 
 def hydrate_text_assets(workspace: Workspace, assets_dir: Optional[str]) -> None:
@@ -352,6 +396,26 @@ def strip_asset_content_from_dict(payload: dict) -> dict:
                     asset["path"] = name
             asset.pop("content", None)
     return payload
+
+
+def strip_binary_asset_content_from_payload(project_payload: dict) -> dict:
+    """Null out binary asset bodies in a serialized project dict.
+
+    Page-load responses hydrate text inline but serve binaries via
+    /api/assets/{id}; clients fall back to the keyed URL when content is None.
+    """
+    if not isinstance(project_payload, dict):
+        return project_payload
+    assets = project_payload.get("assets")
+    if not isinstance(assets, dict):
+        return project_payload
+    for asset in assets.values():
+        if not isinstance(asset, dict):
+            continue
+        if _is_text_asset(asset):
+            continue
+        asset["content"] = None
+    return project_payload
 
 
 def payload_has_inline_assets(payload: dict) -> bool:

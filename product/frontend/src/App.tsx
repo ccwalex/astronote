@@ -62,7 +62,7 @@ import {
   writeProjectToCache
 } from './model/workspaceCache';
 import { readLastView, validateLastView, writeLastView } from './model/lastViewCache';
-import { collectDirtyMarkdownAssets, isProjectHydrated, loadProjectIntoWorkspace, markMarkdownAssetsPersisted, noteHydratedMarkdownAssets, parseWorkspaceJson, prepareWorkspaceForSave, shouldPersistWorkspace } from './model/workspaceLoad';
+import { collectDirtyMarkdownAssets, isProjectHydrated, loadProjectIntoWorkspace, markMarkdownAssetsPersisted, noteHydratedMarkdownAssets, parseWorkspaceJson, prepareWorkspaceForSave, shouldPersistWorkspace, type DirtyMarkdownAsset } from './model/workspaceLoad';
 import { bootstrapWorkspaceLoad, type BootstrapWorkspaceResult } from './model/bootstrapWorkspace';
 import {
   refreshWorkspaceFromServer,
@@ -114,6 +114,16 @@ const LOADING_WATCHDOG_MS = 35000;
 let workspaceBootstrapPromise: Promise<BootstrapWorkspaceResult> | null = null;
 const ASSET_TRACKING_MIGRATION_SESSION_ID = 'session_' + Date.now() + '_' + Math.random().toString(36).slice(2, 10);
 const WORKSPACE_STORAGE_MIGRATION_SESSION_ID = 'session_' + Date.now() + '_' + Math.random().toString(36).slice(2, 10);
+
+/** Merge pending-cache markdown refs with live dirty markdown (flushPersist semantics). */
+function collectDirtyMarkdownForPersist(workspace: Workspace): DirtyMarkdownAsset[] {
+  const pendingMd = collectPendingDirtyMarkdown();
+  const liveDirty = collectDirtyMarkdownAssets(workspace);
+  const dirtyByAsset = new Map<string, DirtyMarkdownAsset>();
+  for (const item of pendingMd) dirtyByAsset.set(item.assetId, item);
+  for (const item of liveDirty) dirtyByAsset.set(item.assetId, item);
+  return Array.from(dirtyByAsset.values());
+}
 
 function readMigrationDeferredThisSession(): boolean {
   try {
@@ -730,7 +740,14 @@ export default function App() {
     // when no hydrated project body remains — e.g. deleting the last page,
     // which leaves only library_nodes to persist.
     if (!shouldPersistWorkspace(workspace) && !isWorkspaceDirty(workspaceDirtyGateRef.current)) return;
-    if (persistBlockedRef.current || pageWriteProtectedRef.current) return;
+    if (persistBlockedRef.current || pageWriteProtectedRef.current) {
+      // Persist is blocked (e.g. stale workspace rejected): skip the network but
+      // still snapshot dirty state so edits made while the warning is up survive.
+      if (persistBlockedRef.current) {
+        writeWorkspaceDirtyToPendingPersist(workspace, collectDirtyMarkdownForPersist(workspace));
+      }
+      return;
+    }
     clearPersistTimer();
     if (coalesceKey) pendingCoalesceKeyRef.current = coalesceKey;
     if (persistAbortRef.current) {
@@ -739,12 +756,7 @@ export default function App() {
     const controller = new AbortController();
     persistAbortRef.current = controller;
     const signal = controller.signal;
-    const pendingMd = collectPendingDirtyMarkdown();
-    const liveDirty = collectDirtyMarkdownAssets(workspace);
-    const dirtyByAsset = new Map<string, (typeof liveDirty)[number]>();
-    for (const item of pendingMd) dirtyByAsset.set(item.assetId, item);
-    for (const item of liveDirty) dirtyByAsset.set(item.assetId, item);
-    const dirty = Array.from(dirtyByAsset.values());
+    const dirty = collectDirtyMarkdownForPersist(workspace);
     // Undroppable: sync pending before network so abort/tab-close cannot drop payload.
     writeWorkspaceDirtyToPendingPersist(workspace, dirty);
     const ackProjectIds = Object.keys(prepareWorkspaceForSave(workspace).projects || {});
@@ -1210,6 +1222,13 @@ export default function App() {
     try {
       localStorage.removeItem('astronote_workspace');
     } catch (e) {}
+    // The user explicitly discarded unsaved changes: drop every pending-persist
+    // snapshot and stale-save recovery state so they cannot re-dirty the fresh
+    // server view after the reload (409 loop risk).
+    for (const projectId of listPendingProjectIds()) {
+      clearProjectFromPendingPersist(projectId);
+    }
+    staleSaveRecoveryRef.current = false;
     setPersistError(null);
     setNavError(null);
     setLoading(true);

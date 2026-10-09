@@ -303,12 +303,14 @@ export async function fetchWorkspaceRevision(options?: {
   };
 }
 
-export async function fetchWorkspaceNav(): Promise<WorkspaceNavResponse> {
+export async function fetchWorkspaceNav(
+  options?: { signal?: AbortSignal }
+): Promise<WorkspaceNavResponse> {
   const endpoint = `${API_BASE}/workspace/nav`;
   let response: Response;
 
   try {
-    response = await fetch(endpoint, withNoStore());
+    response = await fetch(endpoint, withNoStore({ signal: options?.signal }));
   } catch (err) {
     throw makeNetworkError('Fetch workspace nav', endpoint, err);
   }
@@ -376,31 +378,74 @@ export function assetContentUrl(assetId: string): string {
   return resolveAssetUrl(`/api/assets/${encodeURIComponent(assetId)}`);
 }
 
-export async function fetchAssetText(assetId: string): Promise<string> {
+const ASSET_TEXT_TIMEOUT_MS = 20_000;
+
+function isAssetTextTimeoutError(err: unknown): boolean {
+  return err instanceof Error && err.message.includes('timed out after');
+}
+
+/** One fetch attempt, aborted by the caller signal OR the timeout, whichever fires first. */
+async function fetchAssetTextOnce(
+  assetId: string,
+  options?: { signal?: AbortSignal; timeoutMs?: number }
+): Promise<string> {
   const endpoint = `${API_BASE}/assets/${encodeURIComponent(assetId)}`;
-  let response: Response;
+  const timeoutMs = options?.timeoutMs ?? ASSET_TEXT_TIMEOUT_MS;
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  const onCallerAbort = () => controller.abort();
+  options?.signal?.addEventListener('abort', onCallerAbort);
   try {
-    response = await fetch(endpoint);
-  } catch (err) {
-    throw makeNetworkError('Fetch asset', endpoint, err);
-  }
-  if (!response.ok) {
-    const snippet = await getResponseBodySnippet(response);
-    throw new Error(`Failed to fetch asset (${response.status} ${response.statusText}) at ${endpoint}${snippet ? `: ${snippet}` : ''}`);
-  }
-  const contentType = (response.headers.get('content-type') || '').toLowerCase();
-  if (contentType.includes('application/json')) {
-    const payload = await response.json();
-    if (payload && typeof payload === 'object') {
-      if (typeof payload.content === 'string') return payload.content;
-      if (typeof payload.text === 'string') return payload.text;
-      if (typeof payload.error === 'string' && payload.error) {
-        throw new Error(payload.error);
+    let response: Response;
+    try {
+      response = await fetch(endpoint, { signal: controller.signal });
+    } catch (err) {
+      if (timedOut) {
+        throw new Error(`Fetch asset timed out after ${timeoutMs}ms at ${endpoint}`);
       }
+      throw makeNetworkError('Fetch asset', endpoint, err);
     }
-    throw new Error('Asset body is missing');
+    if (!response.ok) {
+      const snippet = await getResponseBodySnippet(response);
+      throw new Error(`Failed to fetch asset (${response.status} ${response.statusText}) at ${endpoint}${snippet ? `: ${snippet}` : ''}`);
+    }
+    const contentType = (response.headers.get('content-type') || '').toLowerCase();
+    if (contentType.includes('application/json')) {
+      const payload = await response.json();
+      if (payload && typeof payload === 'object') {
+        if (typeof payload.content === 'string') return payload.content;
+        if (typeof payload.text === 'string') return payload.text;
+        if (typeof payload.error === 'string' && payload.error) {
+          throw new Error(payload.error);
+        }
+      }
+      throw new Error('Asset body is missing');
+    }
+    return response.text();
+  } finally {
+    clearTimeout(timer);
+    options?.signal?.removeEventListener('abort', onCallerAbort);
   }
-  return response.text();
+}
+
+export async function fetchAssetText(
+  assetId: string,
+  options?: { signal?: AbortSignal; timeoutMs?: number }
+): Promise<string> {
+  try {
+    return await fetchAssetTextOnce(assetId, options);
+  } catch (err) {
+    if (options?.signal?.aborted || !isAssetTextTimeoutError(err)) {
+      throw err;
+    }
+    // Single automatic retry: a stalled backend must not leave the asset on
+    // "Loading text..." forever when a second attempt would go through.
+    return await fetchAssetTextOnce(assetId, options);
+  }
 }
 
 export async function putAssetText(
@@ -796,13 +841,119 @@ export function parseAssetTrackingStorageStatus(data: unknown): AssetTrackingSto
   };
 }
 
-export interface EmbedAllAssetsResponse {
+export interface EmbedAllFailure {
+  asset_id: string;
+  error: string;
+}
+
+export interface EmbedAllResultPayload {
+  status?: string;
+  total_assets?: number;
+  embeddable_assets_total?: number;
+  non_embeddable_assets?: number;
+  outdated_before?: number;
+  outdated_after?: number;
+  embedded_assets?: number;
+  up_to_date_assets?: number;
+  skipped_assets?: number;
+  nearest_neighbor_matrix?: unknown;
+  failed_assets?: EmbedAllFailure[];
+  last_embedded_time?: string;
+}
+
+// POST /api/asset-tracking/embed-all now runs as a background job and
+// responds 202 with job coordinates. The legacy synchronous "ok" payload is
+// kept as an accepted shape so older backends still work.
+export type EmbedAllAssetsResponse =
+  | EmbedAllJobStartedResponse
+  | EmbedAllLegacySyncResponse;
+
+export interface EmbedAllJobStartedResponse {
+  status: 'started' | 'already_running';
+  job_id: string;
+  status_url: string;
+}
+
+export interface EmbedAllLegacySyncResponse extends EmbedAllResultPayload {
   status: 'ok';
   total_assets: number;
   embedded_assets: number;
-  skipped_assets: number;
-  failed_assets?: { asset_id: string; error: string }[];
   last_embedded_time: string;
+}
+
+export interface EmbedAllStatusResponse {
+  running: boolean;
+  done: boolean;
+  job_id: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  last_error: string | null;
+  total_assets: number | null;
+  processed_assets: number | null;
+  embeddable_assets_total: number | null;
+  non_embeddable_assets: number | null;
+  embedded_assets: number | null;
+  up_to_date_assets: number | null;
+  failed_assets: EmbedAllFailure[];
+  result: EmbedAllResultPayload | null;
+}
+
+function parseEmbedAllFailures(value: unknown): EmbedAllFailure[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object' && !Array.isArray(item))
+    .map(item => ({
+      asset_id: typeof item.asset_id === 'string' ? item.asset_id : '',
+      error: typeof item.error === 'string' ? item.error : ''
+    }));
+}
+
+export function parseEmbedAllAssetsResponse(data: unknown): EmbedAllAssetsResponse {
+  const raw = data && typeof data === 'object' && !Array.isArray(data)
+    ? data as Record<string, unknown>
+    : {};
+  if (raw.status === 'started' || raw.status === 'already_running') {
+    return {
+      status: raw.status,
+      job_id: typeof raw.job_id === 'string' ? raw.job_id : '',
+      status_url: typeof raw.status_url === 'string' ? raw.status_url : ''
+    };
+  }
+  if (raw.status === 'ok') {
+    return {
+      status: 'ok',
+      total_assets: typeof raw.total_assets === 'number' ? raw.total_assets : 0,
+      embedded_assets: typeof raw.embedded_assets === 'number' ? raw.embedded_assets : 0,
+      failed_assets: parseEmbedAllFailures(raw.failed_assets),
+      last_embedded_time: typeof raw.last_embedded_time === 'string' ? raw.last_embedded_time : ''
+    };
+  }
+  throw new Error('Unexpected embed-all response shape');
+}
+
+export function parseEmbedAllStatus(data: unknown): EmbedAllStatusResponse {
+  const raw = data && typeof data === 'object' && !Array.isArray(data)
+    ? data as Record<string, unknown>
+    : {};
+  const result = raw.result && typeof raw.result === 'object' && !Array.isArray(raw.result)
+    ? raw.result as EmbedAllResultPayload
+    : null;
+  return {
+    running: Boolean(raw.running),
+    done: Boolean(raw.done),
+    job_id: asOptionalString(raw.job_id) ?? null,
+    started_at: asOptionalString(raw.started_at) ?? null,
+    finished_at: asOptionalString(raw.finished_at) ?? null,
+    last_error: asOptionalString(raw.last_error) ?? null,
+    total_assets: asOptionalNumber(raw.total_assets) ?? null,
+    processed_assets: asOptionalNumber(raw.processed_assets) ?? null,
+    embeddable_assets_total: asOptionalNumber(raw.embeddable_assets_total) ?? null,
+    non_embeddable_assets: asOptionalNumber(raw.non_embeddable_assets) ?? null,
+    embedded_assets: asOptionalNumber(raw.embedded_assets) ?? null,
+    up_to_date_assets: asOptionalNumber(raw.up_to_date_assets) ?? null,
+    failed_assets: parseEmbedAllFailures(raw.failed_assets),
+    result
+  };
 }
 
 async function fetchAssetTrackingStatusPayload(): Promise<AssetTrackingStorageStatus> {
@@ -1000,7 +1151,25 @@ export async function embedAllAssets(): Promise<EmbedAllAssetsResponse> {
     throw new Error(`Failed to embed all assets (${response.status} ${response.statusText}) at ${endpoint}${snippet ? `: ${snippet}` : ''}`);
   }
 
-  return response.json();
+  return parseEmbedAllAssetsResponse(await response.json());
+}
+
+export async function fetchEmbedAllStatus(): Promise<EmbedAllStatusResponse> {
+  const endpoint = `${API_BASE}/asset-tracking/embed-all/status`;
+  let response: Response;
+
+  try {
+    response = await fetch(endpoint);
+  } catch (err) {
+    throw makeNetworkError('Fetch embed-all job status', endpoint, err);
+  }
+
+  if (!response.ok) {
+    const snippet = await getResponseBodySnippet(response);
+    throw new Error(`Failed to fetch embed-all job status (${response.status} ${response.statusText}) at ${endpoint}${snippet ? `: ${snippet}` : ''}`);
+  }
+
+  return parseEmbedAllStatus(await response.json());
 }
 
 export interface BackendRAGDistanceFields {
