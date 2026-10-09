@@ -193,6 +193,43 @@ function normalizeProjectStub(raw: any, projectKey: string): Project {
   } as Project;
 }
 
+/**
+ * Make each project's `name` agree with its library page node name.
+ *
+ * The page title is stored twice (library node + project). The sidebar shows
+ * the node copy while the canvas header shows the project copy, and several
+ * persist/restore paths (cached project bodies, pending-persist overlay,
+ * backend merges that keep stored bodies for stubbed projects) treat them
+ * independently — so the header could show a stale title while the library
+ * already showed the renamed one. The library node is what the user renames,
+ * so it wins wherever the two copies disagree.
+ */
+export function reconcileProjectNamesWithLibrary(workspace: Workspace): Workspace {
+  const nodes = workspace.library_nodes || {};
+  const nameByProjectId = new Map<string, string>();
+  for (const node of Object.values(nodes)) {
+    if (!node || node.kind !== 'page') continue;
+    const pid = node.target_project_id;
+    const name = typeof node.name === 'string' ? node.name.trim() : '';
+    if (pid && name && !nameByProjectId.has(pid)) {
+      nameByProjectId.set(pid, name);
+    }
+  }
+  if (nameByProjectId.size === 0) return workspace;
+
+  const projects = workspace.projects || {};
+  let changed = false;
+  const nextProjects: Record<string, Project> = { ...projects };
+  for (const [pid, name] of nameByProjectId) {
+    const project = nextProjects[pid];
+    if (project && project.name !== name) {
+      nextProjects[pid] = { ...project, name };
+      changed = true;
+    }
+  }
+  return changed ? { ...workspace, projects: nextProjects } : workspace;
+}
+
 export function normalizeWorkspace(input: any): Workspace {
   if (!input || typeof input !== 'object') {
     warnNormalize('workspace payload is missing or not an object');
@@ -219,11 +256,11 @@ export function normalizeWorkspace(input: any): Workspace {
     warnNormalize('projects is not a map; projects may be dropped during load');
   }
 
-  return {
+  return reconcileProjectNamesWithLibrary({
     ...input,
     id: input.id ?? 'default',
     name: input.name ?? '',
     library_nodes,
     projects,
-  };
+  });
 }

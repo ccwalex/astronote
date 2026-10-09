@@ -207,6 +207,13 @@ export default function App() {
   const serverRefreshInFlightRef = useRef(false);
   const selectedProjectIdRef = useRef<string | null>(null);
   const pageWriteProtectedRef = useRef(false);
+  // Library node/project deletions made locally but not yet ACKed by a save.
+  // A server refresh (409 recovery, revision poll) re-applies them so the
+  // server's stale tree cannot resurrect deleted pages mid-sync.
+  const pendingLibraryDeletionsRef = useRef<{ nodeIds: Set<string>; projectIds: Set<string> }>({
+    nodeIds: new Set(),
+    projectIds: new Set()
+  });
   const pagePresenceControllerRef = useRef<PagePresenceController | null>(null);
 
   const [loading, setLoading] = useState(true);
@@ -552,6 +559,34 @@ export default function App() {
     result: RefreshWorkspaceFromServerResult,
     options?: { flashSynced?: boolean }
   ) => {
+    let present = result.present;
+    // Re-apply local deletions the server tree does not know about yet: a
+    // refresh that races a not-yet-ACKed page delete would otherwise
+    // resurrect the deleted page (and its project) in the UI and on disk.
+    const pendingNodeIds = pendingLibraryDeletionsRef.current.nodeIds;
+    let reappliedDeletions = false;
+    if (pendingNodeIds.size > 0) {
+      const nodes = { ...(present.library_nodes || {}) };
+      for (const id of pendingNodeIds) {
+        if (id in nodes) {
+          delete nodes[id];
+          reappliedDeletions = true;
+        }
+      }
+      const projects = { ...(present.projects || {}) };
+      const stillReferenced = new Set(
+        Object.values(nodes)
+          .map(node => node?.target_project_id)
+          .filter((pid): pid is string => Boolean(pid))
+      );
+      for (const pid of pendingLibraryDeletionsRef.current.projectIds) {
+        if (pid in projects && !stillReferenced.has(pid)) {
+          delete projects[pid];
+          reappliedDeletions = true;
+        }
+      }
+      present = { ...present, library_nodes: nodes, projects };
+    }
     serverRevisionRef.current = result.serverRevision;
     hasUnsavedLocalRef.current = false;
     skipBackendPersistRef.current = true;
@@ -559,8 +594,14 @@ export default function App() {
     persistBlockedRef.current = false;
     suppressPersistRef.current = false;
     clearGateDirty();
-    presentRef.current = result.present;
-    setHistoryState(presentOnlyHistory(result.present));
+    if (reappliedDeletions) {
+      // The deletion is still unsaved: keep the gate dirty so the debounced
+      // persist re-sends the pruned tree to the server.
+      markGateUserMutation();
+      armDebouncedPersist();
+    }
+    presentRef.current = present;
+    setHistoryState(presentOnlyHistory(present));
     setProjectBodyError(result.projectBodyError);
     setNavError(null);
     setServerAheadNotice(null);
@@ -651,7 +692,14 @@ export default function App() {
           forceProjectRefresh: true,
         });
         applyServerRefresh(result);
-        flushPendingPersistInBackground();
+        if (pendingLibraryDeletionsRef.current.nodeIds.size > 0) {
+          // flushPendingPersistInBackground early-returns when the deletions
+          // left no hydrated project (e.g. deleting the last page); the
+          // pruned library tree still needs to reach the server.
+          flushPersist(presentRef.current, pendingCoalesceKeyRef.current);
+        } else {
+          flushPendingPersistInBackground();
+        }
         if (listPendingProjectIds().length === 0) {
           // Nothing pending to re-apply: the refreshed server view stands.
           staleSaveRecoveryRef.current = false;
@@ -677,7 +725,11 @@ export default function App() {
     coalesceKey?: string | null,
     options?: { keepalive?: boolean }
   ) => {
-    if (!workspace || !shouldPersistWorkspace(workspace)) return;
+    if (!workspace) return;
+    // Library-only mutations (page create/rename/delete) are valid saves even
+    // when no hydrated project body remains — e.g. deleting the last page,
+    // which leaves only library_nodes to persist.
+    if (!shouldPersistWorkspace(workspace) && !isWorkspaceDirty(workspaceDirtyGateRef.current)) return;
     if (persistBlockedRef.current || pageWriteProtectedRef.current) return;
     clearPersistTimer();
     if (coalesceKey) pendingCoalesceKeyRef.current = coalesceKey;
@@ -727,6 +779,9 @@ export default function App() {
         hasUnsavedLocalRef.current = false;
         clearGateDirty();
         persistDeferredRef.current = false;
+        // The ACKed payload carried the pruned library tree: deletions are
+        // now durable on the server, so a later refresh must not re-apply them.
+        pendingLibraryDeletionsRef.current = { nodeIds: new Set(), projectIds: new Set() };
         const rev = extractWorkspaceRevision(saveResult);
         if (rev != null) {
           serverRevisionRef.current = rev;
@@ -797,7 +852,7 @@ export default function App() {
       if (!isWorkspaceDirty(workspaceDirtyGateRef.current)) return;
       const current = presentRef.current;
       if (persistBlockedRef.current || pageWriteProtectedRef.current) return;
-      if (current && shouldPersistWorkspace(current)) {
+      if (current && (shouldPersistWorkspace(current) || pendingLibraryDeletionsRef.current.nodeIds.size > 0)) {
         hasUnsavedLocalRef.current = true;
         flushPersist(current, pendingCoalesceKeyRef.current);
       }
@@ -813,7 +868,9 @@ export default function App() {
     const decision = decideDebouncedPersist({
       launchSettled: launchSettledRef.current,
       hasUserMutation: isWorkspaceDirty(workspaceDirtyGateRef.current),
-      shouldPersistWorkspace: shouldPersistWorkspace(historyState.present),
+      // Library-only deletions (e.g. deleting the last page) leave no hydrated
+      // project but still need the debounced save.
+      shouldPersistWorkspace: shouldPersistWorkspace(historyState.present) || pendingLibraryDeletionsRef.current.nodeIds.size > 0,
       skipBackendPersist: skipBackendPersistRef.current,
       suppressPersist: suppressPersistRef.current,
       persistBlocked: persistBlockedRef.current,
@@ -1957,14 +2014,36 @@ export default function App() {
 
   
   const handleRenameNode = (nodeId: string, newName: string) => {
+    if (pageWriteProtectedRef.current) {
+      // setWorkspaceState would silently drop the mutation while another
+      // session holds the page write lock — surface why nothing changes.
+      window.alert('This page is write-locked by another session, so the rename cannot be saved right now. Try again after the lock is released.');
+      return;
+    }
     setWorkspaceState(prev => renameNode(prev, nodeId, newName));
   };
 
   const handleDeleteNode = (nodeId: string) => {
+    if (pageWriteProtectedRef.current) {
+      // setWorkspaceState would silently drop the mutation while another
+      // session holds the page write lock — surface why nothing changes.
+      window.alert('A page is write-locked by another session, so this deletion cannot be saved right now. Try again after the lock is released, or use Force unlock.');
+      return;
+    }
     const confirmed = wouldDropMostPageBodies(workspaceState, nodeId)
       ? confirmDropMostPageBodies()
       : window.confirm('Delete this node and all contents?');
     if (confirmed) {
+      // Record the deletion so a server refresh that lands before the save
+      // ACK (409 recovery, revision poll) re-applies it instead of letting
+      // the server's stale tree resurrect the deleted page.
+      const deleted = deleteNode(workspaceState, nodeId);
+      const removedNodeIds = Object.keys(workspaceState.library_nodes || {})
+        .filter(id => !(deleted.library_nodes || {})[id]);
+      const removedProjectIds = Object.keys(workspaceState.projects || {})
+        .filter(id => !(deleted.projects || {})[id]);
+      removedNodeIds.forEach(id => pendingLibraryDeletionsRef.current.nodeIds.add(id));
+      removedProjectIds.forEach(id => pendingLibraryDeletionsRef.current.projectIds.add(id));
       setWorkspaceState(prev => deleteNode(prev, nodeId));
       if (selectedLibraryNodeId === nodeId) {
         setSelectedLibraryNodeId(null);

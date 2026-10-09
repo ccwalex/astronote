@@ -185,7 +185,20 @@ def _complete_project_ids(payload: Any) -> list:
 def incoming_would_wipe_page_bodies(incoming: Any, disk: Any) -> bool:
     disk_complete = _complete_project_ids(disk)
     incoming_complete = _complete_project_ids(incoming)
-    return len(disk_complete) >= 1 and len(incoming_complete) == 0
+    if not disk_complete or incoming_complete:
+        return False
+    # A payload that empties every hydrated body is only trusted when its
+    # library tree proves the deletions: no remaining page node may reference
+    # a project whose complete stored body the payload omits. Deleting the
+    # last page removes the node together with its project, so a legitimate
+    # last-page delete carries no such reference; stale or poisoned payloads
+    # (nav-only saves, partial hydrates) still do. Payloads without a library
+    # tree cannot prove intent and stay rejected.
+    nodes = incoming.get("library_nodes") if isinstance(incoming, dict) else None
+    if not isinstance(nodes, dict):
+        return True
+    referenced = _referenced_project_ids(incoming)
+    return bool(referenced.intersection(disk_complete))
 
 
 def incoming_would_drop_stored_collections(incoming: Any, disk: Any) -> list:
@@ -386,11 +399,27 @@ def merge_incoming_workspace_dict(
     disk_referenced = _referenced_project_ids(disk)
     merged_projects = dict(incoming_projects)
     restored_disk_only = []
+
+    def _name_synced_disk_copy(project_id: str, disk_proj: dict) -> dict:
+        """Keep a stored body but adopt the incoming library's title for it.
+
+        The page title lives twice (library node + project name). The client
+        may rename the node while this project's body is a stub it never
+        hydrated, so the payload carries the new node name but no project
+        name. Syncing here keeps GET /nav + GET /project from answering with
+        the stale copy while the library already shows the renamed one.
+        """
+        incoming_name = _library_name_for_project(incoming, project_id)
+        if incoming_name and disk_proj.get("name") != incoming_name:
+            disk_proj = dict(disk_proj)
+            disk_proj["name"] = incoming_name
+        return disk_proj
+
     for project_id, disk_proj in disk_projects.items():
         client_proj = incoming_projects.get(project_id)
         if client_proj is None:
             if project_id in referenced:
-                merged_projects[project_id] = disk_proj
+                merged_projects[project_id] = _name_synced_disk_copy(project_id, disk_proj)
             elif (
                 preserve_disk_only
                 and disk_referenced
@@ -402,12 +431,12 @@ def merge_incoming_workspace_dict(
                 # (e.g. a tab that loaded before a server-side page creation):
                 # keep the stored body. Saves carrying a fresh base revision are
                 # trusted to delete instead.
-                merged_projects[project_id] = disk_proj
+                merged_projects[project_id] = _name_synced_disk_copy(project_id, disk_proj)
                 restored_disk_only.append(str(project_id))
             continue
         if is_project_stub(client_proj) and not is_project_stub(disk_proj):
             if project_id in referenced:
-                merged_projects[project_id] = disk_proj
+                merged_projects[project_id] = _name_synced_disk_copy(project_id, disk_proj)
             else:
                 merged_projects.pop(project_id, None)
         elif is_project_stub(client_proj) and project_id not in referenced:

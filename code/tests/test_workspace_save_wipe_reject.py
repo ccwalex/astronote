@@ -16,6 +16,7 @@ from modules.workspace import Workspace
 from modules.workspace_lazy import (
     apply_collection_restore,
     incoming_would_wipe_page_bodies,
+    merge_incoming_workspace_dict,
     plan_collection_restore,
     workspace_nav_dict,
 )
@@ -299,6 +300,88 @@ def test_post_delete_page_succeeds_and_drops_project():
         _teardown_temp_store(tmp, old_path, old_assets)
 
 
+def test_delete_last_page_allowed_when_library_proves_deletion():
+    """Deleting the ONLY page removes its node and project from the payload:
+    the library tree references nothing anymore, so the total body wipe is an
+    intentional deletion and must be accepted, not rejected."""
+    ws, extra = _workspace_with_bodied_page()
+    tmp, old_path, old_assets = _setup_temp_store(ws)
+    try:
+        client = TestClient(api.app)
+        payload = ws.to_dict()
+        # Delete the page: drop its node and project from the payload.
+        payload["library_nodes"] = {
+            node_id: node
+            for node_id, node in payload["library_nodes"].items()
+            if node.get("target_project_id") != extra.id
+        }
+        del payload["projects"][extra.id]
+        incoming = {"projects": payload["projects"], "library_nodes": payload["library_nodes"]}
+        disk = payload  # same shape as previous_dict for the pure function check
+        assert incoming_would_wipe_page_bodies(incoming, disk) is False
+        posted = client.post("/api/workspace", json=payload)
+        assert posted.status_code == 200, posted.text
+        disk_after = api._load_workspace_from_disk()
+        assert extra.id not in disk_after.projects
+        assert all(
+            node.target_project_id != extra.id
+            for node in disk_after.library_nodes.values()
+        )
+    finally:
+        _teardown_temp_store(tmp, old_path, old_assets)
+
+
+def test_delete_last_page_still_rejected_when_library_still_references_body():
+    """A payload that empties every body while its library tree still
+    references a stored complete body is stale/poisoned, not a deletion."""
+    complete = _complete_project()
+    incoming = {
+        "projects": {"p1": _stub_project("p1")},
+        "library_nodes": {
+            "n1": {"id": "n1", "kind": "page", "name": "Page", "parent_id": None,
+                   "child_ids": [], "target_project_id": "p1"}
+        },
+    }
+    disk = {"projects": {"p1": complete}}
+    assert incoming_would_wipe_page_bodies(incoming, disk) is True
+
+
+def test_delete_last_page_rejected_without_library_tree():
+    """A payload with no library tree cannot prove a deletion is intentional."""
+    incoming = {"projects": {"p1": _stub_project("p1")}}
+    disk = {"projects": {"p1": _complete_project()}}
+    assert incoming_would_wipe_page_bodies(incoming, disk) is True
+
+
+def test_merge_restored_disk_body_adopts_incoming_library_name():
+    """Renaming a page whose project body is a stub in the payload must still
+    update the stored project name, so the canvas header matches the library
+    after the next load."""
+    disk = {
+        "projects": {
+            "p1": _complete_project("p1"),
+            "p2": _complete_project("p2", "s2"),
+        },
+        "library_nodes": {
+            "n1": {"id": "n1", "kind": "page", "name": "Old Name", "parent_id": None,
+                   "child_ids": [], "target_project_id": "p1"},
+        },
+    }
+    # p1's body was never hydrated client-side (stub dropped on save), but the
+    # node was renamed to "New Name".
+    incoming = {
+        "projects": {"p2": _complete_project("p2", "s2")},
+        "library_nodes": {
+            "n1": {"id": "n1", "kind": "page", "name": "New Name", "parent_id": None,
+                   "child_ids": [], "target_project_id": "p1"},
+        },
+    }
+    merged = merge_incoming_workspace_dict(incoming, disk)
+    assert "p1" in merged["projects"]
+    assert merged["projects"]["p1"]["name"] == "New Name"
+    assert merged["projects"]["p1"]["root_space_id"] == "s1"  # body kept
+
+
 def main():
     tests = [
         test_incoming_would_wipe_all_stubs_against_complete_disk,
@@ -315,6 +398,10 @@ def main():
         test_post_synthesized_body_over_edited_layout_restored,
         test_post_legitimate_page_emptying_is_trusted,
         test_post_delete_page_succeeds_and_drops_project,
+        test_delete_last_page_allowed_when_library_proves_deletion,
+        test_delete_last_page_still_rejected_when_library_still_references_body,
+        test_delete_last_page_rejected_without_library_tree,
+        test_merge_restored_disk_body_adopts_incoming_library_name,
     ]
     for test in tests:
         test()

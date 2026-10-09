@@ -1,6 +1,6 @@
 import type { Workspace, Project, Asset } from '../types';
 import { fetchProject } from '../api';
-import { normalizeProject, normalizeWorkspace } from './normalizeWorkspace';
+import { normalizeProject, normalizeWorkspace, reconcileProjectNamesWithLibrary } from './normalizeWorkspace';
 
 const WARN_PREFIX = '[workspaceLoad]';
 
@@ -215,13 +215,13 @@ export function applyPageLoadResult(navWorkspace: Workspace, project: Project | 
 export function hydrateWorkspaceProject(workspace: Workspace, project: Project): Workspace {
   if (!project || !project.id) return workspace;
   const normalizedProject = normalizeProject(project, project.id);
-  return {
+  return reconcileProjectNamesWithLibrary({
     ...workspace,
     projects: {
       ...(workspace.projects || {}),
       [project.id]: normalizedProject,
     },
-  };
+  });
 }
 
 export async function loadProjectIntoWorkspace(

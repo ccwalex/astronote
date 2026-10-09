@@ -1,5 +1,6 @@
 import type { Workspace, Project, Asset } from '../types';
 import { projectForCache } from './workspaceCache';
+import { reconcileProjectNamesWithLibrary } from './normalizeWorkspace';
 import type { DirtyMarkdownAsset } from './workspaceLoad';
 
 /** Undroppable unsynced dirty bodies until POST /api/workspace ACK. Not astronote_workspace_cache. */
@@ -279,7 +280,10 @@ export function overlayPendingOntoWorkspace(
     changed = true;
   }
   if (!changed) return workspace;
-  return { ...workspace, projects };
+  // The pending body may predate a node rename (the title lives in both the
+  // library node and the project): the library tree from the fresh server
+  // nav wins, so reconcile the overlaid names with it.
+  return reconcileProjectNamesWithLibrary({ ...workspace, projects });
 }
 
 /** Merge pending entry markdown into a workspace for flush (putAssetText sources). */

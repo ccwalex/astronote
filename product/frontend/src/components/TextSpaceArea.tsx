@@ -4,8 +4,18 @@ import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import TurndownService from 'turndown';
 
+// NOTE: the sentinel must not contain characters turndown escapes in text
+// nodes (its markdownEscapes list includes `_`). The old sentinel
+// `%%BLANK_PARAGRAPH%%` came back from turndown as `%%BLANK\_PARAGRAPH%%`,
+// so the sentinel -> marker replacement below missed it: the escaped
+// sentinel was persisted into the .md, rendered back as literal text, and
+// the trailing post-sanitize replacement turned it into another
+// blank-paragraph line. Every blur/re-render cycle then doubled the stray
+// "line with a single space" under the edited line.
 const BLANK_PARAGRAPH_MARKDOWN = ' ';
-const BLANK_PARAGRAPH_SENTINEL = '%%BLANK_PARAGRAPH%%';
+const BLANK_PARAGRAPH_SENTINEL = '%%BLANKPARAGRAPH%%';
+// Sentinels already persisted by older builds (escaped or plain).
+const LEGACY_BLANK_SENTINEL_RE = /%%BLANK(?:\\_|_)PARAGRAPH%%/g;
 
 const turndownService = new TurndownService({
   headingStyle: 'atx',
@@ -258,7 +268,11 @@ function htmlToMarkdown(html: string): string {
   const trailingBlanks = countEdgeEmptyBlocks(container, true);
   markEmptyParagraphsForTurndown(container);
   let markdown = turndownService.turndown(container).replace(/\u00a0/g, BLANK_PARAGRAPH_MARKDOWN);
-  markdown = markdown.split(BLANK_PARAGRAPH_SENTINEL).join(BLANK_PARAGRAPH_MARKDOWN);
+  markdown = markdown
+    .split(BLANK_PARAGRAPH_SENTINEL).join(BLANK_PARAGRAPH_MARKDOWN)
+    // Clean up sentinels persisted by older builds (turndown escaped the old
+    // sentinel's underscores, so the plain split above missed those).
+    .replace(LEGACY_BLANK_SENTINEL_RE, BLANK_PARAGRAPH_MARKDOWN);
   markdown = preserveMarkdownBlankLines(markdown);
   markdown = stripBlankParagraphsBeforeLists(markdown);
   const startsWithToken = markdown === BLANK_PARAGRAPH_MARKDOWN || markdown.startsWith(BLANK_PARAGRAPH_MARKDOWN + '\n\n');
@@ -276,7 +290,11 @@ function htmlToMarkdown(html: string): string {
 
 function markdownToEditorHtml(markdown: string): string {
   try {
-    const withoutSentinel = markdown.split(BLANK_PARAGRAPH_SENTINEL).join(BLANK_PARAGRAPH_MARKDOWN);
+    // Normalize sentinels persisted by older builds (plain or escaped) into
+    // blank-paragraph markers before parsing.
+    const withoutSentinel = markdown
+      .split(BLANK_PARAGRAPH_SENTINEL).join(BLANK_PARAGRAPH_MARKDOWN)
+      .replace(LEGACY_BLANK_SENTINEL_RE, BLANK_PARAGRAPH_MARKDOWN);
     const sanitized = DOMPurify.sanitize(
       marked.parse(preserveMarkdownBlankLines(stripBlankParagraphsBeforeLists(withoutSentinel)), { async: false, breaks: false, gfm: true }) as string
     );
