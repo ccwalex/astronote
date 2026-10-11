@@ -31,6 +31,7 @@ from modules.project import Project
 from modules.save_workspace import save_workspace
 from modules.workspace import Workspace
 from modules.workspace_lazy import stub_project_dict
+from modules.load_workspace import load_workspace
 import api
 
 
@@ -229,7 +230,7 @@ def _post_delete_and_assert_counts(leftover_stub):
         api.ASSETS_DIR = assets_dir
         api.PROJECT_ROOT = tmp_root
 
-        loaded = Workspace.from_dict(json.loads(open(path, encoding="utf-8").read()))
+        loaded = load_workspace(path)
         before = _snapshot_counts(loaded, data_dir)
         assert before["embeddable"] >= 2
 
@@ -244,7 +245,7 @@ def _post_delete_and_assert_counts(leftover_stub):
         res = client.post("/api/workspace", json=incoming)
         assert res.status_code == 200
 
-        saved = json.loads(open(path, encoding="utf-8").read())
+        saved = load_workspace(path).to_dict()
         assert proj_b not in saved.get("projects", {})
         assert page_b not in saved.get("library_nodes", {})
 

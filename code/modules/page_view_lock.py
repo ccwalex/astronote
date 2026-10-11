@@ -206,6 +206,34 @@ def get_viewed_project_ids(session_id: str) -> set[str]:
         return result
 
 
+def release_session(session_id: str) -> list[str]:
+    """Immediately drop a session's presence and write leases on every page.
+
+    Called when the owning user session ends (page unload, DELETE /api/session,
+    backend session registry expiry). The 45s viewer TTL remains only as a
+    safety net for tabs that die without telling us.
+    """
+    sid = str(session_id or "").strip()
+    if not sid:
+        return []
+    now = _now()
+    released: list[str] = []
+    with _registry_lock:
+        for project_id in list(_viewers.keys()):
+            viewers = _viewers.get(project_id) or {}
+            if sid in viewers:
+                del viewers[sid]
+                released.append(project_id)
+            if not viewers:
+                _viewers.pop(project_id, None)
+        for project_id, lock in list(_write_locks.items()):
+            if lock.session_id == sid:
+                _write_locks.pop(project_id, None)
+        for project_id in list(set(released) | set(_write_locks.keys())):
+            _ensure_lock_for_project(project_id, now)
+    return released
+
+
 def reset_registry_for_tests() -> None:
     with _registry_lock:
         _viewers.clear()

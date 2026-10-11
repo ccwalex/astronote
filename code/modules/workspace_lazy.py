@@ -73,6 +73,11 @@ def _referenced_project_ids(payload: dict) -> set:
     return ids
 
 
+def referenced_project_ids(payload: dict) -> set:
+    """Public wrapper: project ids the payload's library tree references."""
+    return _referenced_project_ids(payload)
+
+
 def _library_name_for_project(payload: dict, project_id: str) -> str:
     nodes = payload.get("library_nodes") or {}
     if not isinstance(nodes, dict):
@@ -278,7 +283,12 @@ def _referenced_collection_ids(project: dict, key: str) -> set:
     return ids
 
 
-def plan_collection_restore(incoming: Any, disk: Any) -> dict:
+def plan_collection_restore(
+    incoming: Any,
+    disk: Any,
+    cleared_project_ids: Optional[set] = None,
+    trust_client_deletions: bool = False,
+) -> dict:
     """Per-project plan of collections the save must NOT be trusted to wipe.
 
     Empty collections in a hydrated client project are legitimate state: pages
@@ -286,10 +296,19 @@ def plan_collection_restore(incoming: Any, disk: Any) -> dict:
     only distrusted when the client body provably never came from the disk
     page: spaces still reference stored entries that the payload omits
     (dangling references), or a total wipe arrives with a layout that differs
-    from disk (fabricated body). Returns {project_id: {"objects": bool, "assets": bool}}.
+    from disk (fabricated body).
+
+    An "empty but same layout" body counts as an intentional clear when the
+    client marked the project in `cleared_project_ids`, OR when the save
+    carries a fresh base revision (`trust_client_deletions=True`: the client
+    proved it saw the current store, so its deletions are authoritative —
+    including deleting a space that owned the asset). Without either, the
+    stored body is restored.
+    Returns {project_id: {"objects": bool, "assets": bool}}.
     """
     if not isinstance(incoming, dict) or not isinstance(disk, dict):
         return {}
+    cleared = {str(pid) for pid in (cleared_project_ids or set()) if str(pid or "").strip()}
     incoming_projects = incoming.get("projects") if isinstance(incoming.get("projects"), dict) else {}
     disk_projects = disk.get("projects") if isinstance(disk.get("projects"), dict) else {}
     plan: dict = {}
@@ -309,11 +328,24 @@ def plan_collection_restore(incoming: Any, disk: Any) -> dict:
             disk_nonempty = isinstance(disk_collection, dict) and len(disk_collection) > 0
             if not (client_empty and disk_nonempty):
                 continue
+            if str(project_id) in cleared:
+                # Client explicitly declared this page was emptied: trust it.
+                continue
             dangling = bool(
                 _referenced_collection_ids(client_proj, key) & set(map(str, disk_collection.keys()))
             )
             total_wipe = not client_proj.get("objects") and not client_proj.get("assets")
             if dangling or (layout_mismatch and total_wipe):
+                plan.setdefault(str(project_id), {})[key] = True
+                continue
+            if layout_mismatch and trust_client_deletions:
+                # Layout changed because the user deleted spaces; with a fresh
+                # base revision the client body is authoritative for what went
+                # with them.
+                continue
+            if not trust_client_deletions:
+                # Same-layout empty without a clear mark and without freshness
+                # proof: indistinguishable from a poisoned partial payload.
                 plan.setdefault(str(project_id), {})[key] = True
     return plan
 
@@ -342,7 +374,11 @@ def apply_collection_restore(data: dict, disk: dict, plan: dict) -> dict:
     return result
 
 
-def _merge_project_body(client_proj: dict, disk_proj: dict) -> dict:
+def _merge_project_body(
+    client_proj: dict,
+    disk_proj: dict,
+    cleared: bool = False,
+) -> dict:
     """Union-restore disk entries a complete client body omits.
 
     Used only for saves that carry no base revision (untrusted staleness): a
@@ -350,10 +386,33 @@ def _merge_project_body(client_proj: dict, disk_proj: dict) -> dict:
     a stale snapshot (e.g. a tab that loaded before MCP writes landed), so the
     stored entries are unioned back instead of being overwritten. A client
     whose spaces layout mirrors disk keeps authority for its empty collections
-    (intentional emptying), matching plan_collection_restore's trust rule.
+    only when the client marked an explicit clear; otherwise those collections
+    are restored too (an empty body with a matching layout is exactly what a
+    poisoned partial payload looks like).
     """
     merged = _merge_project_asset_content(client_proj, disk_proj)
     if _spaces_layout_fingerprint(merged) == _spaces_layout_fingerprint(disk_proj):
+        if cleared:
+            return merged
+        restored_keys = []
+        for key in ("objects", "assets"):
+            disk_collection = disk_proj.get(key)
+            if not isinstance(disk_collection, dict) or not disk_collection:
+                continue
+            client_collection = merged.get(key)
+            client_collection = client_collection if isinstance(client_collection, dict) else {}
+            if client_collection:
+                continue
+            merged = dict(merged)
+            merged[key] = dict(disk_collection)
+            restored_keys.append(key)
+        if restored_keys:
+            logger.warning(
+                "RESTORED disk %s for a project emptied without an explicit clear "
+                "mark (project %s): same-layout empty bodies are not trusted.",
+                ", ".join(restored_keys),
+                str(disk_proj.get("id") or ""),
+            )
         return merged
     restored_keys = []
     for key in ("spaces", "objects", "assets"):
@@ -388,11 +447,13 @@ def merge_incoming_workspace_dict(
     incoming: Optional[dict],
     disk: Optional[dict],
     preserve_disk_only: bool = False,
+    cleared_project_ids: Optional[set] = None,
 ) -> dict:
     if not isinstance(incoming, dict):
         return disk if isinstance(disk, dict) else {}
     if not isinstance(disk, dict):
         return incoming
+    cleared = {str(pid) for pid in (cleared_project_ids or set()) if str(pid or "").strip()}
     incoming_projects = incoming.get("projects") if isinstance(incoming.get("projects"), dict) else {}
     disk_projects = disk.get("projects") if isinstance(disk.get("projects"), dict) else {}
     referenced = _referenced_project_ids(incoming)
@@ -443,7 +504,7 @@ def merge_incoming_workspace_dict(
             merged_projects.pop(project_id, None)
         elif not is_project_stub(client_proj):
             merged_projects[project_id] = (
-                _merge_project_body(client_proj, disk_proj)
+                _merge_project_body(client_proj, disk_proj, cleared=str(project_id) in cleared)
                 if preserve_disk_only
                 else _merge_project_asset_content(client_proj, disk_proj)
             )
@@ -457,3 +518,47 @@ def merge_incoming_workspace_dict(
     result = dict(incoming)
     result["projects"] = merged_projects
     return result
+
+
+def incoming_would_mass_drop_spaces(incoming: Any, disk: Any) -> list:
+    """Project ids whose stored spaces a complete incoming body would shrink.
+
+    The nav-shell failure mode: projects arrive marked complete
+    (root_space_id + spaces present) but hold fewer spaces — and especially
+    fewer TextSpaces — than the stored bodies. No revision number proves
+    intent when many projects lose content in one save, so callers reject the
+    save outright (the client can re-send per project with clear marks).
+    Returns the affected project ids.
+    """
+    if not isinstance(incoming, dict) or not isinstance(disk, dict):
+        return []
+    incoming_projects = incoming.get("projects") if isinstance(incoming.get("projects"), dict) else {}
+    disk_projects = disk.get("projects") if isinstance(disk.get("projects"), dict) else {}
+    affected = []
+    for project_id, disk_proj in disk_projects.items():
+        if not isinstance(disk_proj, dict) or is_project_stub(disk_proj):
+            continue
+        client_proj = incoming_projects.get(project_id)
+        if not isinstance(client_proj, dict) or is_project_stub(client_proj):
+            continue
+        disk_spaces = disk_proj.get("spaces") if isinstance(disk_proj.get("spaces"), dict) else {}
+        client_spaces = client_proj.get("spaces") if isinstance(client_proj.get("spaces"), dict) else {}
+        if len(client_spaces) >= len(disk_spaces):
+            disk_text = sum(
+                1 for space in disk_spaces.values()
+                if isinstance(space, dict) and str(space.get("kind") or "") == "TextSpace"
+            )
+            if not disk_text:
+                continue
+            client_text = sum(
+                1 for space in client_spaces.values()
+                if isinstance(space, dict) and str(space.get("kind") or "") == "TextSpace"
+            )
+            if client_text >= disk_text:
+                continue
+        # A client body that keeps fewer spaces (or fewer TextSpaces) than the
+        # store is a shrunken page. Deleted pages arrive as stubs or absences,
+        # not as a complete body with missing spaces, so this is never a
+        # legitimate edit shape.
+        affected.append(str(project_id))
+    return affected

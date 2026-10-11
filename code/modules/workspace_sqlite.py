@@ -61,7 +61,6 @@ from modules.workspace import Workspace
 
 FORMAT_VERSION = 1
 STORAGE_META_FILENAME = "workspace.storage.meta.json"
-MIGRATION_SKIP_FILENAME = ".workspace_storage_migration_skipped"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -134,10 +133,6 @@ def storage_meta_path(path: str) -> str:
     return os.path.join(_parent_dir(path), STORAGE_META_FILENAME)
 
 
-def migration_skip_path(path: str) -> str:
-    return os.path.join(_parent_dir(path), MIGRATION_SKIP_FILENAME)
-
-
 def read_storage_meta(path: str) -> Dict[str, Any]:
     meta_path = storage_meta_path(path)
     if not os.path.isfile(meta_path):
@@ -184,16 +179,17 @@ def write_storage_meta(path: str, backend: str, extra: Optional[Dict[str, Any]] 
 
 
 def detect_workspace_backend(path: str) -> str:
+    """sqlite is the only live-store backend; json paths are snapshot/legacy files.
+
+    A store counts as sqlite whenever its .sqlite file exists — the legacy
+    workspace.storage.meta.json pinning (which froze a migrated store even
+    when its sqlite was gone) and the migration-skip flag are gone.
+    """
     abs_path = os.path.abspath(path or "")
-    meta = read_storage_meta(abs_path)
-    backend = str(meta.get("backend") or "").strip().lower()
     sqlite_path = sqlite_path_from_workspace_path(abs_path)
-    json_path = json_path_from_workspace_path(abs_path)
-    if backend == "sqlite":
+    if os.path.isfile(sqlite_path):
         return "sqlite"
     if abs_path.lower().endswith(".sqlite") and os.path.isfile(abs_path):
-        return "sqlite"
-    if os.path.isfile(sqlite_path) and not os.path.isfile(json_path):
         return "sqlite"
     return "json"
 
@@ -441,6 +437,63 @@ def _read_payload_scoped(conn: sqlite3.Connection, project_id: str) -> Dict[str,
     return data
 
 
+_PROJECT_REVISION_PREFIX = "project_rev:"
+
+
+def _project_revision_key(project_id: str) -> str:
+    return _PROJECT_REVISION_PREFIX + str(project_id)
+
+
+def _read_project_revisions_from_conn(conn: sqlite3.Connection) -> Dict[str, int]:
+    revisions: Dict[str, int] = {}
+    try:
+        rows = conn.execute("SELECT key, value FROM meta WHERE key LIKE ?", (_PROJECT_REVISION_PREFIX + "%",))
+        for key, value in rows:
+            pid = str(key)[len(_PROJECT_REVISION_PREFIX):]
+            try:
+                revisions[pid] = int(value)
+            except (TypeError, ValueError):
+                continue
+    except sqlite3.Error:
+        return {}
+    return revisions
+
+
+def get_project_revisions(path: str) -> Dict[str, int]:
+    """Per-project revision counters stamped by project-scoped saves."""
+    dest = sqlite_path_from_workspace_path(path)
+    if not os.path.isfile(dest):
+        return {}
+    try:
+        conn = connect_workspace_sqlite(dest, readonly=True)
+    except sqlite3.Error:
+        return {}
+    try:
+        return _read_project_revisions_from_conn(conn)
+    finally:
+        conn.close()
+
+
+def _bump_project_revisions(conn: sqlite3.Connection, project_ids) -> Dict[str, int]:
+    """Increment project_rev:<pid> counters inside the caller's transaction."""
+    bumped: Dict[str, int] = {}
+    for pid in {str(pid or "").strip() for pid in (project_ids or []) if str(pid or "").strip()}:
+        key = _project_revision_key(pid)
+        row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        try:
+            current = int(row[0]) if row else 0
+        except (TypeError, ValueError):
+            current = 0
+        new_value = current + 1
+        conn.execute(
+            "INSERT INTO meta(key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, str(new_value)),
+        )
+        bumped[pid] = new_value
+    return bumped
+
+
 def save_workspace_sqlite(workspace: Workspace, path: str) -> str:
     from modules.save_workspace import strip_asset_content_from_dict
 
@@ -458,6 +511,22 @@ def save_workspace_sqlite(workspace: Workspace, path: str) -> str:
             conn.execute("PRAGMA synchronous=FULL")
             _init_schema(conn)
             _write_payload(conn, payload)
+            # Carry per-project revision counters over from the previous store
+            # (full rewrites must not reset freshness state) and initialize
+            # counters for newly seen projects.
+            try:
+                old_revisions = get_project_revisions(dest)
+            except Exception:
+                old_revisions = {}
+            for project_id in (payload.get("projects") or {}):
+                pid = str(project_id)
+                old_revisions.setdefault(pid, 0)
+            for pid, rev in old_revisions.items():
+                conn.execute(
+                    "INSERT INTO meta(key, value) VALUES (?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (_project_revision_key(pid), str(int(rev))),
+                )
             conn.commit()
         finally:
             conn.close()
@@ -479,11 +548,8 @@ def save_workspace_sqlite(workspace: Workspace, path: str) -> str:
             live.close()
     except sqlite3.Error:
         pass
-    write_storage_meta(
-        path,
-        backend="sqlite",
-        extra={"sqlite_path": dest, "json_path": json_path_from_workspace_path(path)},
-    )
+    # The old workspace.storage.meta.json backend pin is no longer written:
+    # sqlite is the only backend and detection is purely file-existence based.
     return dest
 
 
@@ -492,6 +558,8 @@ def save_workspace_project_sqlite(
     path: str,
     project_ids,
     include_library_nodes: bool = False,
+    delete_project_ids=None,
+    include_meta: bool = False,
 ) -> str:
     """Atomically replace stored rows for the given projects only.
 
@@ -500,6 +568,15 @@ def save_workspace_project_sqlite(
     live WAL database in a single transaction: readers keep seeing the previous
     state until commit, and a crash rolls the whole update back. library_nodes
     rows are replaced only when the caller says the nav tree changed.
+
+    `delete_project_ids` removes rows for projects absent from the payload
+    (caller must have proven the deletion, e.g. fresh base revision + library
+    tree proof). Every written or deleted project gets its per-project
+    revision counter bumped so per-project freshness checks work.
+
+    `include_meta` also persists the workspace-level name (and extras) — used
+    by browser saves whose payload carries the full store header; scoped
+    server-side writers leave meta untouched by default.
     """
     from modules.save_workspace import strip_asset_content_from_dict
 
@@ -511,11 +588,32 @@ def save_workspace_project_sqlite(
     projects = payload.get("projects") if isinstance(payload.get("projects"), dict) else {}
     nodes = payload.get("library_nodes") if isinstance(payload.get("library_nodes"), dict) else {}
     ids = [str(pid) for pid in (project_ids or []) if str(pid or "").strip()]
+    delete_ids = [
+        str(pid)
+        for pid in (delete_project_ids or [])
+        if str(pid or "").strip() and str(pid) not in set(ids)
+    ]
     conn = connect_workspace_sqlite(dest, readonly=False)
     try:
         conn.execute("BEGIN IMMEDIATE")
         try:
             _init_schema(conn)
+            if include_meta:
+                extras = {
+                    key: value
+                    for key, value in payload.items()
+                    if key not in {"id", "name", "library_nodes", "projects"}
+                }
+                conn.execute(
+                    "INSERT INTO meta(key, value) VALUES (?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    ("name", str(payload.get("name") or "")),
+                )
+                conn.execute(
+                    "INSERT INTO meta(key, value) VALUES (?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    ("extras", _dumps(extras)),
+                )
             if include_library_nodes:
                 conn.execute("DELETE FROM library_nodes")
                 for node_id, node in nodes.items():
@@ -531,6 +629,12 @@ def save_workspace_project_sqlite(
                 project = projects.get(pid)
                 if isinstance(project, dict):
                     _write_project_rows(conn, pid, project)
+            for pid in delete_ids:
+                conn.execute("DELETE FROM spaces WHERE project_id = ?", (pid,))
+                conn.execute("DELETE FROM objects WHERE project_id = ?", (pid,))
+                conn.execute("DELETE FROM assets WHERE project_id = ?", (pid,))
+                conn.execute("DELETE FROM projects WHERE id = ?", (pid,))
+            _bump_project_revisions(conn, list(ids) + delete_ids)
             conn.commit()
         except Exception:
             conn.rollback()

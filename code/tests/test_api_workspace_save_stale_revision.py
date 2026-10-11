@@ -287,7 +287,9 @@ def test_merge_does_not_resurrect_unreferenced_disk_only_project():
     assert "p2" not in merged["projects"]
 
 
-def test_merge_trusts_intentional_emptying_with_matching_layout():
+def test_merge_restores_intentional_emptying_without_clear_mark():
+    """No-revision same-layout empty bodies are restored (poison-partial shape);
+    an explicit clear mark keeps client authority."""
     disk = {"projects": {"p1": _complete_project()}}
     disk["projects"]["p1"]["objects"] = {"o1": {"id": "o1", "kind": "Note"}}
     disk["projects"]["p1"]["assets"] = {
@@ -295,9 +297,18 @@ def test_merge_trusts_intentional_emptying_with_matching_layout():
                "content": "stored text", "mime_type": "text/markdown"}
     }
     emptied = _complete_project()
-    merged = merge_incoming_workspace_dict({"projects": {"p1": emptied}}, disk, preserve_disk_only=True)
-    assert merged["projects"]["p1"]["objects"] == {}
-    assert merged["projects"]["p1"]["assets"] == {}
+    merged = merge_incoming_workspace_dict(
+        {"projects": {"p1": emptied}}, disk, preserve_disk_only=True
+    )
+    assert merged["projects"]["p1"]["objects"] == {"o1": {"id": "o1", "kind": "Note"}}
+    assert merged["projects"]["p1"]["assets"]["a1"]["content"] == "stored text"
+
+    merged_marked = merge_incoming_workspace_dict(
+        {"projects": {"p1": emptied}}, disk, preserve_disk_only=True,
+        cleared_project_ids={"p1"},
+    )
+    assert merged_marked["projects"]["p1"]["objects"] == {}
+    assert merged_marked["projects"]["p1"]["assets"] == {}
 
 
 def main():
@@ -312,8 +323,8 @@ def main():
         test_merge_preserves_disk_only_referenced_project_for_untrusted_save,
         test_merge_drops_disk_only_project_for_trusted_save,
         test_merge_still_drops_unreferenced_disk_stub,
+        test_merge_restores_intentional_emptying_without_clear_mark,
         test_merge_does_not_resurrect_unreferenced_disk_only_project,
-        test_merge_trusts_intentional_emptying_with_matching_layout,
     ]
     for test in tests:
         test()

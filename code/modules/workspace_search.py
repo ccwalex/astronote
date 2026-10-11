@@ -71,6 +71,21 @@ def asset_plain_text_for_word_search(text: str) -> str:
     return s
 
 
+def _prepared_pdf_text(asset, project_id: Optional[str] = None) -> str:
+    """PDF text WITHOUT request-path extraction.
+
+    Query handlers must never extract PDF text synchronously: a cache miss on
+    a large PDF blocks the worker thread for the whole extraction and N
+    concurrent queries exhaust the threadpool (the observed backend hang).
+    Prepared texts are filled by prepare_asset_search_texts in the background
+    corpus builder; a cold asset simply matches on filename until then.
+    """
+    cached_plain = getattr(asset, "_search_plain", None)
+    if isinstance(cached_plain, str):
+        return cached_plain
+    return ""
+
+
 def _asset_search_plain_and_folded(asset, project_id: Optional[str] = None) -> tuple[str, str]:
     cached_plain = getattr(asset, "_search_plain", None)
     cached_folded = getattr(asset, "_search_folded", None)
@@ -80,7 +95,7 @@ def _asset_search_plain_and_folded(asset, project_id: Optional[str] = None) -> t
         plain = asset_plain_text_for_word_search(asset.content)
         return plain, _fold(plain)
     if getattr(asset, "kind", None) == "pdf":
-        extracted = _safe_pdf_text(asset, project_id=project_id)
+        extracted = _prepared_pdf_text(asset, project_id=project_id)
         return extracted, _fold(extracted)
     return "", ""
 
@@ -247,7 +262,8 @@ def word_search_assets(
             if asset.kind == "markdown" and isinstance(asset.content, str):
                 content_text = asset_plain_text_for_word_search(asset.content)
             elif asset.kind == "pdf":
-                content_text = asset_plain_text_for_word_search(_safe_pdf_text(asset))
+                # Prepared corpus text only: never extract PDFs on a query thread.
+                content_text = asset_plain_text_for_word_search(_prepared_pdf_text(asset))
 
             if content_text and _contains_fold(content_text, fold_query):
                 matched_fields.append("content")

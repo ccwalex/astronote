@@ -6,17 +6,14 @@ from typing import Any, Callable, Dict, Optional
 
 from modules.load_workspace import load_workspace
 from modules.save_workspace import save_workspace as persist_workspace
-from modules.save_workspace import save_workspace
+
 from modules.workspace import Workspace
-from modules.workspace_lazy import merge_incoming_workspace_dict
 from modules.workspace_sqlite import (
-    detect_workspace_backend,
+    connect_workspace_sqlite,
     json_path_from_workspace_path,
     load_workspace_dict_sqlite,
-    migration_skip_path,
     save_workspace_sqlite,
     sqlite_path_from_workspace_path,
-    write_storage_meta,
 )
 
 
@@ -92,68 +89,33 @@ def load_asset(asset_id: str, filename: str) -> bytes:
 
 
 def get_workspace_storage_status(path: str) -> Dict[str, Any]:
+    """sqlite is the only backend; the legacy JSON file is never the live store."""
     json_path = json_path_from_workspace_path(path)
     sqlite_path = sqlite_path_from_workspace_path(path)
-    skip_path = migration_skip_path(path)
-    skipped = os.path.isfile(skip_path)
-    backend = detect_workspace_backend(path)
-    json_exists = os.path.isfile(json_path)
-    needs_migration = backend == "json" and json_exists and not skipped
-    return {
-        "active_backend": backend,
-        "needs_migration": needs_migration,
+    from modules.workspace_sqlite import get_project_revisions
+
+    status = {
+        "active_backend": "sqlite" if os.path.isfile(sqlite_path) else ("json" if os.path.isfile(json_path) else "none"),
         "json_path": json_path,
         "sqlite_path": sqlite_path,
-        "migration_skipped": skipped,
-        "json_readable": json_exists,
+        "json_readable": os.path.isfile(json_path),
         "sqlite_exists": os.path.isfile(sqlite_path),
+        "needs_migration": False,
+        "migration_skipped": False,
     }
-
-
-def migrate_workspace_store(path: str, dry_run: bool = False) -> Dict[str, Any]:
-    json_path = json_path_from_workspace_path(path)
-    sqlite_path = sqlite_path_from_workspace_path(path)
-    backend = detect_workspace_backend(path)
-    result: Dict[str, Any] = {
-        "target": "sqlite",
-        "dry_run": bool(dry_run),
-        "wrote": False,
-        "json_path": json_path,
-        "sqlite_path": sqlite_path,
-        "active_backend": backend,
-    }
-    if backend == "sqlite" and os.path.isfile(sqlite_path):
-        result["reason"] = "already_sqlite"
-        result.update(get_workspace_storage_status(path))
-        return result
-    if not os.path.isfile(json_path):
-        raise FileNotFoundError(json_path)
-    workspace = load_workspace(json_path, hydrate=False)
-    workspace.validate()
-    payload = workspace.to_dict()
-    result["project_count"] = len(payload.get("projects") or {})
-    result["library_node_count"] = len(payload.get("library_nodes") or {})
-    if dry_run:
-        result.update(get_workspace_storage_status(path))
-        return result
-    save_workspace_sqlite(workspace, path)
-    result["wrote"] = True
-    result["active_backend"] = "sqlite"
-    result.update(get_workspace_storage_status(path))
-    result["wrote"] = True
-    result["active_backend"] = "sqlite"
-    return result
-
-
-def skip_workspace_storage_migration(path: str) -> Dict[str, Any]:
-    skip_path = migration_skip_path(path)
-    parent = os.path.dirname(skip_path) or "."
-    os.makedirs(parent, exist_ok=True)
-    with open(skip_path, "w", encoding="utf-8") as handle:
-        handle.write(json.dumps({"skipped_at": True}))
-    status = get_workspace_storage_status(path)
-    status["skipped"] = True
-    status["path"] = skip_path
+    if status["active_backend"] == "sqlite":
+        counts = {}
+        try:
+            conn = connect_workspace_sqlite(sqlite_path, readonly=True)
+            try:
+                for table in ("projects", "spaces", "objects", "assets", "library_nodes"):
+                    counts[table] = int(conn.execute("SELECT COUNT(*) FROM %s" % table).fetchone()[0])
+            finally:
+                conn.close()
+        except Exception:
+            counts = {}
+        status["row_counts"] = counts
+        status["project_revisions"] = get_project_revisions(path)
     return status
 
 
@@ -161,11 +123,3 @@ def register_workspace_storage_routes(app: Any, get_workspace_path: Callable[[],
     @app.get("/api/workspace/storage-status")
     def get_workspace_storage_status_route() -> Dict[str, Any]:
         return get_workspace_storage_status(get_workspace_path())
-
-    @app.post("/api/workspace/storage/migrate")
-    def migrate_workspace_storage_route(dry_run: bool = False) -> Dict[str, Any]:
-        return migrate_workspace_store(get_workspace_path(), dry_run=dry_run)
-
-    @app.post("/api/workspace/storage/skip-migration")
-    def skip_workspace_storage_migration_route() -> Dict[str, Any]:
-        return skip_workspace_storage_migration(get_workspace_path())

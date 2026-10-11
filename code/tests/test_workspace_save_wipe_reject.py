@@ -139,7 +139,9 @@ def test_plan_restore_synthesized_default_body_over_edited_layout():
 
 def test_plan_trust_synthesized_shape_on_pristine_layout():
     # A pristine-layout page that really is empty is indistinguishable from a
-    # synthesized stub: trust the client (last-write-wins), never 409.
+    # synthesized stub: without an explicit clear mark the collections are
+    # RESTORED (same-layout empties are exactly what a poisoned partial
+    # payload looks like); with the mark the client keeps authority.
     pristine = Project.create_default("p1", "Page")
     pristine.objects["o1"] = CanvasObject(id="o1", kind="Note")
     pristine.assets["a1"] = Asset(
@@ -148,7 +150,12 @@ def test_plan_trust_synthesized_shape_on_pristine_layout():
     )
     disk = {"projects": {"p1": pristine.to_dict()}}
     synthesized = Project.create_default("p1", "Page").to_dict()
-    assert plan_collection_restore({"projects": {"p1": synthesized}}, disk) == {}
+    assert plan_collection_restore({"projects": {"p1": synthesized}}, disk) == {
+        "p1": {"objects": True, "assets": True}
+    }
+    assert plan_collection_restore(
+        {"projects": {"p1": synthesized}}, disk, cleared_project_ids={"p1"}
+    ) == {}
 
 
 def test_plan_restore_dangling_references():
@@ -162,21 +169,31 @@ def test_plan_restore_dangling_references():
 
 def test_plan_trust_legitimate_empty_page():
     # Client holds the real layout (spaces match disk modulo references) and
-    # emptied the page on purpose: no dangling ids, not a synthesized default.
+    # emptied the page on purpose. The empty body is trusted ONLY when the
+    # client marked an explicit clear; otherwise restored (partial-payload
+    # poisoning looks identical).
     disk = {"projects": {"p1": _complete_project_with_bodies()}}
     client = _complete_project()
-    plan = plan_collection_restore({"projects": {"p1": client}}, disk)
-    assert plan == {}
+    assert plan_collection_restore({"projects": {"p1": client}}, disk) == {
+        "p1": {"objects": True, "assets": True}
+    }
+    assert plan_collection_restore(
+        {"projects": {"p1": client}}, disk, cleared_project_ids={"p1"}
+    ) == {}
 
 
 def test_plan_trust_partial_user_wipe():
     # User deleted every asset but kept objects: only the asset collection is
-    # empty, layout matches, no dangling asset references -> trusted wipe.
+    # empty, layout matches. Same rule: restored unless the clear is marked.
     disk = {"projects": {"p1": _complete_project_with_bodies()}}
     client = _complete_project()
     client["objects"] = {"o1": {"id": "o1", "kind": "Note"}}
-    plan = plan_collection_restore({"projects": {"p1": client}}, disk)
-    assert plan == {}
+    assert plan_collection_restore({"projects": {"p1": client}}, disk) == {
+        "p1": {"assets": True}
+    }
+    assert plan_collection_restore(
+        {"projects": {"p1": client}}, disk, cleared_project_ids={"p1"}
+    ) == {}
 
 
 def test_plan_restore_fabricated_layout_on_total_wipe():
@@ -261,6 +278,11 @@ def test_post_synthesized_body_over_edited_layout_restored():
 
 
 def test_post_legitimate_page_emptying_is_trusted():
+    """Emptying a page is trusted only when the client marks the clear.
+
+    Same-layout empty bodies without a clear mark are restored instead: they
+    are exactly what a poisoned partial payload looks like.
+    """
     ws, extra = _workspace_with_bodied_page()
     tmp, old_path, old_assets = _setup_temp_store(ws)
     try:
@@ -274,6 +296,13 @@ def test_post_legitimate_page_emptying_is_trusted():
             space["object_ids"] = []
             space["reference_asset_id"] = None
         payload["projects"][extra.id] = emptied
+        posted = client.post("/api/workspace", json=payload)
+        assert posted.status_code == 200, posted.text
+        disk = api._load_workspace_from_disk()
+        saved_extra = disk.projects[extra.id]
+        # Without the explicit clear mark the stored body is restored.
+        assert "a_keep" in saved_extra.assets
+        payload["cleared_project_ids"] = [extra.id]
         posted = client.post("/api/workspace", json=payload)
         assert posted.status_code == 200, posted.text
         disk = api._load_workspace_from_disk()

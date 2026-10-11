@@ -7,6 +7,22 @@ from types import SimpleNamespace
 import numpy as np
 
 from modules.asset import Asset
+from modules.workspace_sqlite import sqlite_path_from_workspace_path
+
+
+def _store_payload_text(ws_path: str) -> str:
+    """Concatenated payload text from the workspace sqlite store."""
+    import sqlite3
+
+    conn = sqlite3.connect(sqlite_path_from_workspace_path(ws_path))
+    try:
+        texts = [value for (value,) in conn.execute("SELECT value FROM meta")]
+        for table in ("library_nodes", "projects", "spaces", "objects", "assets"):
+            for (raw,) in conn.execute("SELECT payload FROM %s" % table):
+                texts.append(raw)
+    finally:
+        conn.close()
+    return "\n".join(texts)
 from modules.asset_tracking import (
     TRACKING_CSV_FILENAME,
     TRACKING_FIELDNAMES,
@@ -567,8 +583,7 @@ class TestGroupConversionFormattedText(unittest.TestCase):
             self.assertNotIn("**bold**", raw_svg)
             ws_path = os.path.join(tmpdir, "workspace.json")
             save_workspace(workspace, ws_path)
-            with open(ws_path, encoding="utf-8") as handle:
-                raw_ws = handle.read()
+            raw_ws = _store_payload_text(ws_path)
             self.assertNotIn("data:image/svg", raw_ws)
             self.assertNotIn("data:image/png", raw_ws)
             self.assertNotIn("<svg", raw_ws)
@@ -615,8 +630,7 @@ class TestGroupConversionFormattedText(unittest.TestCase):
             self.assertNotIn("data:image", str(snapshot_asset.content or ""))
             ws_path = os.path.join(tmpdir, "workspace.json")
             save_workspace(workspace, ws_path)
-            with open(ws_path, encoding="utf-8") as handle:
-                raw_ws = handle.read()
+            raw_ws = _store_payload_text(ws_path)
             self.assertNotIn("data:image/svg", raw_ws)
             self.assertNotIn("data:image/png", raw_ws)
             self.assertNotIn("<svg", raw_ws)
@@ -658,13 +672,12 @@ class TestConcatenatedJsonExtraData(unittest.TestCase):
             )
             out_path = os.path.join(tmpdir, "workspace.json")
             save_workspace(workspace, out_path)
-            with open(out_path, encoding="utf-8") as handle:
-                raw_ws = handle.read()
+            raw_ws = _store_payload_text(out_path)
             self.assertNotIn("data:image/svg", raw_ws)
             self.assertNotIn("data:image/png", raw_ws)
             self.assertNotIn("<svg", raw_ws)
-            loaded = json.loads(raw_ws)
-            self.assertEqual(loaded["id"], "ws_embed")
+            reloaded = load_workspace(out_path)
+            self.assertEqual(reloaded.id, "ws_embed")
             snapshot_ids = [aid for aid in workspace.projects["proj_1"].assets.keys() if aid != "asset_extra"]
             self.assertTrue(snapshot_ids)
             snapshot_asset = workspace.projects["proj_1"].assets[snapshot_ids[0]]

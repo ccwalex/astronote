@@ -277,6 +277,23 @@ def test_stale_holder_lease_transfers_to_active_viewer():
         assert page_view_lock.get_holder_session_id("proj_a") == "session_b"
 
 
+def test_release_session_drops_leases_on_every_page():
+    from modules import page_view_lock
+
+    reset_registry_for_tests()
+    heartbeat("proj_x", "session_z")
+    heartbeat("proj_y", "session_z")
+    assert page_view_lock.get_holder_session_id("proj_x") == "session_z"
+    assert page_view_lock.get_holder_session_id("proj_y") == "session_z"
+
+    released = page_view_lock.release_session("session_z")
+    assert sorted(released) == ["proj_x", "proj_y"]
+    # Leases release immediately, not after the 45s TTL.
+    assert page_view_lock.get_holder_session_id("proj_x") is None
+    assert page_view_lock.get_holder_session_id("proj_y") is None
+    reset_registry_for_tests()
+
+
 def main():
     test_first_heartbeat_grants_write()
     test_second_viewer_is_read_only()
@@ -285,6 +302,7 @@ def main():
     test_stale_viewer_ttl_prunes_and_releases_lock()
     test_stale_holder_lease_expires_without_any_heartbeat()
     test_stale_holder_lease_transfers_to_active_viewer()
+    test_release_session_drops_leases_on_every_page()
     test_save_rejected_when_non_holder_posts_workspace()
     test_save_allowed_when_only_other_page_locked()
     test_revision_poll_registers_presence()

@@ -13,6 +13,7 @@ if CODE_DIR not in sys.path:
 
 from fastapi.testclient import TestClient
 from modules.asset import Asset
+from modules.load_workspace import load_workspace
 from modules.save_workspace import save_workspace
 from modules.workspace import Workspace
 from modules.workspace_lazy import workspace_nav_dict
@@ -22,6 +23,7 @@ from modules.workspace_working_undo import (
     save_workspace_and_snapshot,
     undo,
 )
+from modules.workspace_sqlite import sqlite_path_from_workspace_path
 from modules.workspace_zip import pack_workspace_zip, unpack_workspace_zip
 import api
 
@@ -142,8 +144,7 @@ def test_pack_unpack_round_trip_layout_and_assets():
             handle.write(b"not-an-asset")
         with open(os.path.join(assets_dir, "orphan.bin"), "wb") as handle:
             handle.write(b"orphan")
-        with open(ws_path, "r", encoding="utf-8") as handle:
-            original = json.load(handle)
+        original = load_workspace(ws_path, hydrate=False).to_dict()
         asset_name, asset_bytes = _asset_file(assets_dir, "asset_zip_src")
         zip_bytes = pack_workspace_zip(ws_path, assets_dir)
         with zipfile.ZipFile(io.BytesIO(zip_bytes), "r") as zf:
@@ -202,8 +203,7 @@ def test_export_zip_then_import_confirm_restores_into_other_workspace():
         name, blob = _asset_file(dst_assets, "asset_export_src")
         assert blob == src_payload
         assert name == os.path.basename(path_value) or name.startswith("asset_export_src")
-        with open(dst_path, "r", encoding="utf-8") as handle:
-            saved = json.load(handle)
+        saved = load_workspace(dst_path, hydrate=False).to_dict()
         assert saved.get("id") == "ws_export_src"
         assert _space_geom(saved) == _space_geom(live)
     finally:
@@ -222,7 +222,7 @@ def test_import_without_confirm_leaves_existing_workspace_unchanged():
         save_workspace(live_ws, ws_path)
         save_workspace(incoming_ws, other_path)
         zip_bytes = pack_workspace_zip(other_path, other_assets)
-        before_json = open(ws_path, "rb").read()
+        before_json = open(sqlite_path_from_workspace_path(ws_path), "rb").read()
         before_assets = _fingerprint(assets_dir)
         client = TestClient(api.app)
         posted = client.post(
@@ -233,7 +233,7 @@ def test_import_without_confirm_leaves_existing_workspace_unchanged():
         assert posted.status_code in (400, 409)
         detail = str(posted.json().get("detail", "")).lower()
         assert "confirm" in detail
-        assert open(ws_path, "rb").read() == before_json
+        assert open(sqlite_path_from_workspace_path(ws_path), "rb").read() == before_json
         assert _fingerprint(assets_dir) == before_assets
     finally:
         _restore_api(old)
@@ -247,7 +247,7 @@ def test_import_stub_zip_confirm_true_still_refuses_wipe():
     try:
         ws = _complete_workspace("ws_wipe", "Wipe Guard", "asset_wipe", b"WIPE-LIVE")
         save_workspace(ws, ws_path)
-        before_json = open(ws_path, "rb").read()
+        before_json = open(sqlite_path_from_workspace_path(ws_path), "rb").read()
         before_assets = _fingerprint(assets_dir)
         stub_zip = _stub_zip_from_workspace(ws)
         client = TestClient(api.app)
@@ -259,7 +259,7 @@ def test_import_stub_zip_confirm_true_still_refuses_wipe():
         assert posted.status_code == 400
         detail = str(posted.json().get("detail", "")).lower()
         assert "wipe" in detail or "page bod" in detail
-        assert open(ws_path, "rb").read() == before_json
+        assert open(sqlite_path_from_workspace_path(ws_path), "rb").read() == before_json
         assert _fingerprint(assets_dir) == before_assets
     finally:
         _restore_api(old)
@@ -307,8 +307,7 @@ def test_confirmed_import_resets_working_undo_baseline():
         assert restored.get("id") == "ws_undo_src"
         state = undo(restored.get("id"), dst_path)
         assert state.get("can_undo") is False
-        with open(dst_path, "r", encoding="utf-8") as handle:
-            saved = json.load(handle)
+        saved = load_workspace(dst_path, hydrate=False).to_dict()
         assert saved.get("name") == "Imported Live"
     finally:
         _restore_api(old)

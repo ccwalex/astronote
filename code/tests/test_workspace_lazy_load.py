@@ -19,6 +19,37 @@ from modules.workspace_lazy import (
     stub_project_dict,
     workspace_nav_dict,
 )
+from modules.workspace_sqlite import sqlite_path_from_workspace_path
+
+
+def _store_payload_text(ws_path: str) -> str:
+    """Concatenated payload text from the workspace sqlite store."""
+    import sqlite3
+
+    conn = sqlite3.connect(sqlite_path_from_workspace_path(ws_path))
+    try:
+        texts = [value for (value,) in conn.execute("SELECT value FROM meta")]
+        for table in ("library_nodes", "projects", "spaces", "objects", "assets"):
+            for (raw,) in conn.execute("SELECT payload FROM %s" % table):
+                texts.append(raw)
+    finally:
+        conn.close()
+    return "\n".join(texts)
+
+
+def _asset_payload(ws_path: str, project_id: str, asset_id: str) -> dict:
+    import json
+    import sqlite3
+
+    conn = sqlite3.connect(sqlite_path_from_workspace_path(ws_path))
+    try:
+        row = conn.execute(
+            "SELECT payload FROM assets WHERE project_id = ? AND id = ?",
+            (project_id, asset_id),
+        ).fetchone()
+    finally:
+        conn.close()
+    return json.loads(row[0]) if row else {}
 
 
 def _workspace_with_asset():
@@ -135,14 +166,12 @@ def test_disk_nav_reload_and_stub_merge_persistence():
         path = os.path.join(ws_dir, "workspace.json")
 
         save_workspace(ws, path)
-        with open(path, "r", encoding="utf-8") as saved_file:
-            saved_raw = saved_file.read()
+        saved_raw = _store_payload_text(path)
         assert "data:image/png" not in saved_raw
-        saved_json = json.loads(saved_raw)
-        saved_asset = saved_json["projects"][proj_id]["assets"]["asset_big"]
-        assert "content" not in saved_asset
-        assert saved_asset.get("path")
-        assert not str(saved_asset["path"]).startswith("data:")
+        saved_asset_payload = _asset_payload(path, proj_id, "asset_big")
+        assert "content" not in saved_asset_payload
+        assert saved_asset_payload.get("path")
+        assert not str(saved_asset_payload["path"]).startswith("data:")
 
         layout_only = load_workspace(path, hydrate=False)
         nav = workspace_nav_dict(layout_only)
@@ -183,8 +212,7 @@ def test_disk_nav_reload_and_stub_merge_persistence():
         assert not str(saved["projects"][proj_id]["assets"]["asset_big"]["path"]).startswith("data:")
         assert extra_id in saved["projects"]
         assert saved["projects"][extra_id]["spaces"]
-        with open(path, "r", encoding="utf-8") as saved_file:
-            assert "data:image/png" not in saved_file.read()
+        assert "data:image/png" not in _store_payload_text(path)
 
 
 def test_stub_when_root_missing_or_spaces_empty():

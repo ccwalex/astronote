@@ -173,9 +173,20 @@ class TestNormalizeTextSpaces(unittest.TestCase):
             self.assertAlmostEqual(space.width, TEXT_MCP_DEFAULT_WIDTH, places=1)
             self.assertAlmostEqual(space.height, expected_h, places=1)
 
-            with open(ws_path, "r", encoding="utf-8") as f:
-                saved = json.load(f)
-            saved_space = saved["projects"]["proj_1"]["spaces"]["space_t1"]
+            import sqlite3
+
+            from modules.workspace_sqlite import sqlite_path_from_workspace_path
+
+            conn = sqlite3.connect(sqlite_path_from_workspace_path(ws_path))
+            try:
+                row = conn.execute(
+                    "SELECT payload FROM spaces WHERE project_id = ? AND id = ?",
+                    ("proj_1", "space_t1"),
+                ).fetchone()
+            finally:
+                conn.close()
+            self.assertIsNotNone(row)
+            saved_space = json.loads(row[0])
             self.assertAlmostEqual(float(saved_space["width"]), TEXT_MCP_DEFAULT_WIDTH, places=1)
             self.assertAlmostEqual(float(saved_space["height"]), expected_h, places=1)
 
@@ -231,9 +242,20 @@ class TestNormalizeTextSpaces(unittest.TestCase):
             space = ws.projects["proj_1"].spaces["space_t1"]
             self.assertAlmostEqual(space.width, TEXT_MCP_DEFAULT_WIDTH, places=1)
             self.assertAlmostEqual(space.height, expected_h, places=1)
-            with open(ws_path, "r", encoding="utf-8") as f:
-                saved = json.load(f)
-            saved_space = saved["projects"]["proj_1"]["spaces"]["space_t1"]
+            import sqlite3
+
+            from modules.workspace_sqlite import sqlite_path_from_workspace_path
+
+            conn = sqlite3.connect(sqlite_path_from_workspace_path(ws_path))
+            try:
+                row = conn.execute(
+                    "SELECT payload FROM spaces WHERE project_id = ? AND id = ?",
+                    ("proj_1", "space_t1"),
+                ).fetchone()
+            finally:
+                conn.close()
+            self.assertIsNotNone(row)
+            saved_space = json.loads(row[0])
             self.assertAlmostEqual(float(saved_space["height"]), expected_h, places=1)
 
 

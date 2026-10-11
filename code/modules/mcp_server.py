@@ -281,10 +281,19 @@ def _call_api(fn, *args, **kwargs):
     from fastapi import HTTPException as FastAPIHTTPException
     from starlette.exceptions import HTTPException as StarletteHTTPException
 
+    from modules import user_session
+
+    # MCP writes run in-process against the same api handlers as the browser;
+    # tag the whole call with the single fixed mcp identity so saves, page
+    # presence and revision bookkeeping attribute to MCP, never to a browser
+    # session and never to `anonymous`.
+    token = user_session.set_acting_user_id(user_session.MCP_USER_ID)
     try:
         return fn(*args, **kwargs)
     except (FastAPIHTTPException, StarletteHTTPException) as exc:
         raise ValueError(str(exc.detail)) from exc
+    finally:
+        user_session.reset_acting_user_id(token)
 
 
 def _run_mcp_sync(fn, *args, **kwargs):

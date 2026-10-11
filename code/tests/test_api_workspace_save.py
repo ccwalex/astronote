@@ -23,6 +23,22 @@ from modules.project import Project
 from modules.save_workspace import save_workspace
 from modules.workspace import Workspace
 from modules.workspace_lazy import workspace_nav_dict
+from modules.workspace_sqlite import sqlite_path_from_workspace_path
+
+
+def _sqlite_payload_texts(store_path):
+    """Concatenated payload text from a workspace sqlite store (for asserts)."""
+    import sqlite3
+
+    conn = sqlite3.connect(store_path)
+    try:
+        texts = [value for (value,) in conn.execute("SELECT value FROM meta")]
+        for table in ("library_nodes", "projects", "spaces", "objects", "assets"):
+            for (raw,) in conn.execute("SELECT payload FROM %s" % table):
+                texts.append(raw)
+    finally:
+        conn.close()
+    return "\n".join(texts)
 
 
 def _test_client():
@@ -98,7 +114,8 @@ def test_post_one_hydrated_plus_stubs_keeps_disk_projects():
     old_path = api.WORKSPACE_PATH
     try:
         save_workspace(ws, path)
-        before = open(path, "rb").read()
+        store_path = sqlite_path_from_workspace_path(path)
+        before = open(store_path, "rb").read()
         api.WORKSPACE_PATH = path
         client = _test_client()
         incoming = workspace_nav_dict(ws)
@@ -110,7 +127,7 @@ def test_post_one_hydrated_plus_stubs_keeps_disk_projects():
         assert extra_id in saved["projects"]
         assert saved["projects"][extra_id]["spaces"]
         assert saved["projects"][proj_id]["spaces"]
-        after = open(path, "rb").read()
+        after = open(store_path, "rb").read()
         assert after != b""
         assert before != b""
     finally:
@@ -147,8 +164,7 @@ def test_post_json_over_128kb_succeeds_and_strips_disk_content():
             posted = client.post("/api/workspace", json=ws.to_dict())
             _assert_workspace_save_ok(posted)
             assert "field larger than field limit" not in posted.text.lower()
-            with open(path, "r", encoding="utf-8") as handle:
-                disk = handle.read()
+            disk = _sqlite_payload_texts(sqlite_path_from_workspace_path(path))
             assert "asset_md_big" in disk
             assert big_text not in disk
             assert "data:" not in disk
@@ -249,8 +265,7 @@ def test_put_large_markdown_then_layout_post_keeps_file():
             _assert_workspace_save_ok(posted)
             with open(disk_file, "r", encoding="utf-8") as handle:
                 assert handle.read() == big_text
-            with open(path, "r", encoding="utf-8") as handle:
-                disk_json = handle.read()
+            disk_json = _sqlite_payload_texts(sqlite_path_from_workspace_path(path))
             assert big_text not in disk_json
             assert extra_id in incoming["projects"]
         finally:

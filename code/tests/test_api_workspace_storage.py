@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import tempfile
@@ -46,7 +47,7 @@ def _assert_workspace_save_ok(res):
     return body
 
 
-def test_storage_status_json_needs_migration():
+def test_storage_status_reports_sqlite_counts():
     ws, _proj_id, _extra_id = _workspace_with_two_projects()
     with tempfile.TemporaryDirectory() as tmp:
         ws_dir = os.path.join(tmp, "workspace")
@@ -66,23 +67,22 @@ def test_storage_status_json_needs_migration():
             body = res.json()
             for key in (
                 "active_backend",
-                "needs_migration",
                 "json_path",
                 "sqlite_path",
-                "migration_skipped",
+                "row_counts",
+                "project_revisions",
             ):
                 assert key in body
-            assert body["active_backend"] == "json"
-            assert body["needs_migration"] is True
-            assert body["migration_skipped"] is False
-            assert body["json_path"] == os.path.abspath(path)
+            assert body["active_backend"] == "sqlite"
+            assert body["needs_migration"] is False
             assert body["sqlite_path"] == sqlite_path_from_workspace_path(path)
+            assert body["row_counts"].get("projects") == 2
         finally:
             api.WORKSPACE_PATH = old_path
             api.ASSETS_DIR = old_assets
 
 
-def test_migrate_to_sqlite_updates_status():
+def test_legacy_json_only_status_and_bootstrap_on_save():
     ws, _proj_id, _extra_id = _workspace_with_two_projects()
     with tempfile.TemporaryDirectory() as tmp:
         ws_dir = os.path.join(tmp, "workspace")
@@ -93,30 +93,64 @@ def test_migrate_to_sqlite_updates_status():
         old_path = api.WORKSPACE_PATH
         old_assets = api.ASSETS_DIR
         try:
-            save_workspace(ws, path)
+            # Legacy store: only the JSON file exists (no sqlite yet).
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(ws.to_dict(), handle)
             api.WORKSPACE_PATH = path
             api.ASSETS_DIR = assets_dir
             client = _test_client()
-            migrated = client.post("/api/workspace/storage/migrate")
-            assert migrated.status_code == 200
-            mig = migrated.json()
-            assert mig.get("wrote") is True
-            assert mig.get("active_backend") == "sqlite"
-            sqlite_path = sqlite_path_from_workspace_path(path)
-            assert os.path.isfile(sqlite_path)
-            meta_path = os.path.join(ws_dir, "workspace.storage.meta.json")
-            assert os.path.isfile(meta_path)
+            status = client.get("/api/workspace/storage-status").json()
+            assert status["active_backend"] == "json"
+            assert status["needs_migration"] is False
+
+            # The migrate/skip routes are gone in the sqlite-only backend.
+            assert client.post("/api/workspace/storage/migrate").status_code == 404
+            assert client.post("/api/workspace/storage/skip-migration").status_code == 404
+
+            # A save bootstraps the sqlite store from the legacy JSON.
+            updated = _workspace_with_two_projects()[0]
+            updated.name = "Bootstrapped"
+            posted = client.post("/api/workspace", json=updated.to_dict())
+            _assert_workspace_save_ok(posted)
             status = client.get("/api/workspace/storage-status").json()
             assert status["active_backend"] == "sqlite"
-            assert status["needs_migration"] is False
-            assert os.path.isfile(path)
+            assert os.path.isfile(sqlite_path_from_workspace_path(path))
+            loaded = api._load_workspace_from_disk()
+            assert loaded.name == "Bootstrapped"
         finally:
             api.WORKSPACE_PATH = old_path
             api.ASSETS_DIR = old_assets
 
 
-def test_post_stub_merge_safe_after_sqlite_migration():
+def test_post_nav_shell_save_keeps_sibling_bodies():
+    """The headline scenario: a browser save carrying a nav shell (stubs for
+    every page it hydrated) must not wipe the sibling page's TextSpaces,
+    objects or assets from the sqlite store."""
     ws, proj_id, extra_id = _workspace_with_two_projects()
+    # Give the sibling page real content to lose.
+    extra = ws.projects[extra_id]
+    from modules.space import Space
+
+    text_space = Space(
+        id=f"{extra_id}_ts",
+        kind="TextSpace",
+        x=10.0, y=10.0, z=3.0, width=200.0, height=100.0,
+        parent_space_id=extra.root_space_id,
+        scale_x=1.0, scale_y=1.0,
+        reference_asset_id="a_keep", reference_mode="top_left_box",
+    )
+    extra.spaces[text_space.id] = text_space
+    text_space.asset_ids = ["a_keep"]
+    from modules.asset import Asset as AssetCls
+
+    extra.assets["a_keep"] = AssetCls(
+        id="a_keep",
+        kind="markdown",
+        path="a_keep.md",
+        filename="a_keep.md",
+        content="stored text",
+        mime_type="text/markdown",
+    )
     with tempfile.TemporaryDirectory() as tmp:
         ws_dir = os.path.join(tmp, "workspace")
         assets_dir = os.path.join(tmp, "assets")
@@ -130,40 +164,40 @@ def test_post_stub_merge_safe_after_sqlite_migration():
             api.WORKSPACE_PATH = path
             api.ASSETS_DIR = assets_dir
             client = _test_client()
-            migrated = client.post("/api/workspace/storage/migrate")
-            assert migrated.status_code == 200
-            assert migrated.json().get("active_backend") == "sqlite"
 
+            # Mixed save: nav shell stubs for the sibling page it never
+            # hydrated, plus the full body of the page being edited.
             incoming = workspace_nav_dict(ws)
             incoming["projects"][extra_id] = ws.to_dict()["projects"][extra_id]
             posted = client.post("/api/workspace", json=incoming)
             _assert_workspace_save_ok(posted)
+
+            extra_res = client.get("/api/projects/" + extra_id)
+            assert extra_res.status_code == 200
+            extra_body = extra_res.json()
+            # Sibling body survived the stub-laden save.
+            assert f"{extra_id}_ts" in (extra_body.get("spaces") or {})
+            assert "a_keep" in (extra_body.get("assets") or {})
+
+            # A pure nav-shell save (no complete bodies at all) while the
+            # library tree still references stored bodies is refused outright.
+            nav_only = workspace_nav_dict(ws)
+            rejected = client.post("/api/workspace", json=nav_only)
+            assert rejected.status_code == 400
+            assert "wipe" in str(rejected.json().get("detail", "")).lower()
 
             nav = client.get("/api/workspace/nav")
             assert nav.status_code == 200
             nav_body = nav.json()
             assert proj_id in nav_body["projects"]
             assert extra_id in nav_body["projects"]
-
-            project_res = client.get("/api/projects/" + proj_id)
-            assert project_res.status_code == 200
-            project = project_res.json()
-            assert project.get("spaces")
-            asset = (project.get("assets") or {}).get("asset_big") or {}
-            assert asset.get("path")
-            assert not str(asset.get("path") or "").startswith("data:")
-            assert "content" not in asset or not asset.get("content")
-
-            extra_res = client.get("/api/projects/" + extra_id)
-            assert extra_res.status_code == 200
-            assert extra_res.json().get("spaces")
         finally:
             api.WORKSPACE_PATH = old_path
             api.ASSETS_DIR = old_assets
 
 
-def test_skip_migration_sets_flag():
-    ws, _proj_id, _extra_id = _workspace_with_two_projects()
+def test_save_response_includes_project_revisions():
+    ws, proj_id, _extra_id = _workspace_with_two_projects()
     with tempfile.TemporaryDirectory() as tmp:
         ws_dir = os.path.join(tmp, "workspace")
         assets_dir = os.path.join(tmp, "assets")
@@ -177,14 +211,15 @@ def test_skip_migration_sets_flag():
             api.WORKSPACE_PATH = path
             api.ASSETS_DIR = assets_dir
             client = _test_client()
-            skipped = client.post("/api/workspace/storage/skip-migration")
-            assert skipped.status_code == 200
-            body = skipped.json()
-            assert body.get("migration_skipped") is True or body.get("skipped") is True
-            status = client.get("/api/workspace/storage-status").json()
-            assert status["active_backend"] == "json"
-            assert status["migration_skipped"] is True
-            assert status["needs_migration"] is False
+            posted = client.post("/api/workspace", json=ws.to_dict())
+            _assert_workspace_save_ok(posted)
+            body = posted.json()
+            assert isinstance(body.get("project_revisions"), dict)
+            assert body["project_revisions"].get(proj_id) >= 1
+
+            revision = client.get("/api/workspace/revision").json()
+            assert isinstance(revision.get("project_revisions"), dict)
+            assert revision["project_revisions"].get(proj_id) == body["project_revisions"][proj_id]
         finally:
             api.WORKSPACE_PATH = old_path
             api.ASSETS_DIR = old_assets
@@ -192,10 +227,10 @@ def test_skip_migration_sets_flag():
 
 def main():
     tests = [
-        test_storage_status_json_needs_migration,
-        test_migrate_to_sqlite_updates_status,
-        test_post_stub_merge_safe_after_sqlite_migration,
-        test_skip_migration_sets_flag,
+        test_storage_status_reports_sqlite_counts,
+        test_legacy_json_only_status_and_bootstrap_on_save,
+        test_post_nav_shell_save_keeps_sibling_bodies,
+        test_save_response_includes_project_revisions,
     ]
     for test in tests:
         test()

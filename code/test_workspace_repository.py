@@ -29,7 +29,11 @@ class TestWorkspaceRepository(unittest.TestCase):
 
     def test_save_writes_workspace(self):
         self.repo.save(self.workspace)
-        self.assertTrue(os.path.isfile(self.repo.get_workspace_path(self.workspace.id)))
+        from modules.workspace_sqlite import sqlite_path_from_workspace_path
+
+        self.assertTrue(
+            os.path.isfile(sqlite_path_from_workspace_path(self.repo.get_workspace_path(self.workspace.id)))
+        )
 
     def test_exists_returns_true_after_save(self):
         self.repo.save(self.workspace)
@@ -51,7 +55,7 @@ class TestWorkspaceRepository(unittest.TestCase):
         self.assertEqual(ids, sorted(ids))
         self.assertEqual(ids, sorted([self.workspace.id, other.id]))
 
-    def test_list_workspace_ids_ignores_non_json(self):
+    def test_list_workspace_ids_ignores_non_store_files(self):
         self.repo.save(self.workspace)
         dummy = os.path.join(self.tmpdir.name, "ignore.txt")
         with open(dummy, "w", encoding="utf-8") as handle:
@@ -69,6 +73,9 @@ class TestWorkspaceRepository(unittest.TestCase):
         self.repo.save(self.workspace)
         path = self.repo.get_workspace_path(self.workspace.id)
         self.repo.delete(self.workspace.id)
+        from modules.workspace_sqlite import sqlite_path_from_workspace_path
+
+        self.assertFalse(os.path.exists(sqlite_path_from_workspace_path(path)))
         self.assertFalse(os.path.exists(path))
 
     def test_delete_missing_raises_file_not_found(self):
@@ -90,7 +97,7 @@ class TestWorkspaceRepository(unittest.TestCase):
 
     def test_save_snapshot_writes_file(self):
         snapshot_path = self.repo.save_snapshot(self.workspace, "snapshot1")
-        expected = os.path.join(self.tmpdir.name, "snapshots", self.workspace.id, "snapshot1.json")
+        expected = os.path.join(self.tmpdir.name, "snapshots", self.workspace.id, "snapshot1.sqlite")
         self.assertTrue(os.path.isfile(snapshot_path))
         self.assertEqual(snapshot_path, expected)
 

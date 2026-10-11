@@ -1,9 +1,10 @@
+import json
 import os
 import re
 from datetime import datetime, timezone
 
 from modules.workspace import Workspace
-from modules.save_workspace import save_workspace
+from modules.save_workspace import strip_asset_content_from_dict
 from modules.load_workspace import load_workspace
 
 
@@ -36,7 +37,17 @@ class WorkspaceSnapshotManager:
                 filename = f"{filename}_{sanitized}"
         filename = f"{filename}.json"
         path = os.path.join(ws_dir, filename)
-        save_workspace(workspace, path)
+        # Snapshots are layout-only JSON files (the undo/restore serialization
+        # format), NOT the live store: they must never go through the sqlite
+        # save path, which would write a .sqlite sibling instead.
+        payload = workspace.to_dict()
+        strip_asset_content_from_dict(payload)
+        tmp_path = path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, ensure_ascii=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
         return path
 
     def list_snapshots(self, workspace_id: str) -> list[str]:

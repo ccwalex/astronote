@@ -23,11 +23,13 @@ from modules.workspace import (
 from modules.workspace_lazy import (
     apply_collection_restore,
     incoming_would_drop_stored_collections,
+    incoming_would_mass_drop_spaces,
     incoming_would_wipe_page_bodies,
     is_project_incomplete,
     is_project_stub,
     merge_incoming_workspace_dict,
     plan_collection_restore,
+    referenced_project_ids,
     workspace_nav_dict,
 )
 from modules.page_view_lock import (
@@ -38,7 +40,9 @@ from modules.page_view_lock import (
     get_viewed_project_ids,
     heartbeat as page_presence_heartbeat,
     leave as page_presence_leave,
+    release_session as release_page_session,
 )
+from modules import user_session
 from modules.load_workspace import load_workspace, parse_workspace_json_text
 from modules.workspace_sync import workspace_write_lock
 from modules.save_workspace import (
@@ -92,7 +96,14 @@ from modules.group_space_conversion import (
     convert_group_space_to_image,
     restore_image_space_to_group,
 )
-from modules.asset_cleanup import cleanup_removed_assets, data_dir_from_workspace_path
+from modules.asset_cleanup import (
+    cleanup_removed_assets,
+    data_dir_from_workspace_path,
+    list_assets_trash,
+    purge_assets_trash,
+    restore_asset_files,
+)
+from modules.workspace_sqlite import get_project_revisions
 from modules.pdf_compress import compress_pdf_bytes, should_compress_pdf_upload
 from modules.asset_resolve import invalidate_asset_cache, resolve_asset_file
 from modules.library_write import (
@@ -171,6 +182,60 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.add_middleware(NoCacheAPIMiddleware)
+
+
+class UserSessionMiddleware:
+    """Backend-issued user identity for browser traffic.
+
+    A page-load/refresh request (GET /api/workspace/nav or /api/projects/*)
+    without an X-User-Id header gets a fresh backend-issued user-id, echoed in
+    the response header so the frontend can adopt it for subsequent requests.
+    Requests that carry an X-User-Id heartbeat that session, which is what
+    lets page write leases release on explicit session end instead of only
+    via the time-based TTL.
+    """
+
+    _ISSUE_METHODS = {"GET", "HEAD"}
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        try:
+            header_map = {k.lower(): v for k, v in (scope.get("headers") or [])}
+            user_id = header_map.get(b"x-user-id", b"").decode("latin-1").strip()
+        except Exception:
+            user_id = ""
+        path = scope.get("path") or ""
+        method = (scope.get("method") or "").upper()
+        issued: Optional[str] = None
+        if user_id:
+            user_session.heartbeat(user_id)
+        elif method in self._ISSUE_METHODS and (
+            path == "/api/workspace/nav" or path.startswith("/api/projects/")
+        ):
+            issued = user_session.create_session(label="page_load").user_id
+            scope = dict(scope)
+            scope["headers"] = list(scope.get("headers") or []) + [
+                (b"x-user-id", issued.encode("latin-1"))
+            ]
+
+        async def send_with_session(message):
+            if issued and message.get("type") == "http.response.start":
+                message = {
+                    **message,
+                    "headers": list(message.get("headers") or [])
+                    + [(b"x-user-id", issued.encode("latin-1"))],
+                }
+            await send(message)
+
+        await self.app(scope, receive, send_with_session)
+
+
+app.add_middleware(UserSessionMiddleware)
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 WORKSPACE_PATH = os.path.join(PROJECT_ROOT, "data", "workspace", "workspace.json")
@@ -323,15 +388,30 @@ def _kept_asset_ids_for_embeddings(workspace: Optional[Workspace]) -> set[str]:
     return kept
 
 
-def _drop_removed_asset_embeddings(previous_workspace: Optional[Workspace], next_workspace: Workspace) -> None:
+def _drop_removed_asset_embeddings(
+    previous_workspace: Optional[Workspace],
+    next_workspace: Workspace,
+    changed_project_ids=None,
+) -> None:
+    """Drop embeddings for assets a save removed.
+
+    changed_project_ids scopes the sweep to per-project saves: the incoming
+    workspace there carries stubs for sibling projects, so a global
+    drop_unkept_assets would erase untouched projects' embeddings. In scoped
+    mode only removed pairs from the changed projects are dropped per-pair.
+    """
     persist_path = os.path.join(PROJECT_ROOT, "data", "embeddings.pkl")
     try:
         embedding_index = WorkspaceEmbeddingIndex(prompt_for_missing=False, persist_path=persist_path)
     except Exception:
         return
+    scoped = {str(pid) for pid in (changed_project_ids or []) if str(pid or "").strip()}
     next_ids = _kept_asset_ids_for_embeddings(next_workspace)
     if previous_workspace is not None:
-        for project_id, project in previous_workspace.projects.items():
+        prev_projects = previous_workspace.projects.items()
+        for project_id, project in prev_projects:
+            if scoped and str(project_id) not in scoped:
+                continue
             for asset_id in project.assets:
                 aid = str(asset_id or "").strip()
                 if aid and aid not in next_ids:
@@ -339,10 +419,11 @@ def _drop_removed_asset_embeddings(previous_workspace: Optional[Workspace], next
                         embedding_index.remove_asset(str(project_id), aid)
                     except Exception:
                         pass
-    try:
-        embedding_index.drop_unkept_assets(next_ids)
-    except Exception:
-        pass
+    if not scoped:
+        try:
+            embedding_index.drop_unkept_assets(next_ids)
+        except Exception:
+            pass
 
 
 def _sync_asset_tracking_for_workspace(
@@ -350,16 +431,20 @@ def _sync_asset_tracking_for_workspace(
     next_workspace: Workspace,
     *,
     data_dir: str = os.path.join(PROJECT_ROOT, "data"),
+    changed_project_ids=None,
 ) -> None:
     tracking_rows = get_asset_tracking_rows(data_dir=data_dir)
     if not tracking_rows:
         return
 
+    scoped = {str(pid) for pid in (changed_project_ids or []) if str(pid or "").strip()}
     previous_signatures = _workspace_asset_signatures(previous_workspace)
     next_signatures = _workspace_asset_signatures(next_workspace)
     edited_at = datetime.utcnow().isoformat() + "Z"
 
     for (project_id, asset_id), next_signature in next_signatures.items():
+        if scoped and str(project_id) not in scoped:
+            continue
         previous_signature = previous_signatures.get((project_id, asset_id))
         if previous_signature is None or previous_signature == next_signature:
             continue
@@ -512,8 +597,11 @@ _search_cache_generation = 0
 def _bump_search_cache_generation() -> None:
     global _search_cache_generation
     with _search_corpus_lock:
+        # Bump WITHOUT clearing: the stale corpus stays servable immediately
+        # (stale-while-revalidate) while a background job rebuilds it. Clearing
+        # here used to make the post-save search pay a full synchronous corpus
+        # build, which is exactly the request-path hang this cache prevents.
         _search_cache_generation += 1
-        _search_corpus_cache.clear()
 
 
 def _search_corpus_mtime_key() -> tuple:
@@ -529,6 +617,11 @@ def _search_corpus_mtime_key() -> tuple:
 
 
 def _build_search_workspace() -> Workspace:
+    """Full corpus: loads + text-asset hydration + PDF extraction.
+
+    Only ever called from the background rebuild job — never on a request
+    thread — so a cold PDF cache cannot hang search handlers.
+    """
     workspace = load_workspace(WORKSPACE_PATH, hydrate=False, persist_repairs=False)
     assets_dir = assets_dir_from_workspace_path(WORKSPACE_PATH) or ASSETS_DIR
     hydrate_text_assets(workspace, assets_dir)
@@ -536,32 +629,91 @@ def _build_search_workspace() -> Workspace:
     return workspace
 
 
+def _build_lightweight_search_workspace() -> Workspace:
+    """Fast corpus without PDF extraction, for the first-query fallback.
+
+    Markdown/text assets still match on content; PDFs match on filename until
+    the background builder fills the corpus.
+    """
+    workspace = load_workspace(WORKSPACE_PATH, hydrate=False, persist_repairs=False)
+    assets_dir = assets_dir_from_workspace_path(WORKSPACE_PATH) or ASSETS_DIR
+    hydrate_text_assets(workspace, assets_dir)
+    return workspace
+
+
+_search_corpus_build_lock = threading.Lock()
+_search_corpus_rebuilding = threading.Event()
+
+
+def _corpus_entry_is_fresh(entry: Optional[dict]) -> bool:
+    return (
+        entry is not None
+        and entry.get("generation") == _search_cache_generation
+        and entry.get("mtime_key") == _search_corpus_mtime_key()
+        and time.monotonic() - entry.get("loaded_at", 0) < SEARCH_CORPUS_TTL_SECONDS
+    )
+
+
+def _rebuild_search_corpus_job() -> None:
+    """Background corpus rebuild: PDF extraction and loads happen off the
+    request path so a slow store can never hang search handlers."""
+    if _search_corpus_rebuilding.is_set():
+        return
+    _search_corpus_rebuilding.set()
+    try:
+        if not _search_corpus_build_lock.acquire(blocking=False):
+            return
+        try:
+            workspace = _build_search_workspace()
+            with _search_corpus_lock:
+                _search_corpus_cache["workspace"] = {
+                    "workspace": workspace,
+                    "generation": _search_cache_generation,
+                    "mtime_key": _search_corpus_mtime_key(),
+                    "loaded_at": time.monotonic(),
+                }
+        finally:
+            _search_corpus_build_lock.release()
+    finally:
+        _search_corpus_rebuilding.clear()
+
+
 def _load_workspace_for_search() -> Workspace:
-    """Cached read-only corpus: metadata load + text-asset hydration, no writes."""
-    global _search_cache_generation
+    """Cached read-only corpus: metadata load + text-asset hydration, no writes.
+
+    Stale-while-revalidate with single-flight rebuild: search requests always
+    answer immediately with the last good corpus while one background thread
+    refreshes it. Search can therefore never block on PDF extraction or a slow
+    store load, and N concurrent searches build N=1 corpora, not N.
+    """
     if not _workspace_store_exists():
         # First-run bootstrap keeps the ensure_baseline write behavior.
         return _load_workspace_for_rag()
     with _search_corpus_lock:
-        generation = _search_cache_generation
         entry = _search_corpus_cache.get("workspace")
-        if (
-            entry is not None
-            and entry["generation"] == generation
-            and entry["mtime_key"] == _search_corpus_mtime_key()
-            and time.monotonic() - entry["loaded_at"] < SEARCH_CORPUS_TTL_SECONDS
-        ):
-            return entry["workspace"]
-    workspace = _build_search_workspace()
+    if _corpus_entry_is_fresh(entry):
+        return entry["workspace"]
+    threading.Thread(
+        target=_rebuild_search_corpus_job, name="search-corpus-rebuild", daemon=True
+    ).start()
+    if entry is not None:
+        return entry["workspace"]
+    # Nothing cached yet (first search after startup or a generation bump):
+    # serve a lightweight, extraction-free corpus immediately — NEVER build on
+    # a request thread. A single background builder fills the cache for the
+    # next query; concurrent first searches share one build.
     with _search_corpus_lock:
-        if _search_cache_generation == generation:
-            _search_corpus_cache["workspace"] = {
-                "workspace": workspace,
-                "generation": generation,
-                "mtime_key": _search_corpus_mtime_key(),
-                "loaded_at": time.monotonic(),
-            }
-    return workspace
+        entry = _search_corpus_cache.get("workspace")
+        if _corpus_entry_is_fresh(entry):
+            return entry["workspace"]
+        fallback = _build_lightweight_search_workspace()
+        _search_corpus_cache["workspace"] = {
+            "workspace": fallback,
+            "generation": _search_cache_generation,
+            "mtime_key": _search_corpus_mtime_key(),
+            "loaded_at": time.monotonic(),
+        }
+        return fallback
 
 
 def _resolve_rag_runtime_config(endpoint_override: str, api_key_override: str) -> dict[str, str]:
@@ -1021,6 +1173,7 @@ def get_workspace_revision(
             {
                 "workspace_id": workspace_id,
                 "workspace_revision": _current_workspace_revision(workspace_id),
+                "project_revisions": get_project_revisions(WORKSPACE_PATH),
             },
             request,
             project_id,
@@ -1279,17 +1432,33 @@ def _coerce_base_revision(value) -> Optional[int]:
     return revision if revision >= 0 else None
 
 
+def _coerce_base_revisions(value) -> dict:
+    """Parse a client-supplied per-project base revision map."""
+    result: dict = {}
+    if not isinstance(value, dict):
+        return result
+    for pid, rev in value.items():
+        pid_text = str(pid or "").strip()
+        parsed = _coerce_base_revision(rev)
+        if pid_text and parsed is not None:
+            result[pid_text] = parsed
+    return result
+
+
 def _post_workspace_sync(
     data: dict,
     coalesce_key: Optional[str],
     write_session_id: Optional[str] = None,
     base_revision: Optional[int] = None,
+    cleared_project_ids=None,
+    base_revisions: Optional[dict] = None,
 ):
     """Heavy save work off the asyncio event loop (see post_workspace).
 
     Waits while interactive page-load / project GET holds priority so a click
     hydrate is not stuck behind a long merge/rewrite.
     """
+    cleared = {str(pid) for pid in (cleared_project_ids or []) if str(pid or "").strip()}
     _enforce_page_write_locks(data, write_session_id)
     _wait_while_page_load_priority()
     with workspace_write_lock():
@@ -1313,6 +1482,38 @@ def _post_workspace_sync(
                     detail="On-disk workspace could not be loaded: " + str(e),
                 )
             _log_slow_step("human_save_previous_load", load_started)
+        stored_project_revisions: dict = get_project_revisions(WORKSPACE_PATH) if previous_dict is not None else {}
+        if base_revisions and previous_dict is not None:
+            # Per-project freshness: reject only when a project this save
+            # actually rewrites advanced since the client saw it. Editing page
+            # A must not be rejected because page B changed elsewhere.
+            incoming_projects = data.get("projects") if isinstance(data.get("projects"), dict) else {}
+            touched_ids = {
+                str(pid)
+                for pid, proj in incoming_projects.items()
+                if isinstance(proj, dict) and not is_project_stub(proj)
+            }
+            stale_ids = sorted(
+                pid
+                for pid in touched_ids
+                if pid in base_revisions
+                and pid in stored_project_revisions
+                and base_revisions[pid] < stored_project_revisions[pid]
+            )
+            if stale_ids:
+                logger.warning(
+                    "Rejected stale per-project save for %d project(s): %s",
+                    len(stale_ids),
+                    ", ".join(stale_ids[:10]),
+                )
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "message": "Stale save rejected: the listed pages advanced since this view was loaded.",
+                        "stale_project_ids": stale_ids,
+                        "project_revisions": stored_project_revisions,
+                    },
+                )
         if base_revision is not None and previous_workspace is not None:
             stored_revision = _current_workspace_revision(
                 getattr(previous_workspace, "id", None)
@@ -1335,6 +1536,29 @@ def _post_workspace_sync(
                         "base_revision": base_revision,
                     },
                 )
+        if previous_dict is not None:
+            # A current global revision never proves intent when many projects
+            # lose spaces at once: that is the nav-shell failure mode.
+            mass_dropped = incoming_would_mass_drop_spaces(data, previous_dict)
+            unmarked = [pid for pid in mass_dropped if pid not in cleared]
+            if len(unmarked) >= 3:
+                # Many projects shrinking at once is never a per-page edit; a
+                # single fabricated/shrunken body is handled by the per-project
+                # restore below instead of a hard rejection.
+                logger.warning(
+                    "Rejected mass space-drop save: %d project(s) would lose spaces "
+                    "(first: %s), even though the revision looked current.",
+                    len(unmarked),
+                    unmarked[:5],
+                )
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "message": "Save rejected: too many pages would lose content. Reload and retry per page.",
+                        "dropped_project_ids": unmarked,
+                        "project_revisions": stored_project_revisions,
+                    },
+                )
         if previous_dict is not None and incoming_would_wipe_page_bodies(data, previous_dict):
             raise HTTPException(
                 status_code=400,
@@ -1343,15 +1567,20 @@ def _post_workspace_sync(
         if previous_dict is not None:
             flagged = incoming_would_drop_stored_collections(data, previous_dict)
             if flagged:
-                restore_plan = plan_collection_restore(data, previous_dict)
+                restore_plan = plan_collection_restore(
+                    data,
+                    previous_dict,
+                    cleared_project_ids=cleared,
+                    trust_client_deletions=base_revision is not None,
+                )
                 if restore_plan:
                     data = apply_collection_restore(data, previous_dict, restore_plan)
                     restored_count = sum(len(collections) for collections in restore_plan.values())
                     logger.warning(
                         "RESTORED %d stored collection(s) from disk during save (projects: %s): "
-                        "client carried empty collections for projects whose body never came "
-                        "from the disk page (dangling references, or fabricated layout on a "
-                        "total wipe).",
+                        "empty bodies are trusted only when the client marked an explicit "
+                        "clear; these were dangling references, fabricated layouts, or "
+                        "same-layout empties without a clear mark.",
                         restored_count,
                         ", ".join(sorted(restore_plan)[:10]),
                     )
@@ -1359,8 +1588,7 @@ def _post_workspace_sync(
                 if trusted:
                     logger.warning(
                         "Trusting client wipe of stored collections for %d project(s) "
-                        "(first: %s): layout matches disk and no references dangle, so the "
-                        "empty page is treated as an intentional edit.",
+                        "(first: %s): the client explicitly marked the clear.",
                         len(trusted),
                         trusted[0],
                     )
@@ -1369,25 +1597,79 @@ def _post_workspace_sync(
             # Saves without a base revision cannot prove freshness: keep stored
             # bodies the payload omits instead of trusting a possible stale copy.
             data = merge_incoming_workspace_dict(
-                data, previous_dict, preserve_disk_only=base_revision is None
+                data, previous_dict, preserve_disk_only=base_revision is None,
+                cleared_project_ids=cleared,
             )
             data = repair_workspace_dict(data, fallback=previous_dict, assets_dir=ASSETS_DIR)
         ws = Workspace.from_dict(data)
 
         data_dir = data_dir_from_workspace_path(WORKSPACE_PATH) or os.path.join(PROJECT_ROOT, "data")
-        cleanup_removed_assets(previous=previous_workspace, current=ws, data_dir=data_dir)
-        _sync_asset_tracking_for_workspace(previous_workspace, ws)
-        _drop_removed_asset_embeddings(previous_workspace, ws)
+        # Projects this save actually covers: complete bodies in the merged
+        # payload (stubs are navigation shells, not deletions).
+        merged_projects = ws.projects if isinstance(ws.projects, dict) else {}
+        complete_ids = [
+            pid
+            for pid, project in merged_projects.items()
+            if not is_project_stub(project.to_dict() if hasattr(project, "to_dict") else project)
+        ]
+        delete_ids: list = []
+        if previous_dict is not None:
+            disk_ids = set(previous_dict.get("projects") or {})
+            # The merge step already decided which projects survive: it keeps
+            # bodies for every project the incoming library tree references and
+            # pops unreferenced stubs/omissions, mirroring the old full-save
+            # semantics. Disk projects absent from the merged set are deleted
+            # page rows (referenced stubs were restored, so a stale tab can
+            # never mass-delete live pages this way).
+            delete_ids = sorted(disk_ids - set(merged_projects.keys()))
+
+        use_scoped_save = (
+            previous_dict is not None
+            and _workspace_store_exists()
+            and bool(complete_ids or delete_ids)
+        )
+        if use_scoped_save:
+            cleanup_removed_assets(
+                previous=previous_workspace,
+                current=ws,
+                data_dir=data_dir,
+                changed_project_ids=complete_ids + delete_ids,
+            )
+            _sync_asset_tracking_for_workspace(previous_workspace, ws, changed_project_ids=complete_ids or None)
+            _drop_removed_asset_embeddings(previous_workspace, ws, changed_project_ids=complete_ids or None)
+        else:
+            cleanup_removed_assets(previous=previous_workspace, current=ws, data_dir=data_dir)
+            _sync_asset_tracking_for_workspace(previous_workspace, ws)
+            _drop_removed_asset_embeddings(previous_workspace, ws)
 
         os.makedirs(os.path.dirname(WORKSPACE_PATH), exist_ok=True)
         save_started = time.monotonic()
-        save_workspace_and_snapshot(ws, WORKSPACE_PATH, "save", coalesce_key=coalesce_key)
+        if use_scoped_save:
+            # Per-project save: sibling projects keep their stored rows, so a
+            # poisoned or partial browser payload can never rewrite the whole
+            # store (this is the same path MCP writes already use).
+            save_workspace_scoped_and_snapshot(
+                ws,
+                WORKSPACE_PATH,
+                "save",
+                complete_ids,
+                library_nodes_changed=True,
+                coalesce_key=coalesce_key,
+                delete_project_ids=delete_ids,
+                assets_dir=ASSETS_DIR,
+                include_meta=True,
+            )
+        else:
+            # Bootstrap (no store yet) or a save that carries no project
+            # bodies at all: fall back to the full-store write.
+            save_workspace_and_snapshot(ws, WORKSPACE_PATH, "save", coalesce_key=coalesce_key)
         _log_slow_step("human_save_write", save_started)
         _bump_search_cache_generation()
         return {
             "status": "ok",
             "tracking_storage": get_tracking_storage_status(data_dir=data_dir),
             "workspace_revision": _current_workspace_revision(getattr(ws, "id", None)),
+            "project_revisions": get_project_revisions(WORKSPACE_PATH),
         }
 
 
@@ -1414,16 +1696,114 @@ async def post_workspace(request: Request):
         base_revision = _coerce_base_revision(data.pop("base_revision", None))
         if base_revision is None:
             base_revision = _coerce_base_revision(request.headers.get("If-Match"))
+        base_revisions = _coerce_base_revisions(data.pop("base_revisions", None))
+        cleared_raw = data.pop("cleared_project_ids", None)
+        cleared_project_ids = [
+            str(pid or "").strip()
+            for pid in (cleared_raw if isinstance(cleared_raw, list) else [])
+            if str(pid or "").strip()
+        ]
         write_session_id = request.headers.get("X-Page-Write-Session")
-        # Sync merge/save must not block the event loop (interactive GETs stall otherwise).
-        return await asyncio.to_thread(
-            _post_workspace_sync, data, coalesce_key, write_session_id, base_revision
-        )
+        user_id = str(
+            request.headers.get("X-User-Id")
+            or data.pop("user_id", None)
+            or ""
+        ).strip()
+        if user_id:
+            user_session.heartbeat(user_id)
+            token = user_session.set_acting_user_id(user_id)
+        else:
+            token = None
+        try:
+            # Sync merge/save must not block the event loop (interactive GETs stall otherwise).
+            return await asyncio.to_thread(
+                _post_workspace_sync,
+                data,
+                coalesce_key,
+                write_session_id,
+                base_revision,
+                cleared_project_ids,
+                base_revisions,
+            )
+        finally:
+            if token is not None:
+                user_session.reset_acting_user_id(token)
     except HTTPException:
         raise
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/session")
+def post_session(body: dict = Body(default={})):
+    """Issue a backend user-id for this browser session (call on refresh/load).
+
+    The frontend stores the returned user_id and sends it as `X-User-Id` (or a
+    `user_id` body field) on subsequent requests; page-load GET responses also
+    echo it. MCP traffic never calls this — it uses the fixed `mcp` identity.
+    """
+    try:
+        label = body.get("label") if isinstance(body, dict) else None
+        meta = body.get("meta") if isinstance(body, dict) and isinstance(body.get("meta"), dict) else None
+        record = user_session.create_session(label=label, meta=meta)
+        return {"status": "ok", **record.to_dict()}
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/session/heartbeat")
+def post_session_heartbeat(request: Request, body: dict = Body(default={})):
+    try:
+        user_id = str(
+            request.headers.get("X-User-Id")
+            or (body.get("user_id") if isinstance(body, dict) else "")
+            or ""
+        ).strip()
+        if not user_id:
+            raise HTTPException(status_code=400, detail="user_id is required")
+        record = user_session.heartbeat(user_id, label=body.get("label") if isinstance(body, dict) else None)
+        if record is None:
+            raise HTTPException(status_code=400, detail="invalid user_id")
+        return {"status": "ok", **record.to_dict()}
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/session")
+def delete_session(request: Request, body: dict = Body(default={})):
+    """Explicitly end a session: viewer presence and write leases release now.
+
+    Replaces waiting on the time-based TTL as the primary release path (the
+    TTL remains only as a safety net for crashed tabs).
+    """
+    try:
+        user_id = str(
+            request.headers.get("X-User-Id")
+            or (body.get("user_id") if isinstance(body, dict) else "")
+            or ""
+        ).strip()
+        if not user_id:
+            raise HTTPException(status_code=400, detail="user_id is required")
+        ended = user_session.end_session(user_id)
+        released_pages = release_page_session(user_id) if ended else []
+        return {"status": "ok", "ended": ended, "released_pages": released_pages}
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/session")
+def get_session(request: Request):
+    user_id = str(request.headers.get("X-User-Id") or "").strip()
+    exists = user_session.session_exists(user_id) if user_id else False
+    return {"user_id": user_id or None, "active": exists, "session_count": user_session.session_count()}
 
 
 def _undo_state_payload(state: Optional[dict], workspace_id: Optional[str] = None) -> dict:
@@ -1552,10 +1932,11 @@ async def post_workspace_import(
         zip_bytes = await file.read()
         imported, asset_files = unpack_workspace_zip(zip_bytes)
         disk = None
-        if os.path.exists(WORKSPACE_PATH):
+        if _workspace_store_exists():
             try:
-                with open(WORKSPACE_PATH, "r", encoding="utf-8") as handle:
-                    disk, _extra = parse_workspace_json_text(handle.read())
+                # sqlite-only store: the legacy workspace.json handle no longer
+                # exists once migrated, so detect the live store file-wise.
+                disk = _load_workspace_from_disk(hydrate=False).to_dict()
             except HTTPException:
                 raise
             except Exception as e:
@@ -1598,6 +1979,33 @@ async def post_workspace_import(
 @app.get("/api/asset-tracking/storage-status")
 def get_asset_tracking_storage_status():
     return get_tracking_storage_status(data_dir=_asset_tracking_data_dir())
+
+
+@app.get("/api/assets/trash")
+def get_assets_trash():
+    """Quarantined asset files (moved here instead of hard-deleted by saves)."""
+    return {
+        "status": "ok",
+        "entries": list_assets_trash(_asset_tracking_data_dir()),
+    }
+
+
+@app.post("/api/assets/trash/purge")
+def post_assets_trash_purge(data: dict = Body(default={})):
+    try:
+        max_age_days = float(data.get("max_age_days", 30.0))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="max_age_days must be a number")
+    return purge_assets_trash(_asset_tracking_data_dir(), max_age_days=max_age_days)
+
+
+@app.post("/api/assets/trash/{asset_id}/restore")
+def post_assets_trash_restore(asset_id: str):
+    assets_dir = os.path.join(_asset_tracking_data_dir(), "assets")
+    restored = restore_asset_files(asset_id, assets_dir, data_dir=_asset_tracking_data_dir())
+    if not restored:
+        raise HTTPException(status_code=404, detail="No quarantined files for this asset id")
+    return {"status": "ok", "asset_id": asset_id, "restored_files": restored}
 
 
 @app.post("/api/asset-tracking/migrate")

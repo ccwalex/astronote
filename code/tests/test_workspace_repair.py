@@ -222,9 +222,13 @@ def test_load_workspace_repairs_concatenated_json_and_rewrites_file():
             json.dump(payload, handle)
         loaded = load_workspace(path)
         assert len(next(iter(loaded.projects.values())).spaces) > 0
-        with open(path, "r", encoding="utf-8") as handle:
-            rewritten = json.load(handle)
-        assert len(next(iter(rewritten["projects"].values()))["spaces"]) > 0
+        # Repairs now persist to the sqlite store (the only backend): the
+        # broken concatenated JSON file is converted once and never read again.
+        from modules.workspace_sqlite import sqlite_path_from_workspace_path
+
+        assert os.path.isfile(sqlite_path_from_workspace_path(path))
+        reloaded = load_workspace(path)
+        assert len(next(iter(reloaded.projects.values())).spaces) > 0
     finally:
         shutil.rmtree(root)
 

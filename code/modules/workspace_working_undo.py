@@ -479,6 +479,8 @@ def save_workspace_scoped_and_snapshot(
     coalesce_key: Optional[str] = None,
     snapshot_root: Optional[str] = None,
     assets_dir: Optional[str] = None,
+    delete_project_ids=None,
+    include_meta: bool = False,
 ) -> dict:
     """Persist a project-scoped workspace mutation without a full-store rewrite.
 
@@ -495,6 +497,7 @@ def save_workspace_scoped_and_snapshot(
     )
 
     ids = [str(pid) for pid in (changed_project_ids or []) if str(pid or "").strip()]
+    delete_ids = [str(pid) for pid in (delete_project_ids or []) if str(pid or "").strip()]
     if assets_dir:
         for pid in ids:
             spill_project_assets(workspace, assets_dir, pid)
@@ -507,6 +510,8 @@ def save_workspace_scoped_and_snapshot(
                 path,
                 ids,
                 include_library_nodes=library_nodes_changed,
+                delete_project_ids=delete_ids,
+                include_meta=include_meta,
             )
             return _record_revision_after_save(
                 workspace, path, reason, coalesce_key=coalesce_key, snapshot_root=snapshot_root

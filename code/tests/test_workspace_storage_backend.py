@@ -16,13 +16,8 @@ from modules.workspace_sqlite import (
     detect_workspace_backend,
     load_workspace_dict_sqlite,
     sqlite_path_from_workspace_path,
-    write_storage_meta,
 )
-from modules.workspace_storage import (
-    get_workspace_storage_status,
-    migrate_workspace_store,
-    skip_workspace_storage_migration,
-)
+from modules.workspace_storage import get_workspace_storage_status
 
 
 def _layout_dict(workspace):
@@ -61,6 +56,8 @@ def _seed_two_projects():
 
 
 class WorkspaceStorageBackendTests(unittest.TestCase):
+    """sqlite is the only live-store backend (JSON was phased out)."""
+
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.ws_dir = os.path.join(self._tmp.name, "workspace")
@@ -70,27 +67,41 @@ class WorkspaceStorageBackendTests(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def test_json_save_load_round_trip_layout_only_on_disk(self):
+    def test_save_writes_sqlite_and_no_json(self):
         workspace = _seed_workspace()
         save_workspace(workspace, self.json_path)
-        self.assertTrue(os.path.isfile(self.json_path))
-        self.assertEqual(detect_workspace_backend(self.json_path), "json")
-        with open(self.json_path, "r", encoding="utf-8") as handle:
-            raw = handle.read()
-            disk = json.loads(raw)
-        self.assertIn("\n  ", raw)
-        self.assertNotIn("data:", raw)
-        for project in (disk.get("projects") or {}).values():
-            for asset in (project.get("assets") or {}).values():
-                self.assertNotIn("content", asset)
+        sqlite_path = sqlite_path_from_workspace_path(self.json_path)
+        self.assertTrue(os.path.isfile(sqlite_path))
+        # The legacy JSON file is never written anymore.
+        self.assertFalse(os.path.isfile(self.json_path))
+        self.assertEqual(detect_workspace_backend(self.json_path), "sqlite")
         loaded = load_workspace(self.json_path, hydrate=False)
         self.assertEqual(loaded.id, workspace.id)
         self.assertEqual(loaded.name, workspace.name)
         self.assertEqual(set(loaded.projects), set(workspace.projects))
 
+    def test_sqlite_payload_strips_content_and_data_urls(self):
+        workspace = _seed_workspace()
+        save_workspace(workspace, self.json_path)
+        sqlite_path = sqlite_path_from_workspace_path(self.json_path)
+        conn = sqlite3.connect(sqlite_path)
+        try:
+            for table, column in (
+                ("spaces", "payload"),
+                ("objects", "payload"),
+                ("assets", "payload"),
+                ("projects", "payload"),
+            ):
+                for (raw,) in conn.execute("SELECT %s FROM %s" % (column, table)):
+                    self.assertNotIn("data:", raw)
+                    if table == "assets":
+                        payload = json.loads(raw)
+                        self.assertNotIn("content", payload)
+        finally:
+            conn.close()
+
     def test_sqlite_save_load_round_trip_matches_workspace_dict(self):
         workspace = _seed_workspace()
-        write_storage_meta(self.json_path, backend="sqlite")
         save_workspace(workspace, self.json_path)
         sqlite_path = sqlite_path_from_workspace_path(self.json_path)
         self.assertTrue(os.path.isfile(sqlite_path))
@@ -115,11 +126,9 @@ class WorkspaceStorageBackendTests(unittest.TestCase):
 
     def test_sqlite_nav_only_omits_spaces_and_assets(self):
         ws, proj_id, extra_id = _seed_two_projects()
-        write_storage_meta(self.json_path, backend="sqlite")
         save_workspace(ws, self.json_path)
         nav = load_workspace_dict_sqlite(self.json_path, nav_only=True)
         self.assertIn("library_nodes", nav)
-        self.assertTrue(nav["library_nodes"])
         for pid in (proj_id, extra_id):
             stub = nav["projects"][pid]
             self.assertEqual(stub.get("spaces") or {}, {})
@@ -128,7 +137,6 @@ class WorkspaceStorageBackendTests(unittest.TestCase):
 
     def test_sqlite_project_id_scoped_load(self):
         ws, proj_id, extra_id = _seed_two_projects()
-        write_storage_meta(self.json_path, backend="sqlite")
         save_workspace(ws, self.json_path)
         scoped = load_workspace_dict_sqlite(self.json_path, project_id=proj_id)
         self.assertTrue((scoped["projects"][proj_id].get("spaces") or {}))
@@ -151,7 +159,6 @@ class WorkspaceStorageBackendTests(unittest.TestCase):
 
     def test_sqlite_wal_enabled_after_save(self):
         workspace = _seed_workspace()
-        write_storage_meta(self.json_path, backend="sqlite")
         save_workspace(workspace, self.json_path)
         sqlite_path = sqlite_path_from_workspace_path(self.json_path)
         conn = connect_workspace_sqlite(sqlite_path, readonly=True)
@@ -167,44 +174,41 @@ class WorkspaceStorageBackendTests(unittest.TestCase):
         finally:
             ro.close()
 
-    def test_merge_incoming_stub_vs_hydrated_same_for_json_and_sqlite_disk(self):
+    def test_merge_incoming_stub_vs_hydrated_on_sqlite_disk(self):
         workspace = _seed_workspace()
         save_workspace(workspace, self.json_path)
-        disk_json = _layout_dict(load_workspace(self.json_path, hydrate=False))
+        disk_sqlite = _layout_dict(load_workspace(self.json_path, hydrate=False))
         incoming = {
-            "id": disk_json.get("id"),
-            "name": disk_json.get("name"),
-            "library_nodes": disk_json.get("library_nodes") or {},
+            "id": disk_sqlite.get("id"),
+            "name": disk_sqlite.get("name"),
+            "library_nodes": disk_sqlite.get("library_nodes") or {},
             "projects": {
                 pid: stub_project_dict(project)
-                for pid, project in (disk_json.get("projects") or {}).items()
+                for pid, project in (disk_sqlite.get("projects") or {}).items()
             },
         }
-        merged_json = merge_incoming_workspace_dict(incoming, disk_json)
-        write_storage_meta(self.json_path, backend="sqlite")
-        save_workspace(workspace, self.json_path)
-        disk_sqlite = _layout_dict(load_workspace(self.json_path, hydrate=False))
         merged_sqlite = merge_incoming_workspace_dict(incoming, disk_sqlite)
-        self.assertEqual(set(merged_json.get("projects") or {}), set(merged_sqlite.get("projects") or {}))
-        for pid, project in (merged_json.get("projects") or {}).items():
-            other = (merged_sqlite.get("projects") or {}).get(pid) or {}
+        # Referenced stubs keep their disk bodies (merge-protect), so the
+        # scoped save path preserves sibling content.
+        self.assertEqual(
+            set(merged_sqlite.get("projects") or {}),
+            set(disk_sqlite.get("projects") or {}),
+        )
+        for pid, project in (merged_sqlite.get("projects") or {}).items():
+            other = (disk_sqlite.get("projects") or {}).get(pid) or {}
             self.assertEqual(project.get("root_space_id"), other.get("root_space_id"))
             self.assertEqual(set(project.get("spaces") or {}), set(other.get("spaces") or {}))
 
-    def test_detect_active_backend_json_when_only_workspace_json(self):
-        workspace = _seed_workspace()
-        save_workspace(workspace, self.json_path)
+    def test_detect_backend_by_file_existence_only(self):
+        # No store at all -> json (legacy/bootstrap state).
         self.assertEqual(detect_workspace_backend(self.json_path), "json")
-        status = get_workspace_storage_status(self.json_path)
-        self.assertEqual(status["active_backend"], "json")
-        self.assertTrue(status["needs_migration"])
-
-    def test_detect_active_backend_sqlite_when_db_present(self):
-        workspace = _seed_workspace()
-        save_workspace(workspace, self.json_path)
-        migrate_workspace_store(self.json_path)
+        # A legacy workspace.json only -> json.
+        with open(self.json_path, "w", encoding="utf-8") as handle:
+            json.dump({"id": "x"}, handle)
+        self.assertEqual(detect_workspace_backend(self.json_path), "json")
+        # Once the sqlite file exists it always wins over a stale json twin.
+        save_workspace(_seed_workspace(), self.json_path)
         self.assertEqual(detect_workspace_backend(self.json_path), "sqlite")
-        self.assertTrue(os.path.isfile(sqlite_path_from_workspace_path(self.json_path)))
 
     def test_storage_status_contract_keys(self):
         workspace = _seed_workspace()
@@ -216,45 +220,15 @@ class WorkspaceStorageBackendTests(unittest.TestCase):
             "json_path",
             "sqlite_path",
             "migration_skipped",
+            "row_counts",
+            "project_revisions",
         ):
             self.assertIn(key, status)
-
-    def test_migrate_json_to_sqlite_dry_run_no_write(self):
-        workspace = _seed_workspace()
-        save_workspace(workspace, self.json_path)
-        sqlite_path = sqlite_path_from_workspace_path(self.json_path)
-        result = migrate_workspace_store(self.json_path, dry_run=True)
-        self.assertTrue(result["dry_run"])
-        self.assertFalse(result["wrote"])
-        self.assertFalse(os.path.isfile(sqlite_path))
-        self.assertEqual(detect_workspace_backend(self.json_path), "json")
-
-    def test_migrate_json_to_sqlite_writes_db_and_meta(self):
-        workspace = _seed_workspace()
-        save_workspace(workspace, self.json_path)
-        result = migrate_workspace_store(self.json_path)
-        self.assertTrue(result["wrote"])
-        self.assertEqual(result["active_backend"], "sqlite")
-        self.assertTrue(os.path.isfile(result["sqlite_path"]))
-        self.assertTrue(os.path.isfile(self.json_path))
-        loaded = load_workspace(self.json_path, hydrate=False)
-        self.assertEqual(loaded.id, workspace.id)
-        save_workspace(loaded, self.json_path)
-        self.assertEqual(detect_workspace_backend(self.json_path), "sqlite")
-
-    def test_skip_migration_flag(self):
-        workspace = _seed_workspace()
-        save_workspace(workspace, self.json_path)
-        skipped = skip_workspace_storage_migration(self.json_path)
-        self.assertTrue(skipped.get("skipped") or skipped.get("migration_skipped"))
-        status = get_workspace_storage_status(self.json_path)
-        self.assertEqual(status["active_backend"], "json")
-        self.assertTrue(status["migration_skipped"])
+        self.assertEqual(status["active_backend"], "sqlite")
         self.assertFalse(status["needs_migration"])
 
-    def test_concurrent_sqlite_saves_do_not_fail_on_storage_meta(self):
+    def test_concurrent_sqlite_saves(self):
         workspace = _seed_workspace()
-        write_storage_meta(self.json_path, backend="sqlite")
         errors = []
 
         def _save():
@@ -269,11 +243,11 @@ class WorkspaceStorageBackendTests(unittest.TestCase):
         for thread in threads:
             thread.join()
         self.assertEqual(errors, [])
-        meta_path = os.path.join(self.ws_dir, "workspace.storage.meta.json")
-        self.assertTrue(os.path.isfile(meta_path))
-        with open(meta_path, "r", encoding="utf-8") as handle:
-            meta = json.load(handle)
-        self.assertEqual(meta.get("backend"), "sqlite")
+        self.assertTrue(os.path.isfile(sqlite_path_from_workspace_path(self.json_path)))
+        # The dead backend-pinning meta file is no longer written.
+        self.assertFalse(
+            os.path.isfile(os.path.join(self.ws_dir, "workspace.storage.meta.json"))
+        )
 
 
 if __name__ == "__main__":

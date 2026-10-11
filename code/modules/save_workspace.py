@@ -451,37 +451,37 @@ strip_markdown_content_from_dict = strip_asset_content_from_dict
 payload_has_inline_markdown = payload_has_inline_assets
 
 
-def save_workspace_json(workspace: Workspace, path: str, payload: Optional[dict] = None) -> None:
-    parent_dir = os.path.dirname(path)
-    if parent_dir:
-        os.makedirs(parent_dir, exist_ok=True)
-    else:
-        parent_dir = "."
-
-    if payload is None:
-        payload = workspace.to_dict()
-        strip_asset_content_from_dict(payload)
-    with NamedTemporaryFile("w", encoding="utf-8", dir=parent_dir, delete=False) as tmp:
-        json.dump(payload, tmp, indent=2, ensure_ascii=False)
-        tmp.flush()
-        os.fsync(tmp.fileno())
-        tmp_path = tmp.name
-    os.replace(tmp_path, path)
-
-
 def save_workspace(workspace: Workspace, path: str) -> None:
+    """Persist the workspace to the sqlite store (the only backend).
+
+    One-time bootstrap: when no sqlite store exists yet but a legacy
+    workspace.json does, the JSON store is converted to sqlite first so the
+    save below starts from the full legacy content. From then on JSON is never
+    read or written as the live store again.
+    """
     workspace.validate()
     assets_dir = assets_dir_from_workspace_path(path)
     if assets_dir:
         spill_assets(workspace, assets_dir)
 
-    payload = workspace.to_dict()
-    strip_asset_content_from_dict(payload)
+    from modules.workspace_sqlite import (
+        json_path_from_workspace_path,
+        save_workspace_sqlite,
+        sqlite_path_from_workspace_path,
+    )
 
-    from modules.workspace_sqlite import detect_workspace_backend, save_workspace_sqlite
+    dest = sqlite_path_from_workspace_path(path)
+    if not os.path.isfile(dest):
+        json_path = json_path_from_workspace_path(path)
+        if os.path.isfile(json_path) and os.path.getsize(json_path) > 0:
+            try:
+                from modules.load_workspace import load_workspace
 
-    if detect_workspace_backend(path) == "sqlite":
-        save_workspace_sqlite(workspace, path)
-        return
-
-    save_workspace_json(workspace, path, payload)
+                legacy = load_workspace(json_path, hydrate=False)
+                save_workspace_sqlite(legacy, path)
+            except Exception:
+                # A corrupt or unreadable legacy store must not block saving:
+                # start a fresh sqlite store instead (the incoming save was
+                # merged over whatever the load path could read anyway).
+                pass
+    save_workspace_sqlite(workspace, path)

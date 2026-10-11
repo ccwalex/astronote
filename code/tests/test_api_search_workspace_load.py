@@ -30,6 +30,7 @@ from modules.load_workspace import load_workspace
 from modules.save_workspace import save_workspace
 from modules.workspace import Workspace
 from modules.workspace_search import search_workspace
+from modules.workspace_sqlite import sqlite_path_from_workspace_path
 
 MD_TEXT = "The quokka habitat briefing.\nQuokka habitat details follow here.\n"
 OTHER_MD_TEXT = "Unrelated notebook body text about otters."
@@ -196,7 +197,8 @@ class TestSearchDoesNotWrite(unittest.TestCase):
     def test_search_leaves_workspace_and_assets_untouched(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             ws_path, assets_dir = _save_fixture(tmpdir)
-            before_ws_bytes = _read_bytes(ws_path)
+            store_path = sqlite_path_from_workspace_path(ws_path)
+            before_ws_bytes = _read_bytes(store_path)
             before_assets = _snapshot_assets_dir(assets_dir)
             before_asset_files = set(os.listdir(assets_dir))
 
@@ -212,7 +214,7 @@ class TestSearchDoesNotWrite(unittest.TestCase):
                 )
                 self.assertEqual(response.status_code, 200)
 
-            after_ws_bytes = _read_bytes(ws_path)
+            after_ws_bytes = _read_bytes(store_path)
             after_assets = _snapshot_assets_dir(assets_dir)
             self.assertEqual(after_ws_bytes, before_ws_bytes)
             self.assertEqual(after_assets, before_assets)
@@ -309,6 +311,8 @@ class TestSearchCorpusCache(unittest.TestCase):
                     return original_build()
 
                 with patch.object(api, "_build_search_workspace", counting_build):
+                    # Prime the corpus synchronously (the background job's job).
+                    api._rebuild_search_corpus_job()
                     first = api._load_workspace_for_search()
                     second = api._load_workspace_for_search()
                     third = api._load_workspace_for_search()
@@ -333,6 +337,9 @@ class TestSearchCorpusCache(unittest.TestCase):
 
                 # A save handler would call this (post_workspace_sync / commit).
                 api._bump_search_cache_generation()
+                # Stale-while-revalidate: the bump starts a background rebuild;
+                # run it synchronously here to observe the refreshed corpus.
+                api._rebuild_search_corpus_job()
 
                 fresh_ws = api._load_workspace_for_search()
                 self.assertIsNot(fresh_ws, stale_ws)
@@ -363,8 +370,10 @@ class TestSearchCorpusCache(unittest.TestCase):
 
                 with open(_md_file_path(assets_dir), "w", encoding="utf-8") as handle:
                     handle.write(REVISED_MD_TEXT)
-                stamp = os.path.getmtime(ws_path) + 500
-                os.utime(ws_path, (stamp, stamp))
+                store_path = sqlite_path_from_workspace_path(ws_path)
+                stamp = os.path.getmtime(store_path) + 500
+                os.utime(store_path, (stamp, stamp))
+                api._rebuild_search_corpus_job()
 
                 fresh_ws = api._load_workspace_for_search()
                 self.assertIsNot(fresh_ws, stale_ws)
@@ -386,6 +395,44 @@ class TestSearchCorpusCache(unittest.TestCase):
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(response.json().get("status"), "ok")
                 mock_bump.assert_called_once()
+
+    def test_first_query_never_blocks_on_slow_corpus_build(self):
+        """A cold/slow build (e.g. PDF extraction) runs in the background; the
+        request path answers with the lightweight corpus immediately."""
+        import threading
+        import time as time_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ws_path, _assets_dir = _save_fixture(tmpdir)
+            with _search_env(ws_path):
+                gate = threading.Event()
+                original_build = api._build_search_workspace
+
+                def slow_build():
+                    gate.wait(timeout=10)
+                    return original_build()
+
+                builds = {"n": 0}
+                build_lock = threading.Lock()
+
+                def counting_slow_build():
+                    with build_lock:
+                        builds["n"] += 1
+                    return slow_build()
+
+                with patch.object(api, "_build_search_workspace", counting_slow_build):
+                    started = time_mod.monotonic()
+                    first = api._load_workspace_for_search()
+                    elapsed = time_mod.monotonic() - started
+                    # No blocking on the (gated) full builder.
+                    self.assertLess(elapsed, 5.0)
+                    self.assertIsNotNone(first)
+                    # Give the background thread a chance to enter the builder.
+                    deadline = time_mod.monotonic() + 5.0
+                    while time_mod.monotonic() < deadline and builds["n"] == 0:
+                        time_mod.sleep(0.01)
+                    self.assertGreaterEqual(builds["n"], 1)
+                    gate.set()
 
     def test_hydrate_text_assets_skips_reread_when_mtime_unchanged(self):
         from modules import save_workspace as sw
