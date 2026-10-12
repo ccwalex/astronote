@@ -279,6 +279,59 @@ def _rect_points(width: float, height: float) -> List[Tuple[float, float]]:
     return [(0.0, 0.0), (width, 0.0), (width, height), (0.0, height)]
 
 
+def _parse_css_color(value: Any, default_alpha: int = 255) -> Optional[Tuple[int, int, int, int]]:
+    """Parse #rgb/#rrggbb/#rrggbbaa or rgb()/rgba() into an RGBA tuple. transparent/none -> None."""
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    lowered = raw.lower()
+    if lowered in {"transparent", "none"}:
+        return None
+
+    if raw.startswith("#"):
+        hexpart = raw[1:]
+        try:
+            if len(hexpart) == 3:
+                r, g, b = (int(ch * 2, 16) for ch in hexpart)
+                return (r, g, b, max(0, min(255, int(default_alpha))))
+            if len(hexpart) == 6:
+                r = int(hexpart[0:2], 16)
+                g = int(hexpart[2:4], 16)
+                b = int(hexpart[4:6], 16)
+                return (r, g, b, max(0, min(255, int(default_alpha))))
+            if len(hexpart) == 8:
+                r = int(hexpart[0:2], 16)
+                g = int(hexpart[2:4], 16)
+                b = int(hexpart[4:6], 16)
+                a = int(hexpart[6:8], 16)
+                return (r, g, b, a)
+        except ValueError:
+            return None
+        return None
+
+    match = re.match(
+        r"rgba?\(\s*([0-9.]+)\s*,\s*([0-9.]+)\s*,\s*([0-9.]+)(?:\s*,\s*([0-9.]+))?\s*\)",
+        raw,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    try:
+        r = max(0, min(255, int(float(match.group(1)))))
+        g = max(0, min(255, int(float(match.group(2)))))
+        b = max(0, min(255, int(float(match.group(3)))))
+        if match.group(4) is None:
+            a = max(0, min(255, int(default_alpha)))
+        else:
+            alpha_raw = float(match.group(4))
+            a = int(round(alpha_raw * 255)) if alpha_raw <= 1.0 else int(alpha_raw)
+            a = max(0, min(255, a))
+        return (r, g, b, a)
+    except ValueError:
+        return None
+
 
 _MAX_REMOTE_IMAGE_BYTES = 8 * 1024 * 1024
 
@@ -316,31 +369,100 @@ def _fetch_http_image(url: str) -> Optional[Image.Image]:
         return None
 
 
+def _open_raster_bytes(raw: bytes) -> Optional[Image.Image]:
+    if not raw:
+        return None
+    try:
+        with Image.open(io.BytesIO(raw)) as opened:
+            return opened.convert("RGBA")
+    except Exception:
+        return None
+
+
 def _open_raster_file(local_path: str) -> Optional[Image.Image]:
     if not local_path or not os.path.isfile(local_path):
         return None
     try:
-        return Image.open(local_path).convert("RGBA")
+        with open(local_path, "rb") as handle:
+            raw = handle.read()
     except Exception:
-        pass
+        return None
+
+    opened = _open_raster_bytes(raw)
+    if opened is not None:
+        return opened
 
     # Nested group photos are SVG wrappers around a PNG data URI.
     lower = local_path.lower()
-    if lower.endswith(".svg"):
+    if lower.endswith(".svg") or (raw[:200].lstrip().startswith(b"<") and b"<svg" in raw[:500].lower()):
         try:
-            with open(local_path, "r", encoding="utf-8") as handle:
-                markup = handle.read()
+            markup = raw.decode("utf-8", errors="ignore")
         except Exception:
             return None
         match = _DATA_IMAGE_RE.search(markup)
         if not match:
             return None
         try:
-            raw = base64.b64decode(re.sub(r"\s+", "", match.group(2)))
-            return Image.open(io.BytesIO(raw)).convert("RGBA")
+            embedded = base64.b64decode(re.sub(r"\s+", "", match.group(2)))
+            return _open_raster_bytes(embedded)
         except Exception:
             return None
     return None
+
+
+def _svg_escape_attr(value: str) -> str:
+    return (
+        str(value)
+        .replace("&", "&amp;")
+        .replace("'", "&apos;")
+        .replace('"', "&quot;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+def _rgba_to_css(rgba: Tuple[int, int, int, int]) -> str:
+    r, g, b, a = rgba
+    if a >= 255:
+        return f"#{r:02x}{g:02x}{b:02x}"
+    return f"rgba({r},{g},{b},{a / 255.0:.3f})"
+
+
+def _svg_rect_element(x: float, y: float, width: float, height: float, fill_css: str) -> str:
+    return (
+        f"<rect x='{_fmt_svg_num(x)}' y='{_fmt_svg_num(y)}' "
+        f"width='{_fmt_svg_num(max(1.0, width))}' height='{_fmt_svg_num(max(1.0, height))}' "
+        f"fill='{_svg_escape_attr(fill_css)}' />"
+    )
+
+
+def _svg_image_element(x: float, y: float, width: float, height: float, png_bytes: bytes) -> str:
+    data_href = f"data:image/png;base64,{base64.b64encode(png_bytes).decode('ascii')}"
+    href = _svg_escape_attr(data_href)
+    return (
+        f"<image x='{_fmt_svg_num(x)}' y='{_fmt_svg_num(y)}' "
+        f"width='{_fmt_svg_num(max(1.0, width))}' height='{_fmt_svg_num(max(1.0, height))}' "
+        f"href='{href}' xlink:href='{href}' preserveAspectRatio='xMidYMid meet' />"
+    )
+
+
+def _fmt_svg_num(value: float) -> str:
+    return f"{float(value):.2f}".rstrip("0").rstrip(".")
+
+
+def _fit_raster_to_box(image: Image.Image, box_w: int, box_h: int) -> Image.Image:
+    fitted = image.copy()
+    resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS)
+    fitted.thumbnail((max(1, box_w), max(1, box_h)), resample)
+    return fitted
+
+
+def _paste_raster(base: Image.Image, overlay: Image.Image, x: int, y: int) -> Image.Image:
+    if overlay.mode != "RGBA":
+        overlay = overlay.convert("RGBA")
+    layer = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    layer.paste(overlay, (x, y), overlay)
+    return Image.alpha_composite(base, layer)
 
 
 def _candidate_local_paths(asset, assets_dir: str, workspace_path: Optional[str]) -> List[str]:
@@ -374,6 +496,12 @@ def _candidate_local_paths(asset, assets_dir: str, workspace_path: Optional[str]
                 if stem and "." not in stem:
                     add(resolve_asset_file(stem, assets_dir, workspace_path=workspace_path))
                 add(os.path.join(assets_dir, os.path.basename(trimmed)))
+
+    filename = getattr(asset, "filename", None)
+    if isinstance(filename, str):
+        name = filename.strip().replace("\\", "/")
+        if name and "/" not in name and not name.startswith("."):
+            add(os.path.join(assets_dir, name))
 
     return paths
 
@@ -1081,8 +1209,14 @@ def _build_group_screenshot_image(
         max_y = max(max_y, by1)
 
         asset = None
-        if getattr(space, "reference_asset_id", None) and space.reference_asset_id in project.assets:
-            asset = project.assets[space.reference_asset_id]
+        ref_id = getattr(space, "reference_asset_id", None)
+        if ref_id and ref_id in project.assets:
+            asset = project.assets[ref_id]
+        elif getattr(space, "asset_ids", None):
+            for candidate_id in space.asset_ids or []:
+                if candidate_id in project.assets:
+                    asset = project.assets[candidate_id]
+                    break
 
         space_shapes.append({
             "id": sid,
@@ -1151,7 +1285,7 @@ def _build_group_screenshot_image(
 
     img = Image.new("RGBA", (width, height), color=(0, 0, 0, 0))
     draw = ImageDraw.Draw(img, "RGBA")
-    svg_text_parts: List[str] = []
+    svg_overlay_parts: List[str] = []
 
     for shape in space_shapes:
         kind = str(shape["kind"])
@@ -1164,21 +1298,43 @@ def _build_group_screenshot_image(
         rw = max(1.0, bx1 - bx0)
         rh = max(1.0, by1 - by0)
 
+        # Paint opaque space fills (e.g. TextSpace background) in z-order so
+        # converted group photos keep non-transparent text boxes. Also emit an
+        # SVG rect so the fill remains visible even if the base PNG layer is
+        # skipped by the frontend renderer.
+        bg = _parse_css_color(getattr(space, "background_color", None) if space is not None else None)
+        if bg is not None and bg[3] > 0:
+            x0 = int(rx0)
+            y0 = int(ry0)
+            x1 = max(x0 + 1, int(round(rx0 + rw)))
+            y1 = max(y0 + 1, int(round(ry0 + rh)))
+            draw.rectangle((x0, y0, x1, y1), fill=bg)
+            svg_overlay_parts.append(_svg_rect_element(rx0, ry0, rw, rh, _rgba_to_css(bg)))
+
         if kind in {"ImageSpace", "PhotoSpace", "GroupPhotoSpace"} and asset:
             try:
                 p_img = _load_raster_for_asset(asset, assets_dir, workspace_path=workspace_path)
                 if p_img:
                     tw = int(max(1, rw))
                     th = int(max(1, rh))
-                    p_img.thumbnail((tw, th))
-                    img.paste(p_img, (int(rx0), int(ry0)), p_img)
+                    fitted = _fit_raster_to_box(p_img, tw, th)
+                    img = _paste_raster(img, fitted, int(rx0), int(ry0))
+                    draw = ImageDraw.Draw(img, "RGBA")
+                    # Also embed the child photo as a positioned SVG <image> so
+                    # the frontend can paint it as a real HTML <img> even when
+                    # nested SVG <image href=data:...> is suppressed.
+                    child_buf = io.BytesIO()
+                    fitted.save(child_buf, format="PNG")
+                    svg_overlay_parts.append(
+                        _svg_image_element(rx0, ry0, float(fitted.size[0]), float(fitted.size[1]), child_buf.getvalue())
+                    )
             except Exception as e:
                 print(f"Failed to composite image: {e}")
 
         if kind == "TextSpace":
             raw = _raw_text_from_space(space, asset)
             if raw.strip():
-                svg_text_parts.append(formatted_text_to_svg(raw, rx0, ry0, rw, rh))
+                svg_overlay_parts.append(formatted_text_to_svg(raw, rx0, ry0, rw, rh))
 
     for path in stroke_paths:
         pts = [(px + offset_x, py + offset_y) for px, py in path["points"]]
@@ -1202,7 +1358,7 @@ def _build_group_screenshot_image(
 
     buf = io.BytesIO()
     img.save(buf, format="PNG")
-    return buf.getvalue(), "".join(svg_text_parts)
+    return buf.getvalue(), "".join(svg_overlay_parts)
 
 
 

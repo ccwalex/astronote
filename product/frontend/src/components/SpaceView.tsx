@@ -8,6 +8,79 @@ import { EraserMode, isLayerSpace } from '../model/workspaceActions';
 import { resolveAssetSource } from '../model/assetSource';
 import { resetSpaceRotationMatrix } from '../model/spaceTransform';
 
+type SnapshotImageLayer = {
+  href: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  fullFrame: boolean;
+};
+
+type InlineSvgSnapshot = {
+  viewBox: string;
+  width: number;
+  height: number;
+  images: SnapshotImageLayer[];
+  vectorMarkup: string;
+};
+
+function parseLength(value: string | null, fallback = 0): number {
+  if (!value) return fallback;
+  const matched = String(value).trim().match(/^([-+]?[0-9]*\.?[0-9]+)/);
+  if (!matched) return fallback;
+  const parsed = Number(matched[1]);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function parseInlineSvgSnapshot(markup: string): InlineSvgSnapshot | null {
+  if (!markup.includes('<svg')) return null;
+  const doc = new DOMParser().parseFromString(markup, 'image/svg+xml');
+  const svg = doc.documentElement;
+  if (!svg || svg.nodeName.toLowerCase() !== 'svg' || svg.querySelector('parsererror')) {
+    return null;
+  }
+
+  const viewBox = svg.getAttribute('viewBox') || '';
+  const vbParts = viewBox.trim().split(/[\s,]+/).map(Number);
+  const width = parseLength(svg.getAttribute('width'), vbParts[2] || 0);
+  const height = parseLength(svg.getAttribute('height'), vbParts[3] || 0);
+
+  const images: SnapshotImageLayer[] = [];
+  Array.from(svg.querySelectorAll('image')).forEach((node) => {
+    const href =
+      node.getAttribute('href') ||
+      node.getAttribute('xlink:href') ||
+      node.getAttributeNS('http://www.w3.org/1999/xlink', 'href') ||
+      '';
+    if (!href || !/^data:image\//i.test(href)) return;
+    const xAttr = node.getAttribute('x');
+    const yAttr = node.getAttribute('y');
+    const wAttr = node.getAttribute('width');
+    const hAttr = node.getAttribute('height');
+    const fullFrame =
+      (xAttr == null && yAttr == null) &&
+      (wAttr === '100%' || hAttr === '100%' || (wAttr == null && hAttr == null));
+    images.push({
+      href,
+      x: parseLength(xAttr, 0),
+      y: parseLength(yAttr, 0),
+      width: wAttr === '100%' ? width : parseLength(wAttr, width || 0),
+      height: hAttr === '100%' ? height : parseLength(hAttr, height || 0),
+      fullFrame
+    });
+    node.parentNode?.removeChild(node);
+  });
+
+  return {
+    viewBox: viewBox || (width > 0 && height > 0 ? `0 0 ${width} ${height}` : '0 0 1 1'),
+    width: width || 1,
+    height: height || 1,
+    images,
+    vectorMarkup: svg.innerHTML
+  };
+}
+
 interface SpaceViewProps {
   space: Space;
   project: Project | null;
@@ -191,7 +264,7 @@ export default function SpaceView({
   const [currentStroke, setCurrentStroke] = useState<{x: number, y: number}[]>([]);
   const [imageUrlInput, setImageUrlInput] = useState('');
   const [showImageDrawComposer, setShowImageDrawComposer] = useState(false);
-  const [inlineSvgMarkup, setInlineSvgMarkup] = useState<string | null>(null);
+  const [inlineSvgSnapshot, setInlineSvgSnapshot] = useState<InlineSvgSnapshot | null>(null);
 
   const [dragMode, setDragMode] = useState<DragMode>('none');
   const [enterCaretPoint, setEnterCaretPoint] = useState<{ x: number; y: number } | null>(null);
@@ -593,23 +666,21 @@ export default function SpaceView({
 
   useEffect(() => {
     if (!shouldMountContent || !isSvgAsset || !imageSrc) {
-      setInlineSvgMarkup(null);
+      setInlineSvgSnapshot(null);
       return;
     }
     let cancelled = false;
     fetch(imageSrc)
       .then((response) => (response.ok ? response.text() : Promise.reject(new Error(`svg ${response.status}`))))
       .then((markup) => {
-        if (cancelled || !markup.includes('<svg')) return;
-        // Force the root svg to fit the space box when inlined.
-        const fitted = markup.replace(
-          /<svg\b([^>]*)>/i,
-          '<svg$1 style="max-width:100%;max-height:100%;width:auto;height:auto;display:block">'
-        );
-        setInlineSvgMarkup(fitted);
+        if (cancelled) return;
+        // Paint nested photo data-URIs as HTML <img> layers. Browsers often
+        // suppress <image href="data:..."> inside SVG inserted via innerHTML,
+        // which made converted group photos show text-only.
+        setInlineSvgSnapshot(parseInlineSvgSnapshot(markup));
       })
       .catch(() => {
-        if (!cancelled) setInlineSvgMarkup(null);
+        if (!cancelled) setInlineSvgSnapshot(null);
       });
     return () => {
       cancelled = true;
@@ -712,22 +783,68 @@ export default function SpaceView({
       {(space.kind === 'ImageSpace' || space.kind === 'GroupPhotoSpace' || space.kind === 'PhotoSpace') && (
         <>
           {imageSrc && shouldMountContent ? (
-            inlineSvgMarkup ? (
+            inlineSvgSnapshot ? (
               <div
                 aria-label={asset?.filename || 'Group Photo'}
                 style={{
+                  position: 'relative',
                   maxWidth: '100%',
                   maxHeight: '100%',
                   width: '100%',
                   height: '100%',
-                  overflow: 'hidden',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center'
+                  overflow: 'hidden'
                 }}
-                // Server-built group snapshots; inline so nested PNG data URIs always paint.
-                dangerouslySetInnerHTML={{ __html: inlineSvgMarkup }}
-              />
+              >
+                <div
+                  style={{
+                    position: 'relative',
+                    width: '100%',
+                    height: '100%',
+                    // Preserve snapshot aspect while filling the space box.
+                    aspectRatio: `${Math.max(1, inlineSvgSnapshot.width)} / ${Math.max(1, inlineSvgSnapshot.height)}`
+                  }}
+                >
+                  {inlineSvgSnapshot.images.map((layer, index) => (
+                    <img
+                      key={`snap-img-${index}`}
+                      src={layer.href}
+                      alt=""
+                      draggable={false}
+                      style={
+                        layer.fullFrame
+                          ? {
+                              position: 'absolute',
+                              inset: 0,
+                              width: '100%',
+                              height: '100%',
+                              objectFit: 'fill',
+                              pointerEvents: 'none'
+                            }
+                          : {
+                              position: 'absolute',
+                              left: `${(layer.x / Math.max(1, inlineSvgSnapshot.width)) * 100}%`,
+                              top: `${(layer.y / Math.max(1, inlineSvgSnapshot.height)) * 100}%`,
+                              width: `${(layer.width / Math.max(1, inlineSvgSnapshot.width)) * 100}%`,
+                              height: `${(layer.height / Math.max(1, inlineSvgSnapshot.height)) * 100}%`,
+                              objectFit: 'contain',
+                              pointerEvents: 'none'
+                            }
+                      }
+                    />
+                  ))}
+                  {inlineSvgSnapshot.vectorMarkup ? (
+                    <svg
+                      xmlns="http://www.w3.org/2000/svg"
+                      viewBox={inlineSvgSnapshot.viewBox}
+                      width="100%"
+                      height="100%"
+                      style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}
+                      preserveAspectRatio="none"
+                      dangerouslySetInnerHTML={{ __html: inlineSvgSnapshot.vectorMarkup }}
+                    />
+                  ) : null}
+                </div>
+              </div>
             ) : (
             <img
               src={imageSrc}

@@ -1,4 +1,5 @@
 import base64
+import io
 import os
 import tempfile
 import unittest
@@ -346,6 +347,193 @@ class TestGroupSpaceConversion(unittest.TestCase):
             )
             loaded = _load_raster_for_asset(asset, assets_dir)
             self.assertIsNotNone(loaded)
+
+    def test_convert_embeds_child_image_in_svg_overlay(self):
+        from PIL import Image
+
+        from modules.group_space_conversion import _build_group_screenshot_image, _png_bytes_to_svg_markup
+
+        group_space = Space(
+            id="space_group_1",
+            kind="GroupSpace",
+            x=0.0,
+            y=0.0,
+            z=1.0,
+            width=240.0,
+            height=180.0,
+            parent_space_id=None,
+            child_space_ids=["space_img_1", "space_text_1"],
+            object_ids=[],
+            asset_ids=[],
+            scale_x=1.0,
+            scale_y=1.0,
+            reference_asset_id=None,
+            reference_mode="none",
+            transform_matrix=[1, 0, 0, 1, 0, 0],
+        )
+        image_space = Space(
+            id="space_img_1",
+            kind="ImageSpace",
+            x=16.0,
+            y=20.0,
+            z=1.0,
+            width=100.0,
+            height=70.0,
+            parent_space_id="space_group_1",
+            child_space_ids=[],
+            object_ids=[],
+            asset_ids=[],
+            scale_x=1.0,
+            scale_y=1.0,
+            reference_asset_id="asset_img_1",
+            reference_mode="image_asset",
+            transform_matrix=[1, 0, 0, 1, 0, 0],
+        )
+        text_space = Space(
+            id="space_text_1",
+            kind="TextSpace",
+            x=20.0,
+            y=110.0,
+            z=2.0,
+            width=140.0,
+            height=40.0,
+            parent_space_id="space_group_1",
+            child_space_ids=[],
+            object_ids=[],
+            asset_ids=[],
+            scale_x=1.0,
+            scale_y=1.0,
+            reference_asset_id="asset_md_1",
+            reference_mode="markdown_asset",
+            transform_matrix=[1, 0, 0, 1, 0, 0],
+            background_color="#ffffff",
+        )
+        image_asset = Asset(
+            id="asset_img_1",
+            kind="image",
+            path="asset_img_1.png",
+            filename="tile.png",
+            content=None,
+            mime_type="image/png",
+            metadata={},
+        )
+        markdown_asset = Asset(
+            id="asset_md_1",
+            kind="markdown",
+            path="",
+            filename="note.md",
+            content="caption",
+            mime_type="text/markdown",
+            metadata={},
+        )
+        project = Project(
+            id="proj_1",
+            name="Project 1",
+            root_space_id="space_group_1",
+            spaces={
+                "space_group_1": group_space,
+                "space_img_1": image_space,
+                "space_text_1": text_space,
+            },
+            objects={},
+            assets={"asset_img_1": image_asset, "asset_md_1": markdown_asset},
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assets_dir = os.path.join(tmpdir, "assets")
+            os.makedirs(assets_dir, exist_ok=True)
+            tile = Image.new("RGBA", (40, 30), (220, 30, 40, 255))
+            tile.save(os.path.join(assets_dir, "asset_img_1.png"), format="PNG")
+
+            png_bytes, overlay = _build_group_screenshot_image(
+                project=project,
+                group_space_id="space_group_1",
+                subtree_space_ids={"space_group_1", "space_img_1", "space_text_1"},
+                assets_dir=assets_dir,
+            )
+            svg = _png_bytes_to_svg_markup(png_bytes, extra_markup=overlay)
+            # Base frame image + positioned child photo image.
+            self.assertGreaterEqual(svg.count("<image "), 2)
+            self.assertIn("<rect ", svg)
+            self.assertIn("caption", svg)
+            with Image.open(io.BytesIO(png_bytes)) as rendered:
+                sample = rendered.convert("RGBA").getpixel((16 + 24 + 8, 20 + 24 + 8))
+                self.assertEqual(sample[:3], (220, 30, 40))
+
+    def test_convert_paints_text_space_background_color(self):
+        from PIL import Image
+
+        from modules.group_space_conversion import _build_group_screenshot_image
+
+        group_space = Space(
+            id="space_group_1",
+            kind="GroupSpace",
+            x=0.0,
+            y=0.0,
+            z=1.0,
+            width=200.0,
+            height=160.0,
+            parent_space_id=None,
+            child_space_ids=["space_text_1"],
+            object_ids=[],
+            asset_ids=[],
+            scale_x=1.0,
+            scale_y=1.0,
+            reference_asset_id=None,
+            reference_mode="none",
+            transform_matrix=[1, 0, 0, 1, 0, 0],
+        )
+        child_text_space = Space(
+            id="space_text_1",
+            kind="TextSpace",
+            x=20.0,
+            y=30.0,
+            z=2.0,
+            width=80.0,
+            height=50.0,
+            parent_space_id="space_group_1",
+            child_space_ids=[],
+            object_ids=[],
+            asset_ids=[],
+            scale_x=1.0,
+            scale_y=1.0,
+            reference_asset_id="asset_md_1",
+            reference_mode="markdown_asset",
+            transform_matrix=[1, 0, 0, 1, 0, 0],
+            background_color="#ff00aa",
+        )
+        markdown_asset = Asset(
+            id="asset_md_1",
+            kind="markdown",
+            path="",
+            filename="note.md",
+            content="bg box",
+            mime_type="text/markdown",
+            metadata={},
+        )
+        project = Project(
+            id="proj_1",
+            name="Project 1",
+            root_space_id="space_group_1",
+            spaces={
+                "space_group_1": group_space,
+                "space_text_1": child_text_space,
+            },
+            objects={},
+            assets={"asset_md_1": markdown_asset},
+        )
+
+        png_bytes, _text_svg = _build_group_screenshot_image(
+            project=project,
+            group_space_id="space_group_1",
+            subtree_space_ids={"space_group_1", "space_text_1"},
+        )
+        with Image.open(io.BytesIO(png_bytes)) as rendered:
+            rendered = rendered.convert("RGBA")
+            # Padding in screenshot builder is 24px; text box starts at (20,30).
+            sample = rendered.getpixel((20 + 24 + 10, 30 + 24 + 10))
+            self.assertEqual(sample[:3], (255, 0, 170))
+            self.assertGreaterEqual(sample[3], 250)
 
 
 if __name__ == "__main__":
