@@ -535,6 +535,109 @@ class TestGroupSpaceConversion(unittest.TestCase):
             self.assertEqual(sample[:3], (255, 0, 170))
             self.assertGreaterEqual(sample[3], 250)
 
+    def test_convert_keeps_remote_image_href_when_fetch_fails(self):
+        from unittest.mock import patch
+
+        from modules.group_space_conversion import _build_group_screenshot_image, _png_bytes_to_svg_markup
+
+        remote_url = "https://example.test/hepatocyte.png"
+        group_space = Space(
+            id="space_group_1",
+            kind="GroupSpace",
+            x=0.0,
+            y=0.0,
+            z=1.0,
+            width=420.0,
+            height=297.0,
+            parent_space_id=None,
+            child_space_ids=["space_img_1", "space_text_1"],
+            object_ids=[],
+            asset_ids=[],
+            scale_x=1.0,
+            scale_y=1.0,
+            reference_asset_id=None,
+            reference_mode="none",
+            transform_matrix=[1, 0, 0, 1, 0, 0],
+        )
+        image_space = Space(
+            id="space_img_1",
+            kind="ImageSpace",
+            x=0.0,
+            y=0.0,
+            z=0.0,
+            width=420.0,
+            height=280.0,
+            parent_space_id="space_group_1",
+            child_space_ids=[],
+            object_ids=[],
+            asset_ids=[],
+            scale_x=1.0,
+            scale_y=1.0,
+            reference_asset_id="asset_img_1",
+            reference_mode="image_asset",
+            transform_matrix=[1, 0, 0, 1, 0, 0],
+        )
+        text_space = Space(
+            id="space_text_1",
+            kind="TextSpace",
+            x=0.0,
+            y=219.0,
+            z=1.0,
+            width=360.0,
+            height=61.0,
+            parent_space_id="space_group_1",
+            child_space_ids=[],
+            object_ids=[],
+            asset_ids=[],
+            scale_x=1.0,
+            scale_y=1.0,
+            reference_asset_id="asset_md_1",
+            reference_mode="markdown_asset",
+            transform_matrix=[1, 0, 0, 1, 0, 0],
+            background_color="#ffffff",
+        )
+        image_asset = Asset(
+            id="asset_img_1",
+            kind="image",
+            path=remote_url,
+            filename="hepatocyte.png",
+            content=None,
+            mime_type="image/png",
+            metadata={},
+        )
+        markdown_asset = Asset(
+            id="asset_md_1",
+            kind="markdown",
+            path="",
+            filename="note.md",
+            content="caption",
+            mime_type="text/markdown",
+            metadata={},
+        )
+        project = Project(
+            id="proj_1",
+            name="Project 1",
+            root_space_id="space_group_1",
+            spaces={
+                "space_group_1": group_space,
+                "space_img_1": image_space,
+                "space_text_1": text_space,
+            },
+            objects={},
+            assets={"asset_img_1": image_asset, "asset_md_1": markdown_asset},
+        )
+
+        with patch("modules.group_space_conversion._fetch_http_image", return_value=None):
+            png_bytes, overlay = _build_group_screenshot_image(
+                project=project,
+                group_space_id="space_group_1",
+                subtree_space_ids={"space_group_1", "space_img_1", "space_text_1"},
+            )
+        svg = _png_bytes_to_svg_markup(png_bytes, extra_markup=overlay)
+        self.assertIn(remote_url, overlay)
+        self.assertIn("<image ", overlay)
+        self.assertIn("caption", svg)
+
 
 if __name__ == "__main__":
     unittest.main()

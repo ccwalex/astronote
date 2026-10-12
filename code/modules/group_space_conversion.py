@@ -356,8 +356,12 @@ def _fetch_http_image(url: str) -> Optional[Image.Image]:
         request = Request(
             url,
             headers={
-                "User-Agent": "Mozilla/5.0 (compatible; AstronoteGroupSnapshot/1.0)",
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                ),
                 "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                "Referer": url,
             },
         )
         with urlopen(request, timeout=15) as resp:
@@ -436,14 +440,45 @@ def _svg_rect_element(x: float, y: float, width: float, height: float, fill_css:
     )
 
 
-def _svg_image_element(x: float, y: float, width: float, height: float, png_bytes: bytes) -> str:
-    data_href = f"data:image/png;base64,{base64.b64encode(png_bytes).decode('ascii')}"
-    href = _svg_escape_attr(data_href)
+def _svg_href_image_element(x: float, y: float, width: float, height: float, href: str) -> str:
+    escaped = _svg_escape_attr(href)
     return (
         f"<image x='{_fmt_svg_num(x)}' y='{_fmt_svg_num(y)}' "
         f"width='{_fmt_svg_num(max(1.0, width))}' height='{_fmt_svg_num(max(1.0, height))}' "
-        f"href='{href}' xlink:href='{href}' preserveAspectRatio='xMidYMid meet' />"
+        f"href='{escaped}' xlink:href='{escaped}' preserveAspectRatio='xMidYMid meet' />"
     )
+
+
+def _svg_image_element(x: float, y: float, width: float, height: float, png_bytes: bytes) -> str:
+    data_href = f"data:image/png;base64,{base64.b64encode(png_bytes).decode('ascii')}"
+    return _svg_href_image_element(x, y, width, height, data_href)
+
+
+def _asset_image_href(asset) -> Optional[str]:
+    """Display URL the browser can paint if raster compositing fails."""
+    if asset is None:
+        return None
+    for value in (
+        getattr(asset, "content", None),
+        getattr(asset, "path", None),
+        getattr(asset, "url", None),
+    ):
+        if not isinstance(value, str):
+            continue
+        text = value.strip()
+        if (
+            text.startswith("data:image")
+            or text.startswith("http://")
+            or text.startswith("https://")
+            or text.startswith("blob:")
+        ):
+            return text
+        if text.startswith("/api/assets/"):
+            return text
+    asset_id = str(getattr(asset, "id", "") or "").strip()
+    if asset_id:
+        return f"/api/assets/{asset_id}"
+    return None
 
 
 def _fmt_svg_num(value: float) -> str:
@@ -1311,25 +1346,35 @@ def _build_group_screenshot_image(
             draw.rectangle((x0, y0, x1, y1), fill=bg)
             svg_overlay_parts.append(_svg_rect_element(rx0, ry0, rw, rh, _rgba_to_css(bg)))
 
-        if kind in {"ImageSpace", "PhotoSpace", "GroupPhotoSpace"} and asset:
-            try:
-                p_img = _load_raster_for_asset(asset, assets_dir, workspace_path=workspace_path)
-                if p_img:
-                    tw = int(max(1, rw))
-                    th = int(max(1, rh))
-                    fitted = _fit_raster_to_box(p_img, tw, th)
-                    img = _paste_raster(img, fitted, int(rx0), int(ry0))
-                    draw = ImageDraw.Draw(img, "RGBA")
-                    # Also embed the child photo as a positioned SVG <image> so
-                    # the frontend can paint it as a real HTML <img> even when
-                    # nested SVG <image href=data:...> is suppressed.
-                    child_buf = io.BytesIO()
-                    fitted.save(child_buf, format="PNG")
-                    svg_overlay_parts.append(
-                        _svg_image_element(rx0, ry0, float(fitted.size[0]), float(fitted.size[1]), child_buf.getvalue())
-                    )
-            except Exception as e:
-                print(f"Failed to composite image: {e}")
+        if kind in {"ImageSpace", "PhotoSpace", "GroupPhotoSpace"}:
+            placed = False
+            if asset:
+                try:
+                    p_img = _load_raster_for_asset(asset, assets_dir, workspace_path=workspace_path)
+                    if p_img:
+                        tw = int(max(1, rw))
+                        th = int(max(1, rh))
+                        fitted = _fit_raster_to_box(p_img, tw, th)
+                        img = _paste_raster(img, fitted, int(rx0), int(ry0))
+                        draw = ImageDraw.Draw(img, "RGBA")
+                        # Also embed the child photo as a positioned SVG <image> so
+                        # the frontend can paint it as a real HTML <img> even when
+                        # nested SVG <image href=data:...> is suppressed.
+                        child_buf = io.BytesIO()
+                        fitted.save(child_buf, format="PNG")
+                        svg_overlay_parts.append(
+                            _svg_image_element(rx0, ry0, float(fitted.size[0]), float(fitted.size[1]), child_buf.getvalue())
+                        )
+                        placed = True
+                except Exception as e:
+                    print(f"Failed to composite image: {e}")
+            if not placed:
+                # Remote/hotlinked photos often fail server-side fetch (403 HTML)
+                # while the original ImageSpace still paints via <img src=url>.
+                # Keep that URL in the snapshot so the frontend can do the same.
+                href = _asset_image_href(asset)
+                if href:
+                    svg_overlay_parts.append(_svg_href_image_element(rx0, ry0, rw, rh, href))
 
         if kind == "TextSpace":
             raw = _raw_text_from_space(space, asset)

@@ -53,7 +53,13 @@ function parseInlineSvgSnapshot(markup: string): InlineSvgSnapshot | null {
       node.getAttribute('xlink:href') ||
       node.getAttributeNS('http://www.w3.org/1999/xlink', 'href') ||
       '';
-    if (!href || !/^data:image\//i.test(href)) return;
+    if (!href) return;
+    const canPaintAsHtmlImg =
+      /^data:image\//i.test(href) ||
+      /^https?:\/\//i.test(href) ||
+      /^blob:/i.test(href) ||
+      /^\/api\/assets\//i.test(href);
+    if (!canPaintAsHtmlImg) return;
     const xAttr = node.getAttribute('x');
     const yAttr = node.getAttribute('y');
     const wAttr = node.getAttribute('width');
