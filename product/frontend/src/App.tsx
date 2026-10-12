@@ -2458,7 +2458,7 @@ export default function App() {
       lowerFilename.endsWith('.gif') ? 'image/gif' :
       lowerFilename.endsWith('.webp') ? 'image/webp' :
       lowerFilename.endsWith('.svg') ? 'image/svg+xml' :
-      'image/*';
+      '';
 
     setWorkspaceState(prev =>
       uploadImageToSpace(prev, selectedProjectId, spaceId, filename, trimmedUrl, mimeType)

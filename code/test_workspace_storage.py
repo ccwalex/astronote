@@ -4,7 +4,9 @@ import tempfile
 
 from modules.workspace import Workspace
 from modules.load_workspace import load_workspace
-from modules.save_workspace import save_workspace
+from modules.asset import Asset
+from modules.asset_resolve import resolve_asset_file
+from modules.save_workspace import assets_dir_from_workspace_path, save_workspace
 from modules.workspace_sqlite import sqlite_path_from_workspace_path
 
 
@@ -121,6 +123,35 @@ def test_bootstrap_migrates_legacy_json_store():
         assert os.path.isfile(sqlite_path_from_workspace_path(temp_path))
         loaded = load_workspace(temp_path)
         assert loaded.name == "Migrated"
+
+
+def test_remote_url_image_asset_survives_save_load_without_spill():
+    """Pasted-URL images store https path on the asset; save must not rewrite or spill."""
+    ws = _create_workspace()
+    proj_id = f"{ws.id}_default_proj"
+    project = ws.projects[proj_id]
+    remote_path = "https://example.com/x.png"
+    asset_id = "asset_remote_url"
+    project.assets[asset_id] = Asset(
+        id=asset_id,
+        kind="image",
+        path=remote_path,
+        filename="x.png",
+        content=None,
+        mime_type="image/png",
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        temp_path = os.path.join(tmp, "workspace.json")
+        assets_dir = assets_dir_from_workspace_path(temp_path)
+        assert assets_dir is not None
+        save_workspace(ws, temp_path)
+        loaded = load_workspace(temp_path)
+        loaded_asset = loaded.projects[proj_id].assets[asset_id]
+        assert loaded_asset.path == remote_path
+        assert loaded_asset.content is None
+        spilled = os.path.join(assets_dir, f"{asset_id}.png")
+        assert not os.path.isfile(spilled)
+        assert resolve_asset_file(asset_id, assets_dir, workspace_path=temp_path) is None
 
 
 def test_stale_json_is_not_read_when_sqlite_exists():

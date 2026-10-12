@@ -13,6 +13,7 @@
     "test:page-presence": "node --experimental-strip-types src/model/pagePresence.test.ts",
     "test:revision-poll": "node --experimental-strip-types src/model/revisionPoll.test.ts",
     "test:stale-save-recovery": "node --experimental-strip-types src/model/staleSaveRecovery.test.ts",
+    "test:asset-source": "node --experimental-strip-types src/model/assetSource.test.ts",
     "preview": "vite preview"
   },
   "dependencies": {

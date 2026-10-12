@@ -1,6 +1,6 @@
 import { Workspace, Project, Space, LibraryNode, CanvasObject } from '../types';
 import { createDefaultProject } from './projectFactory';
-import { createMarkdownAsset, createImageAsset, createPDFAsset } from './assetFactory';
+import { createMarkdownAsset, createImageAsset, createRemoteImageAsset, createPDFAsset } from './assetFactory';
 import { createStrokeObject } from './canvasObjectFactory';
 import { createAssetId } from './idFactory';
 
@@ -599,7 +599,10 @@ export const uploadImageToSpace = (workspace: Workspace, projectId: string, spac
   if (!space) return workspace;
 
   const newAssetId = assetId || createAssetId();
-  const createdImage = createImageAsset(newAssetId, filename, dataUrl, mimeType);
+  const isRemoteUrlInsert = !assetId && /^https?:\/\//i.test(dataUrl.trim());
+  const createdImage = isRemoteUrlInsert
+    ? createRemoteImageAsset(newAssetId, filename, dataUrl.trim(), mimeType)
+    : createImageAsset(newAssetId, filename, dataUrl, mimeType);
   const newAsset = {
     ...createdImage,
     content: null

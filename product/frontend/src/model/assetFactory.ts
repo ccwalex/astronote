@@ -42,6 +42,19 @@ export function createImageAsset(assetId: string, filename: string, _content: st
   };
 }
 
+/** Image referenced by remote URL (not uploaded to /api/assets). */
+export function createRemoteImageAsset(assetId: string, filename: string, url: string, mimeType: string): Asset {
+  return {
+    id: assetId,
+    kind: 'image',
+    path: url,
+    filename,
+    content: null,
+    mime_type: mimeType,
+    metadata: {}
+  };
+}
+
 export function createPDFAsset(assetId: string, filename: string, _content: string, mimeType: string): Asset {
   const ext = extFromFilename(filename || 'document.pdf', mimeType || 'application/pdf', '.pdf');
   return {
