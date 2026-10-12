@@ -234,6 +234,74 @@ def test_partial_save_only_bumps_touched_project():
         _teardown(tmp, old_path, old_assets)
 
 
+def test_stale_global_revision_allowed_when_library_unchanged_and_per_project_fresh():
+    """A stale global base_revision must not reject when the library tree matches
+    disk and the touched page's per-project base is current."""
+    ws, proj_id, extra_id = _two_page_workspace_with_text()
+    tmp, old_path, old_assets = _temp_store(ws)
+    try:
+        client = _test_client()
+        seeded = client.post("/api/workspace", json=ws.to_dict())
+        assert seeded.status_code == 200, seeded.text
+        revs = seeded.json()["project_revisions"]
+        global_rev = seeded.json()["workspace_revision"]
+
+        sibling_payload = _partial_save_payload(ws, [extra_id])
+        sibling_payload["projects"][extra_id]["name"] = "Sibling edit"
+        sibling = client.post("/api/workspace", json=sibling_payload)
+        assert sibling.status_code == 200, sibling.text
+        assert sibling.json()["workspace_revision"] > global_rev
+
+        tab_a_payload = _partial_save_payload(ws, [proj_id])
+        tab_a_payload["projects"][proj_id]["name"] = "Tab A edit"
+        tab_a_payload["base_revision"] = global_rev
+        tab_a_payload["base_revisions"] = {proj_id: revs[proj_id]}
+        tab_a = client.post("/api/workspace", json=tab_a_payload)
+        assert tab_a.status_code == 200, tab_a.text
+    finally:
+        _teardown(tmp, old_path, old_assets)
+
+
+def test_stale_global_revision_rejected_when_library_changed():
+    """When the library tree diverges, a stale global base_revision is still rejected."""
+    ws, proj_id, extra_id = _two_page_workspace_with_text()
+    tmp, old_path, old_assets = _temp_store(ws)
+    try:
+        client = _test_client()
+        seeded = client.post("/api/workspace", json=ws.to_dict())
+        assert seeded.status_code == 200, seeded.text
+        revs = seeded.json()["project_revisions"]
+        global_rev = seeded.json()["workspace_revision"]
+
+        advanced = ws.to_dict()
+        root_id = f"{ws.id}_root"
+        new_page_id = f"{ws.id}_new_page"
+        filler = Project.create_default("proj_new", "New Page")
+        _add_text_space(filler)
+        advanced["projects"][filler.id] = filler.to_dict()
+        advanced["library_nodes"][new_page_id] = LibraryNode(
+            id=new_page_id,
+            kind="page",
+            name="New",
+            parent_id=root_id,
+            child_ids=[],
+            target_project_id=filler.id,
+        ).to_dict()
+        advanced["library_nodes"][root_id]["child_ids"].append(new_page_id)
+        server = client.post("/api/workspace", json=advanced)
+        assert server.status_code == 200, server.text
+        assert server.json()["workspace_revision"] > global_rev
+
+        stale_payload = _partial_save_payload(ws, [proj_id])
+        stale_payload["projects"][proj_id]["name"] = "Stale nav shell"
+        stale_payload["base_revision"] = global_rev
+        stale_payload["base_revisions"] = {proj_id: revs[proj_id]}
+        stale = client.post("/api/workspace", json=stale_payload)
+        assert stale.status_code == 409, stale.text
+    finally:
+        _teardown(tmp, old_path, old_assets)
+
+
 def test_sibling_page_save_does_not_stale_unrelated_base_revision():
     """Saving only page B must not bump page A's revision (different-tab case)."""
     ws, proj_id, extra_id = _two_page_workspace_with_text()
@@ -379,6 +447,8 @@ def main():
         test_save_response_and_revision_endpoint_carry_project_revisions,
         test_per_project_base_revisions_allow_editing_unrelated_page,
         test_partial_save_only_bumps_touched_project,
+        test_stale_global_revision_allowed_when_library_unchanged_and_per_project_fresh,
+        test_stale_global_revision_rejected_when_library_changed,
         test_sibling_page_save_does_not_stale_unrelated_base_revision,
         test_mass_space_drop_save_rejected_even_with_current_revision,
         test_dropped_assets_are_quarantined_not_deleted_and_restorable,

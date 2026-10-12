@@ -96,6 +96,8 @@ function test_recovery_decision_single_retry(): void {
   assert(decideStaleSaveRecovery(false).action === 'recover', 'first 409 must recover');
   assert(decideStaleSaveRecovery(true).action === 'surface-error',
     'second 409 must surface the error instead of looping');
+  assert(decideStaleSaveRecovery(true, true).action === 'join',
+    'in-flight recovery must coalesce concurrent 409s');
 }
 
 function main(): void {

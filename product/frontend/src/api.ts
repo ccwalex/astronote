@@ -2,6 +2,7 @@
 export type PageLoadResponse = {
   nav: WorkspaceNavResponse;
   workspace_revision: number | null;
+  project_revisions?: ProjectRevisions | null;
   project: (Project & WorkspaceRevisionFields) | null;
   resolved_project_id: string | null;
   resolved_library_node_id: string | null;
@@ -62,6 +63,7 @@ export async function fetchPageLoad(options?: {
   return {
     nav: nav as WorkspaceNavResponse,
     workspace_revision: (data as PageLoadResponse).workspace_revision ?? revision ?? null,
+    project_revisions: extractProjectRevisions(data),
     project: (project && typeof project === 'object' && !Array.isArray(project) ? project : null) as (Project & WorkspaceRevisionFields) | null,
     resolved_project_id: typeof (data as PageLoadResponse).resolved_project_id === 'string' ? (data as PageLoadResponse).resolved_project_id : null,
     resolved_library_node_id: typeof (data as PageLoadResponse).resolved_library_node_id === 'string' ? (data as PageLoadResponse).resolved_library_node_id : null,

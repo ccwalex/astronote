@@ -1,0 +1,139 @@
+{
+  "id": "ws_1",
+  "name": "Default Workspace",
+  "library_nodes": {
+    "ws_1_root": {
+      "id": "ws_1_root",
+      "kind": "folder",
+      "name": "Root",
+      "parent_id": null,
+      "child_ids": [
+        "ws_1_default_page"
+      ],
+      "target_project_id": null
+    },
+    "ws_1_default_page": {
+      "id": "ws_1_default_page",
+      "kind": "page",
+      "name": "Default Page",
+      "parent_id": "ws_1_root",
+      "child_ids": [],
+      "target_project_id": "ws_1_default_proj"
+    }
+  },
+  "projects": {
+    "ws_1_default_proj": {
+      "id": "ws_1_default_proj",
+      "name": "Default Project",
+      "root_space_id": "ws_1_default_proj_root",
+      "spaces": {
+        "ws_1_default_proj_root": {
+          "id": "ws_1_default_proj_root",
+          "kind": "RootSpace",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0,
+          "width": 1920.0,
+          "height": 1080.0,
+          "parent_space_id": null,
+          "child_space_ids": [
+            "ws_1_default_proj_bg",
+            "ws_1_default_proj_container",
+            "ws_1_default_proj_annotation"
+          ],
+          "object_ids": [],
+          "asset_ids": [],
+          "scale_x": 1.0,
+          "scale_y": 1.0,
+          "reference_asset_id": null,
+          "reference_mode": "top_left_box",
+          "transform_matrix": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ]
+        },
+        "ws_1_default_proj_bg": {
+          "id": "ws_1_default_proj_bg",
+          "kind": "BackgroundSpace",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0,
+          "width": 1920.0,
+          "height": 1080.0,
+          "parent_space_id": "ws_1_default_proj_root",
+          "child_space_ids": [],
+          "object_ids": [],
+          "asset_ids": [],
+          "scale_x": 1.0,
+          "scale_y": 1.0,
+          "reference_asset_id": null,
+          "reference_mode": "top_left_box",
+          "transform_matrix": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ]
+        },
+        "ws_1_default_proj_container": {
+          "id": "ws_1_default_proj_container",
+          "kind": "ObjectContainerSpace",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 1.0,
+          "width": 1920.0,
+          "height": 1080.0,
+          "parent_space_id": "ws_1_default_proj_root",
+          "child_space_ids": [],
+          "object_ids": [],
+          "asset_ids": [],
+          "scale_x": 1.0,
+          "scale_y": 1.0,
+          "reference_asset_id": null,
+          "reference_mode": "top_left_box",
+          "transform_matrix": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ]
+        },
+        "ws_1_default_proj_annotation": {
+          "id": "ws_1_default_proj_annotation",
+          "kind": "FreeAnnotationSpace",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 2.0,
+          "width": 1920.0,
+          "height": 1080.0,
+          "parent_space_id": "ws_1_default_proj_root",
+          "child_space_ids": [],
+          "object_ids": [],
+          "asset_ids": [],
+          "scale_x": 1.0,
+          "scale_y": 1.0,
+          "reference_asset_id": null,
+          "reference_mode": "top_left_box",
+          "transform_matrix": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ]
+        }
+      },
+      "objects": {},
+      "assets": {}
+    }
+  }
+}

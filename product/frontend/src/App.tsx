@@ -68,7 +68,8 @@ import {
 } from './model/workspaceCache';
 import { readLastView, validateLastView, writeLastView } from './model/lastViewCache';
 import { consumePendingSpaceSelection, resolveSpaceSelection } from './model/deferredSpaceSelection';
-import { collectDirtyMarkdownAssets, isProjectHydrated, loadProjectIntoWorkspace, markMarkdownAssetsPersisted, noteHydratedMarkdownAssets, parseWorkspaceJson, prepareWorkspaceForSave, shouldPersistWorkspace, type DirtyMarkdownAsset } from './model/workspaceLoad';
+import { collectDirtyMarkdownAssets, isProjectHydrated, loadProjectIntoWorkspace, markMarkdownAssetsPersisted, noteHydratedMarkdownAssets, parseWorkspaceJson, shouldPersistWorkspace, type DirtyMarkdownAsset } from './model/workspaceLoad';
+import { computeSaveProjectIds, preparePartialWorkspaceForSave } from './model/workspaceSave';
 import { bootstrapWorkspaceLoad, type BootstrapWorkspaceResult } from './model/bootstrapWorkspace';
 import {
   refreshWorkspaceFromServer,
@@ -184,6 +185,7 @@ export default function App() {
   const presentRef = useRef<Workspace | null>(null);
   const persistTimerRef = useRef<number | null>(null);
   const persistAbortRef = useRef<AbortController | null>(null);
+  const persistQueuedRef = useRef(false);
   const persistDeferredRef = useRef(false);
   const textCoalesceRef = useRef<{ spaceId: string | null; generation: number; lastText: string }>({
     spaceId: null,
@@ -210,6 +212,7 @@ export default function App() {
   // Guards the 409 stale-save recovery: exactly one automatic refresh-and-retry
   // per save attempt; a second rejection surfaces the error instead of looping.
   const staleSaveRecoveryRef = useRef(false);
+  const staleSaveRecoveryInFlightRef = useRef(false);
   const hasUnsavedLocalRef = useRef(false);
   const workspaceDirtyGateRef = useRef(createWorkspaceDirtyGate());
   // Version counter so effects can re-run on gate-only changes (the gate lives
@@ -284,6 +287,9 @@ export default function App() {
       setNavError(result.navError);
       setProjectBodyError(result.projectBodyError);
       serverRevisionRef.current = result.serverRevision;
+      if (result.projectRevisions) {
+        mergeServerProjectRevisions({ project_revisions: result.projectRevisions });
+      }
 
       // Drop prefetch if bootstrap already hydrated the target page.
       const prefetch = lastViewPrefetchRef.current;
@@ -632,6 +638,9 @@ export default function App() {
       present = { ...present, library_nodes: nodes, projects };
     }
     serverRevisionRef.current = result.serverRevision;
+    if (result.projectRevisions) {
+      mergeServerProjectRevisions({ project_revisions: result.projectRevisions });
+    }
     hasUnsavedLocalRef.current = false;
     skipBackendPersistRef.current = true;
     postHydrateQuietUntilRef.current = Date.now() + 2000;
@@ -710,8 +719,53 @@ export default function App() {
     }, 50);
   };
 
+  const overlayRefreshAndReflush = async () => {
+    const current = presentRef.current;
+    if (
+      current &&
+      shouldPersistWorkspace(current) &&
+      isWorkspaceDirty(workspaceDirtyGateRef.current)
+    ) {
+      writeWorkspaceDirtyToPendingPersist(current, collectDirtyMarkdownAssets(current), {
+        includeAllHydrated: true,
+      });
+    }
+    const result = await refreshWorkspaceFromServer(selectedProjectIdRef.current, {
+      forceProjectRefresh: true,
+    });
+    applyServerRefresh(result);
+    const presentAfterRefresh = presentRef.current;
+    if (pendingLibraryDeletionsRef.current.nodeIds.size > 0) {
+      if (presentAfterRefresh && shouldPersistWorkspace(presentAfterRefresh)) {
+        const overlaid = applyPendingMarkdownToWorkspace(
+          overlayPendingOntoWorkspace(presentAfterRefresh, undefined, {
+            excludeNodeIds: pendingLibraryDeletionsRef.current.nodeIds,
+            excludeProjectIds: pendingLibraryDeletionsRef.current.projectIds,
+          })
+        );
+        if (overlaid !== presentAfterRefresh) {
+          skipBackendPersistRef.current = true;
+          presentRef.current = overlaid;
+          setHistoryState(presentOnlyHistory(overlaid));
+        }
+      }
+      flushPersist(presentRef.current, pendingCoalesceKeyRef.current);
+    } else {
+      flushPendingPersistInBackground();
+    }
+    if (listPendingProjectIds().length === 0) {
+      staleSaveRecoveryRef.current = false;
+    }
+  };
+
   const recoverFromStaleSave = (err: StaleWorkspaceSaveError) => {
-    const decision = decideStaleSaveRecovery(staleSaveRecoveryRef.current);
+    const decision = decideStaleSaveRecovery(
+      staleSaveRecoveryRef.current,
+      staleSaveRecoveryInFlightRef.current
+    );
+    if (decision.action === 'join') {
+      return;
+    }
     if (decision.action === 'surface-error') {
       // The refreshed re-save was also rejected as stale: stop auto-retrying
       // and surface the failure so the user can reload manually.
@@ -734,54 +788,10 @@ export default function App() {
       mergeServerProjectRevisions(err.projectRevisions);
     }
     setPersistStatus('saving');
+    staleSaveRecoveryInFlightRef.current = true;
     void (async () => {
       try {
-        // Snapshot the current local state into the undroppable pending cache
-        // before adopting the server workspace, so no edit is lost in the swap.
-        // includeAllHydrated: layout-only mutations (created pages, moves,
-        // renames) have no dirty markdown but must survive the swap too.
-        const current = presentRef.current;
-        if (
-          current &&
-          shouldPersistWorkspace(current) &&
-          isWorkspaceDirty(workspaceDirtyGateRef.current)
-        ) {
-          writeWorkspaceDirtyToPendingPersist(current, collectDirtyMarkdownAssets(current), {
-            includeAllHydrated: true,
-          });
-        }
-        const result = await refreshWorkspaceFromServer(selectedProjectIdRef.current, {
-          forceProjectRefresh: true,
-        });
-        applyServerRefresh(result);
-        const presentAfterRefresh = presentRef.current;
-        if (pendingLibraryDeletionsRef.current.nodeIds.size > 0) {
-          // flushPendingPersistInBackground early-returns when the deletions
-          // left no hydrated project (e.g. deleting the last page); the
-          // pruned library tree still needs to reach the server. Overlay any
-          // un-ACKed bodies/creations first so this flush carries them too.
-          if (presentAfterRefresh && shouldPersistWorkspace(presentAfterRefresh)) {
-            const overlaid = applyPendingMarkdownToWorkspace(
-              overlayPendingOntoWorkspace(presentAfterRefresh, undefined, {
-                // Never resurrect a page the user deleted but has not ACKed.
-                excludeNodeIds: pendingLibraryDeletionsRef.current.nodeIds,
-                excludeProjectIds: pendingLibraryDeletionsRef.current.projectIds,
-              })
-            );
-            if (overlaid !== presentAfterRefresh) {
-              skipBackendPersistRef.current = true;
-              presentRef.current = overlaid;
-              setHistoryState(presentOnlyHistory(overlaid));
-            }
-          }
-          flushPersist(presentRef.current, pendingCoalesceKeyRef.current);
-        } else {
-          flushPendingPersistInBackground();
-        }
-        if (listPendingProjectIds().length === 0) {
-          // Nothing pending to re-apply: the refreshed server view stands.
-          staleSaveRecoveryRef.current = false;
-        }
+        await overlayRefreshAndReflush();
       } catch (refreshErr) {
         staleSaveRecoveryRef.current = false;
         const message =
@@ -794,6 +804,8 @@ export default function App() {
         clearPersistTimer();
         const dirtyAfterError = isWorkspaceDirty(workspaceDirtyGateRef.current);
         setPersistStatus(dirtyAfterError ? 'unsaved' : 'idle');
+      } finally {
+        staleSaveRecoveryInFlightRef.current = false;
       }
     })();
   };
@@ -807,7 +819,13 @@ export default function App() {
     // Library-only mutations (page create/rename/delete) are valid saves even
     // when no hydrated project body remains — e.g. deleting the last page,
     // which leaves only library_nodes to persist.
-    if (!shouldPersistWorkspace(workspace) && !isWorkspaceDirty(workspaceDirtyGateRef.current)) return;
+    if (
+      !shouldPersistWorkspace(workspace) &&
+      !isWorkspaceDirty(workspaceDirtyGateRef.current) &&
+      pendingLibraryDeletionsRef.current.nodeIds.size === 0
+    ) {
+      return;
+    }
     if (persistBlockedRef.current || pageWriteProtectedRef.current) {
       // Persist is blocked (e.g. stale workspace rejected): skip the network but
       // still snapshot dirty state so edits made while the warning is up survive.
@@ -820,6 +838,13 @@ export default function App() {
     }
     clearPersistTimer();
     if (coalesceKey) pendingCoalesceKeyRef.current = coalesceKey;
+    if (persistInFlightRef.current > 0 && !options?.keepalive) {
+      persistQueuedRef.current = true;
+      writeWorkspaceDirtyToPendingPersist(workspace, collectDirtyMarkdownForPersist(workspace), {
+        includeAllHydrated: true,
+      });
+      return;
+    }
     if (persistAbortRef.current) {
       persistAbortRef.current.abort();
     }
@@ -829,7 +854,12 @@ export default function App() {
     const dirty = collectDirtyMarkdownForPersist(workspace);
     // Undroppable: sync pending before network so abort/tab-close cannot drop payload.
     writeWorkspaceDirtyToPendingPersist(workspace, dirty, { includeAllHydrated: true });
-    const ackProjectIds = Object.keys(prepareWorkspaceForSave(workspace).projects || {});
+    const gateDirty = isWorkspaceDirty(workspaceDirtyGateRef.current);
+    const ackProjectIds = computeSaveProjectIds(workspace, dirty, {
+      gateDirty,
+      selectedProjectId: selectedProjectIdRef.current,
+    });
+    const prepared = preparePartialWorkspaceForSave(workspace, ackProjectIds);
     persistInFlightRef.current += 1;
     setPersistStatus('saving');
     const run = async () => {
@@ -843,7 +873,7 @@ export default function App() {
       const clearedProjectIds = [
         ...pendingLibraryDeletionsRef.current.projectIds,
       ];
-      return saveWorkspace(prepareWorkspaceForSave(workspace), {
+      return saveWorkspace(prepared, {
         coalesce_key: coalesceKey || pendingCoalesceKeyRef.current || undefined,
         baseRevision: serverRevisionRef.current,
         baseRevisions: pickBaseRevisionsForProjects(
@@ -924,6 +954,21 @@ export default function App() {
       })
       .finally(() => {
         persistInFlightRef.current = Math.max(0, persistInFlightRef.current - 1);
+        if (persistQueuedRef.current) {
+          persistQueuedRef.current = false;
+          const latest = presentRef.current;
+          if (
+            latest &&
+            !persistBlockedRef.current &&
+            !pageWriteProtectedRef.current &&
+            !suppressPersistRef.current &&
+            (shouldPersistWorkspace(latest) ||
+              isWorkspaceDirty(workspaceDirtyGateRef.current) ||
+              pendingLibraryDeletionsRef.current.nodeIds.size > 0)
+          ) {
+            flushPersist(latest, pendingCoalesceKeyRef.current);
+          }
+        }
       });
   };
 
@@ -1236,9 +1281,18 @@ export default function App() {
           return;
         }
         if (decision.action === 'notice') {
-          // Save already failed / page locked — reload would discard local edits.
-          if (!persistBlockedRef.current && !pageWriteProtectedRef.current) {
+          if (persistBlockedRef.current || pageWriteProtectedRef.current) {
+            return;
+          }
+          serverRefreshInFlightRef.current = true;
+          setServerAheadNotice(null);
+          try {
+            await overlayRefreshAndReflush();
+          } catch (err) {
+            console.warn('Soft sync after revision poll failed', err);
             setServerAheadNotice(decision.message);
+          } finally {
+            serverRefreshInFlightRef.current = false;
           }
           return;
         }
@@ -1429,11 +1483,16 @@ export default function App() {
         writeWorkspaceDirtyToPendingPersist(workspace, dirty, { includeAllHydrated: true });
       }
       try {
-        const prepared = prepareWorkspaceForSave(workspace);
+        const dirtyUnload = collectDirtyMarkdownForPersist(workspace);
+        const gateDirtyUnload = isWorkspaceDirty(workspaceDirtyGateRef.current);
+        const ackIds = computeSaveProjectIds(workspace, dirtyUnload, {
+          gateDirty: gateDirtyUnload,
+          selectedProjectId: selectedProjectIdRef.current,
+        });
+        const prepared = preparePartialWorkspaceForSave(workspace, ackIds);
         const body = JSON.stringify(prepared);
         // ~60k sendBeacon / keepalive budget; pending localStorage already written above.
         if (body.length < 60000) {
-          const ackIds = Object.keys(prepared.projects || {});
           void saveWorkspace(prepared, {
             keepalive: true,
             baseRevision: serverRevisionRef.current,

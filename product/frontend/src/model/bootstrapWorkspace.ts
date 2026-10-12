@@ -6,6 +6,7 @@ import { normalizeWorkspace } from './normalizeWorkspace';
 import {
   clearWorkspaceCache,
   compareRevisions,
+  extractProjectRevisions,
   extractWorkspaceRevision,
   mergeCachedProjectsIntoNav,
   readWorkspaceCache,
@@ -28,6 +29,7 @@ import {
 export type BootstrapWorkspaceResult = {
   workspace: Workspace;
   serverRevision: number | null;
+  projectRevisions: Record<string, number> | null;
   selectedLibraryNodeId: string | null;
   selectedProjectId: string | null;
   selectedSpaceId: string | null;
@@ -157,6 +159,7 @@ function finishBootstrap(
   >,
   extras: {
     serverRevision: number | null;
+    projectRevisions: Record<string, number> | null;
     projectBodyError: string | null;
     navError: string | null;
     loadError: string | null;
@@ -179,6 +182,7 @@ function finishBootstrap(
   return {
     workspace,
     serverRevision: extras.serverRevision,
+    projectRevisions: extras.projectRevisions,
     ...selection,
     projectBodyError: extras.projectBodyError,
     navError: extras.navError,
@@ -199,6 +203,7 @@ async function applyNavFallback(
 ): Promise<BootstrapWorkspaceResult> {
   const ws = await fetchWorkspaceNav();
   const serverRevision = extractWorkspaceRevision(ws);
+  const projectRevisions = extractProjectRevisions(ws);
   let navWorkspace = ws as Workspace;
 
   try {
@@ -210,6 +215,7 @@ async function applyNavFallback(
       resolved_library_node_id: null,
     }, {
       serverRevision,
+      projectRevisions,
       projectBodyError: null,
       navError: null,
       loadError: null,
@@ -225,6 +231,7 @@ async function applyNavFallback(
         resolved_library_node_id: null,
       }, {
         serverRevision,
+        projectRevisions,
         projectBodyError: null,
         navError: null,
         loadError: null,
@@ -255,6 +262,8 @@ export async function bootstrapWorkspaceLoad(
     });
     const serverRevision =
       envelope.workspace_revision ?? extractWorkspaceRevision(envelope.nav);
+    const projectRevisions =
+      envelope.project_revisions ?? extractProjectRevisions(envelope.nav);
 
     let workspace: Workspace;
     try {
@@ -278,6 +287,7 @@ export async function bootstrapWorkspaceLoad(
 
       return finishBootstrap(workspace, lastView, envelope, {
         serverRevision,
+        projectRevisions,
         projectBodyError: null,
         navError: null,
         loadError: null,
@@ -316,6 +326,7 @@ export async function bootstrapWorkspaceLoad(
         resolved_library_node_id: null,
       }, {
         serverRevision: null,
+        projectRevisions: null,
         projectBodyError: null,
         navError: message,
         loadError: message,

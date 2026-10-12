@@ -129,10 +129,18 @@ export type StaleSaveRecoveryDecision =
   /** First rejection: refresh from the server, overlay pending, re-flush once. */
   | { action: 'recover' }
   /** The recovery re-save was also rejected: surface the error, stop looping. */
-  | { action: 'surface-error' };
+  | { action: 'surface-error' }
+  /** Another 409 arrived while recovery is already running — wait for it. */
+  | { action: 'join' };
 
 /** Decide what a 409 rejection should do given whether the automatic
  * refresh-and-retry was already used for this save attempt. */
-export function decideStaleSaveRecovery(recoveryAlreadyUsed: boolean): StaleSaveRecoveryDecision {
+export function decideStaleSaveRecovery(
+  recoveryAlreadyUsed: boolean,
+  recoveryInFlight = false
+): StaleSaveRecoveryDecision {
+  if (recoveryInFlight) {
+    return { action: 'join' };
+  }
   return recoveryAlreadyUsed ? { action: 'surface-error' } : { action: 'recover' };
 }

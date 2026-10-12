@@ -1195,6 +1195,7 @@ def get_workspace_nav():
         ws = Workspace.create_default("ws_1", "Default Workspace", True)
         payload = workspace_nav_dict(ws)
         payload["workspace_revision"] = _current_workspace_revision(getattr(ws, "id", None))
+        payload["project_revisions"] = _project_revisions_payload()
         return payload
     try:
         ws = load_workspace(
@@ -1202,6 +1203,7 @@ def get_workspace_nav():
         )
         payload = workspace_nav_dict(ws)
         payload["workspace_revision"] = _current_workspace_revision(getattr(ws, "id", None))
+        payload["project_revisions"] = _project_revisions_payload()
         return payload
     except Exception as e:
         traceback.print_exc()
@@ -1318,6 +1320,7 @@ def get_workspace_page_load(
                 {
                     "nav": nav,
                     "workspace_revision": revision,
+                    "project_revisions": _project_revisions_payload(),
                     "project": None,
                     "resolved_project_id": resolved_project_id,
                     "resolved_library_node_id": resolved_library_node_id,
@@ -1358,6 +1361,7 @@ def get_workspace_page_load(
                 {
                     "nav": nav,
                     "workspace_revision": revision,
+                    "project_revisions": _project_revisions_payload(),
                     "project": project_payload,
                     "resolved_project_id": resolved_project_id,
                     "resolved_library_node_id": resolved_library_node_id,
@@ -1398,6 +1402,7 @@ def get_workspace_page_load(
             {
                 "nav": nav,
                 "workspace_revision": revision,
+                "project_revisions": _project_revisions_payload(),
                 "project": project_payload,
                 "resolved_project_id": resolved_project_id,
                 "resolved_library_node_id": resolved_library_node_id,
@@ -1449,6 +1454,28 @@ def _coerce_base_revisions(value) -> dict:
         if pid_text and parsed is not None:
             result[pid_text] = parsed
     return result
+
+
+def _library_nodes_equal(incoming_data: dict, disk_data: dict) -> bool:
+    """True when the incoming payload carries the same library tree as disk."""
+    incoming_nodes = incoming_data.get("library_nodes") if isinstance(incoming_data, dict) else None
+    disk_nodes = disk_data.get("library_nodes") if isinstance(disk_data, dict) else None
+    if not isinstance(incoming_nodes, dict):
+        incoming_nodes = {}
+    if not isinstance(disk_nodes, dict):
+        disk_nodes = {}
+    return json.dumps(incoming_nodes, sort_keys=True, separators=(",", ":")) == json.dumps(
+        disk_nodes, sort_keys=True, separators=(",", ":")
+    )
+
+
+def _project_revisions_payload() -> dict:
+    if not _workspace_store_exists():
+        return {}
+    try:
+        return get_project_revisions(WORKSPACE_PATH)
+    except Exception:
+        return {}
 
 
 def _post_workspace_sync(
@@ -1525,23 +1552,32 @@ def _post_workspace_sync(
                 getattr(previous_workspace, "id", None)
             )
             if base_revision < stored_revision:
-                logger.warning(
-                    "Rejected stale workspace save: client base_revision %d is older "
-                    "than stored revision %d.",
-                    base_revision,
-                    stored_revision,
+                # When the library tree is unchanged and the client sent per-project
+                # bases, a stale global revision only means another page advanced —
+                # per-project checks already guard body freshness.
+                skip_global_stale = bool(
+                    base_revisions
+                    and previous_dict is not None
+                    and _library_nodes_equal(data, previous_dict)
                 )
-                raise HTTPException(
-                    status_code=409,
-                    detail={
-                        "message": (
-                            "Stale save rejected: the workspace has advanced since "
-                            "this view was loaded."
-                        ),
-                        "workspace_revision": stored_revision,
-                        "base_revision": base_revision,
-                    },
-                )
+                if not skip_global_stale:
+                    logger.warning(
+                        "Rejected stale workspace save: client base_revision %d is older "
+                        "than stored revision %d.",
+                        base_revision,
+                        stored_revision,
+                    )
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "message": (
+                                "Stale save rejected: the workspace has advanced since "
+                                "this view was loaded."
+                            ),
+                            "workspace_revision": stored_revision,
+                            "base_revision": base_revision,
+                        },
+                    )
         if previous_dict is not None:
             # A current global revision never proves intent when many projects
             # lose spaces at once: that is the nav-shell failure mode.

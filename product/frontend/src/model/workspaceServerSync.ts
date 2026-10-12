@@ -1,7 +1,9 @@
 import { fetchProject, fetchWorkspaceNav, isAbortError } from '../api';
 import type { Workspace } from '../types';
 import {
+  extractProjectRevisions,
   extractWorkspaceRevision,
+  type ProjectRevisions,
   updateCacheAfterSave,
   writeNavToCache,
   writeProjectToCache,
@@ -23,6 +25,7 @@ export {
 export type RefreshWorkspaceFromServerResult = {
   present: Workspace;
   serverRevision: number | null;
+  projectRevisions: ProjectRevisions | null;
   projectBodyError: string | null;
 };
 
@@ -50,6 +53,7 @@ export async function refreshWorkspaceFromServer(
   const run = async (): Promise<RefreshWorkspaceFromServerResult> => {
     const ws = await fetchWorkspaceNav({ signal: timeoutController.signal });
     const serverRevision = extractWorkspaceRevision(ws);
+    const projectRevisions = extractProjectRevisions(ws);
     writeNavToCache(ws, serverRevision);
 
     let present = normalizeWorkspace(ws);
@@ -87,7 +91,12 @@ export async function refreshWorkspaceFromServer(
 
     updateCacheAfterSave(finalRevision, { workspace: present });
     noteHydratedMarkdownAssets(present, { trustFilesOnDisk: true });
-    return { present, serverRevision: finalRevision, projectBodyError };
+    return {
+      present,
+      serverRevision: finalRevision,
+      projectRevisions,
+      projectBodyError,
+    };
   };
   try {
     return await run();
