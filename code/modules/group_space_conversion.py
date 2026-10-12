@@ -11,7 +11,7 @@ from datetime import datetime
 from html.parser import HTMLParser
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import quote
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -21,6 +21,11 @@ from modules.asset_cleanup import cleanup_snapshot_asset
 from modules.canvas_object import CanvasObject
 from modules.space import Space
 from modules.workspace import Workspace
+
+_DATA_IMAGE_RE = re.compile(
+    r"data:image/(png|jpeg|jpg|webp|gif);base64,([A-Za-z0-9+/=\s]+)",
+    re.IGNORECASE,
+)
 
 
 class GroupSpaceConversionError(ValueError):
@@ -295,7 +300,14 @@ def _fetch_http_image(url: str) -> Optional[Image.Image]:
     if not (url.startswith("http://") or url.startswith("https://")):
         return None
     try:
-        with urlopen(url, timeout=15) as resp:
+        request = Request(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (compatible; AstronoteGroupSnapshot/1.0)",
+                "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+            },
+        )
+        with urlopen(request, timeout=15) as resp:
             raw = resp.read(_MAX_REMOTE_IMAGE_BYTES + 1)
             if len(raw) > _MAX_REMOTE_IMAGE_BYTES:
                 return None
@@ -304,7 +316,73 @@ def _fetch_http_image(url: str) -> Optional[Image.Image]:
         return None
 
 
-def _load_raster_for_asset(asset, assets_dir: Optional[str]) -> Optional[Image.Image]:
+def _open_raster_file(local_path: str) -> Optional[Image.Image]:
+    if not local_path or not os.path.isfile(local_path):
+        return None
+    try:
+        return Image.open(local_path).convert("RGBA")
+    except Exception:
+        pass
+
+    # Nested group photos are SVG wrappers around a PNG data URI.
+    lower = local_path.lower()
+    if lower.endswith(".svg"):
+        try:
+            with open(local_path, "r", encoding="utf-8") as handle:
+                markup = handle.read()
+        except Exception:
+            return None
+        match = _DATA_IMAGE_RE.search(markup)
+        if not match:
+            return None
+        try:
+            raw = base64.b64decode(re.sub(r"\s+", "", match.group(2)))
+            return Image.open(io.BytesIO(raw)).convert("RGBA")
+        except Exception:
+            return None
+    return None
+
+
+def _candidate_local_paths(asset, assets_dir: str, workspace_path: Optional[str]) -> List[str]:
+    paths: List[str] = []
+    seen: Set[str] = set()
+
+    def add(path: Optional[str]) -> None:
+        if not path:
+            return
+        normalized = os.path.abspath(path)
+        if normalized in seen:
+            return
+        seen.add(normalized)
+        paths.append(path)
+
+    asset_id = str(getattr(asset, "id", "") or "").strip()
+    if asset_id:
+        add(resolve_asset_file(asset_id, assets_dir, workspace_path=workspace_path))
+
+    path = getattr(asset, "path", None)
+    if isinstance(path, str):
+        rel = path.strip().replace("\\", "/")
+        if rel and "://" not in rel and not rel.startswith("data:"):
+            trimmed = rel.lstrip("/")
+            if trimmed.startswith("api/assets/"):
+                trimmed = trimmed[len("api/assets/") :]
+            if trimmed:
+                add(os.path.join(assets_dir, trimmed))
+                # /api/assets/{id} often omits the file extension.
+                stem = trimmed.split("/")[-1]
+                if stem and "." not in stem:
+                    add(resolve_asset_file(stem, assets_dir, workspace_path=workspace_path))
+                add(os.path.join(assets_dir, os.path.basename(trimmed)))
+
+    return paths
+
+
+def _load_raster_for_asset(
+    asset,
+    assets_dir: Optional[str],
+    workspace_path: Optional[str] = None,
+) -> Optional[Image.Image]:
     if asset is None:
         return None
 
@@ -321,31 +399,19 @@ def _load_raster_for_asset(asset, assets_dir: Optional[str]) -> Optional[Image.I
             decoded = _decode_data_image(path)
             if decoded is not None:
                 return decoded
-        if path.startswith("http://") or path.startswith("https://"):
-            fetched = _fetch_http_image(path)
-            if fetched is not None:
-                return fetched
 
-    asset_id = str(getattr(asset, "id", "") or "").strip()
-    if assets_dir and asset_id:
-        local_path = resolve_asset_file(asset_id, assets_dir)
-        if local_path and os.path.isfile(local_path):
-            try:
-                return Image.open(local_path).convert("RGBA")
-            except Exception:
-                pass
+    # Prefer local bytes before remote fetch so https:// paths that also have a
+    # spilled file under data/assets still composite after refresh/path preserve.
+    if assets_dir:
+        for local_path in _candidate_local_paths(asset, assets_dir, workspace_path):
+            opened = _open_raster_file(local_path)
+            if opened is not None:
+                return opened
 
-    if assets_dir and isinstance(path, str) and path:
-        rel = path.replace("\\", "/").lstrip("/")
-        if rel and "://" not in rel and not rel.startswith("data:"):
-            if rel.startswith("api/assets/"):
-                rel = rel[len("api/assets/") :]
-            local = os.path.join(assets_dir, rel)
-            if os.path.isfile(local):
-                try:
-                    return Image.open(local).convert("RGBA")
-                except Exception:
-                    pass
+    if isinstance(path, str) and (path.startswith("http://") or path.startswith("https://")):
+        fetched = _fetch_http_image(path)
+        if fetched is not None:
+            return fetched
 
     return None
 
@@ -964,7 +1030,13 @@ def formatted_text_to_svg(raw: str, x: float, y: float, width: float, height: fl
     return layouter.to_svg()
 
 
-def _build_group_screenshot_image(project, group_space_id: str, subtree_space_ids: Set[str], assets_dir: Optional[str] = None) -> Tuple[bytes, str]:
+def _build_group_screenshot_image(
+    project,
+    group_space_id: str,
+    subtree_space_ids: Set[str],
+    assets_dir: Optional[str] = None,
+    workspace_path: Optional[str] = None,
+) -> Tuple[bytes, str]:
     group_space = project.spaces.get(group_space_id)
     if not group_space:
         img = Image.new("RGBA", (800, 600), color=(0, 0, 0, 0))
@@ -1094,7 +1166,7 @@ def _build_group_screenshot_image(project, group_space_id: str, subtree_space_id
 
         if kind in {"ImageSpace", "PhotoSpace", "GroupPhotoSpace"} and asset:
             try:
-                p_img = _load_raster_for_asset(asset, assets_dir)
+                p_img = _load_raster_for_asset(asset, assets_dir, workspace_path=workspace_path)
                 if p_img:
                     tw = int(max(1, rw))
                     th = int(max(1, rh))
@@ -1139,9 +1211,12 @@ def _png_bytes_to_svg_markup(image_bytes: bytes, extra_markup: str = "") -> str:
         width, height = rendered.size
 
     png_b64 = base64.b64encode(image_bytes).decode("utf-8")
+    data_href = f"data:image/png;base64,{png_b64}"
     return (
-        f"<svg xmlns='http://www.w3.org/2000/svg' width='{max(1, int(width))}' height='{max(1, int(height))}' viewBox='0 0 {max(1, int(width))} {max(1, int(height))}'>"
-        f"<image width='100%' height='100%' href='data:image/png;base64,{png_b64}' />"
+        f"<svg xmlns='http://www.w3.org/2000/svg' xmlns:xlink='http://www.w3.org/1999/xlink' "
+        f"width='{max(1, int(width))}' height='{max(1, int(height))}' "
+        f"viewBox='0 0 {max(1, int(width))} {max(1, int(height))}'>"
+        f"<image width='100%' height='100%' href='{data_href}' xlink:href='{data_href}' />"
         f"{extra_markup}"
         "</svg>"
     )
@@ -1194,6 +1269,7 @@ def convert_group_space_to_image(
     group_space_id: str,
     clone_root_dir: str,
     assets_dir: Optional[str] = None,
+    workspace_path: Optional[str] = None,
 ) -> Workspace:
     project = workspace.projects.get(project_id)
     if not project:
@@ -1212,7 +1288,13 @@ def convert_group_space_to_image(
 
     effective_assets_dir = _resolve_snapshot_assets_dir(assets_dir, clone_root_dir)
 
-    image_bytes, text_svg = _build_group_screenshot_image(project, group_space_id, subtree_space_ids, effective_assets_dir)
+    image_bytes, text_svg = _build_group_screenshot_image(
+        project,
+        group_space_id,
+        subtree_space_ids,
+        effective_assets_dir,
+        workspace_path=workspace_path,
+    )
 
     descendant_space_ids = subtree_space_ids - {group_space_id}
 

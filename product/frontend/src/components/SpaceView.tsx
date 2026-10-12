@@ -191,6 +191,7 @@ export default function SpaceView({
   const [currentStroke, setCurrentStroke] = useState<{x: number, y: number}[]>([]);
   const [imageUrlInput, setImageUrlInput] = useState('');
   const [showImageDrawComposer, setShowImageDrawComposer] = useState(false);
+  const [inlineSvgMarkup, setInlineSvgMarkup] = useState<string | null>(null);
 
   const [dragMode, setDragMode] = useState<DragMode>('none');
   const [enterCaretPoint, setEnterCaretPoint] = useState<{ x: number; y: number } | null>(null);
@@ -582,6 +583,38 @@ export default function SpaceView({
     ? project.assets[assetId] ?? null
     : (fallbackAssetId && project ? project.assets[fallbackAssetId] ?? null : null);
     const imageSrc = resolveAssetSource(asset);
+  const isSvgAsset = Boolean(
+    asset && (
+      String(asset.mime_type || '').toLowerCase().includes('svg')
+      || String(asset.filename || '').toLowerCase().endsWith('.svg')
+      || String(asset.path || '').toLowerCase().endsWith('.svg')
+    )
+  );
+
+  useEffect(() => {
+    if (!shouldMountContent || !isSvgAsset || !imageSrc) {
+      setInlineSvgMarkup(null);
+      return;
+    }
+    let cancelled = false;
+    fetch(imageSrc)
+      .then((response) => (response.ok ? response.text() : Promise.reject(new Error(`svg ${response.status}`))))
+      .then((markup) => {
+        if (cancelled || !markup.includes('<svg')) return;
+        // Force the root svg to fit the space box when inlined.
+        const fitted = markup.replace(
+          /<svg\b([^>]*)>/i,
+          '<svg$1 style="max-width:100%;max-height:100%;width:auto;height:auto;display:block">'
+        );
+        setInlineSvgMarkup(fitted);
+      })
+      .catch(() => {
+        if (!cancelled) setInlineSvgMarkup(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [shouldMountContent, isSvgAsset, imageSrc]);
 
   const effectiveWidth = space.width;
   const effectiveHeight = space.height;
@@ -679,6 +712,23 @@ export default function SpaceView({
       {(space.kind === 'ImageSpace' || space.kind === 'GroupPhotoSpace' || space.kind === 'PhotoSpace') && (
         <>
           {imageSrc && shouldMountContent ? (
+            inlineSvgMarkup ? (
+              <div
+                aria-label={asset?.filename || 'Group Photo'}
+                style={{
+                  maxWidth: '100%',
+                  maxHeight: '100%',
+                  width: '100%',
+                  height: '100%',
+                  overflow: 'hidden',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center'
+                }}
+                // Server-built group snapshots; inline so nested PNG data URIs always paint.
+                dangerouslySetInnerHTML={{ __html: inlineSvgMarkup }}
+              />
+            ) : (
             <img
               src={imageSrc}
               alt={asset?.filename || 'Group Photo'}
@@ -709,6 +759,7 @@ export default function SpaceView({
                 }
               }}
             />
+            )
           ) : imageSrc && !shouldMountContent ? (
             <div style={{ width: '100%', height: '100%', background: '#f3f3f3' }} />
           ) : (

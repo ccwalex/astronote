@@ -309,10 +309,43 @@ class TestGroupSpaceConversion(unittest.TestCase):
             with open(svg_path, encoding="utf-8") as handle:
                 svg_markup = handle.read()
             self.assertIn("data:image/png;base64,", svg_markup)
+            self.assertIn("xlink:href=", svg_markup)
             b64 = svg_markup.split("data:image/png;base64,", 1)[1].split("'", 1)[0]
             png_bytes = base64.b64decode(b64)
             self.assertGreater(len(png_bytes), 32)
             self.assertTrue(png_bytes.startswith(b"\x89PNG"))
+
+    def test_load_raster_unwraps_svg_group_photo(self):
+        from modules.group_space_conversion import _load_raster_for_asset
+
+        mini_png = (
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+            b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01"
+            b"\r\n-\xdb\x00\x00\x00\x00IEND\xaeB`\x82"
+        )
+        b64 = base64.b64encode(mini_png).decode("ascii")
+        svg = (
+            "<svg xmlns='http://www.w3.org/2000/svg' width='1' height='1'>"
+            f"<image href='data:image/png;base64,{b64}' xlink:href='data:image/png;base64,{b64}' />"
+            "</svg>"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assets_dir = os.path.join(tmpdir, "assets")
+            os.makedirs(assets_dir, exist_ok=True)
+            svg_path = os.path.join(assets_dir, "asset_nested.svg")
+            with open(svg_path, "w", encoding="utf-8") as handle:
+                handle.write(svg)
+            asset = Asset(
+                id="asset_nested",
+                kind="image",
+                path="asset_nested.svg",
+                filename="nested.svg",
+                content=None,
+                mime_type="image/svg+xml",
+                metadata={},
+            )
+            loaded = _load_raster_for_asset(asset, assets_dir)
+            self.assertIsNotNone(loaded)
 
 
 if __name__ == "__main__":

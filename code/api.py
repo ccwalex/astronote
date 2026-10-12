@@ -2586,6 +2586,7 @@ def post_convert_group_to_image(request: Request, data: dict = Body(...)):
                 group_space_id=group_space_id,
                 clone_root_dir=clone_root_dir,
                 assets_dir=ASSETS_DIR,
+                workspace_path=WORKSPACE_PATH,
             )
             save_workspace_and_snapshot(converted, WORKSPACE_PATH, "convert_group")
         revision = _current_workspace_revision(getattr(converted, "id", None))
