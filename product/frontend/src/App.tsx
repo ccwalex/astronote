@@ -67,6 +67,7 @@ import {
   type ProjectRevisions,
 } from './model/workspaceCache';
 import { readLastView, validateLastView, writeLastView } from './model/lastViewCache';
+import { consumePendingSpaceSelection, resolveSpaceSelection } from './model/deferredSpaceSelection';
 import { collectDirtyMarkdownAssets, isProjectHydrated, loadProjectIntoWorkspace, markMarkdownAssetsPersisted, noteHydratedMarkdownAssets, parseWorkspaceJson, prepareWorkspaceForSave, shouldPersistWorkspace, type DirtyMarkdownAsset } from './model/workspaceLoad';
 import { bootstrapWorkspaceLoad, type BootstrapWorkspaceResult } from './model/bootstrapWorkspace';
 import {
@@ -228,6 +229,7 @@ export default function App() {
   const savedFlashTimerRef = useRef<number | null>(null);
   const serverRefreshInFlightRef = useRef(false);
   const selectedProjectIdRef = useRef<string | null>(null);
+  const pendingSpaceIdRef = useRef<string | null>(null);
   const pageWriteProtectedRef = useRef(false);
   // Library node/project deletions made locally but not yet ACKed by a save.
   // A server refresh (409 recovery, revision poll) re-applies them so the
@@ -409,6 +411,20 @@ export default function App() {
     }
   };
 
+  const applyPendingSpaceSelection = (projectId: string) => {
+    if (selectedProjectIdRef.current !== projectId) return;
+    const pending = pendingSpaceIdRef.current;
+    if (!pending) return;
+    const project = presentRef.current?.projects?.[projectId];
+    const outcome = consumePendingSpaceSelection(project, pending);
+    pendingSpaceIdRef.current = outcome.pending;
+    if (outcome.selectedSpaceId !== null) {
+      setSelectedSpaceId(outcome.selectedSpaceId);
+    } else if (outcome.pending === null && outcome.selectedSpaceId === null) {
+      setSelectedSpaceId(null);
+    }
+  };
+
   const beginProjectHydrate = (
     workspace: Workspace,
     projectId: string,
@@ -419,6 +435,7 @@ export default function App() {
     if (isProjectHydrated(existing)) {
       launchSettledRef.current = true;
       setProjectBodyError(null);
+      applyPendingSpaceSelection(projectId);
       schedulePostLaunchSideTraffic();
       flushDeferredPersistIfNeeded();
       return;
@@ -488,6 +505,7 @@ export default function App() {
           return presentOnlyHistory(merged);
         });
         launchSettledRef.current = true;
+        applyPendingSpaceSelection(projectId);
         schedulePostLaunchSideTraffic();
         flushDeferredPersistIfNeeded();
       })
@@ -1285,7 +1303,8 @@ export default function App() {
     const restored = validateLastView(historyState.present, lastViewSnapshotRef.current);
     setSelectedLibraryNodeId(restored.selectedLibraryNodeId);
     setSelectedProjectId(restored.selectedProjectId);
-    setSelectedSpaceId(restored.selectedSpaceId);
+    pendingSpaceIdRef.current = restored.selectedSpaceId;
+    setSelectedSpaceId(null);
     setLastViewRestored(true);
   }, [loading, historyState.present, lastViewRestored]);
 
@@ -1302,6 +1321,7 @@ export default function App() {
       } else {
         setProjectBodyError(null);
       }
+      applyPendingSpaceSelection(selectedProjectId);
       launchSettledRef.current = true;
       return;
     }
@@ -1430,7 +1450,21 @@ export default function App() {
   const [spaceBackgroundColor, setSpaceBackgroundColor] = useState('#ffffff');
   const [spaceConversionBusy, setSpaceConversionBusy] = useState(false);
   const handleSelectSpace = (spaceId: string | null) => {
-    setSelectedSpaceId(spaceId);
+    const projectId = selectedProjectIdRef.current;
+    const project = projectId ? presentRef.current?.projects?.[projectId] : undefined;
+    const resolution = resolveSpaceSelection(project, spaceId);
+    if (resolution.action === 'clear') {
+      pendingSpaceIdRef.current = null;
+      setSelectedSpaceId(null);
+      return;
+    }
+    if (resolution.action === 'defer') {
+      pendingSpaceIdRef.current = resolution.spaceId;
+      setSelectedSpaceId(null);
+      return;
+    }
+    pendingSpaceIdRef.current = null;
+    setSelectedSpaceId(resolution.spaceId);
   };
 
   const openProject = (projectId: string) => {
@@ -1450,6 +1484,7 @@ export default function App() {
     // Order: pending write must complete before abort pauses in-flight POST.
     abortPersistForNavigation();
     setProjectBodyError(null);
+    pendingSpaceIdRef.current = null;
     setSelectedProjectId(projectId);
     handleSelectSpace(null);
     const nodes = workspaceState.library_nodes || {};

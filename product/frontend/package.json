@@ -17,6 +17,7 @@
     "test:workspace-load": "node --experimental-strip-types src/model/workspaceLoad.test.ts",
     "test:ungroup-layout": "node --experimental-strip-types src/model/ungroupSpaceWithLayout.test.ts",
     "test:bounce-above-bg": "node --experimental-strip-types src/model/bounceContentAboveBackground.test.ts",
+    "test:deferred-space-selection": "node --experimental-strip-types src/model/deferredSpaceSelection.test.ts",
     "preview": "vite preview"
   },
   "dependencies": {

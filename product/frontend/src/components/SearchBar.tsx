@@ -395,6 +395,8 @@ export function SearchBar({ workspace, onOpenProject, onSelectSpace }: SearchBar
   };
 
   const handleResultClick = (result: SearchResult) => {
+    abortPlainSearch();
+    plainSearchSeqRef.current += 1;
     if (result.projectId) {
       onOpenProject(result.projectId);
     }
