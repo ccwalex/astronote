@@ -1588,10 +1588,10 @@ def _post_workspace_sync(
                         len(trusted),
                         trusted[0],
                     )
-        data = repair_workspace_dict(data, fallback=previous_dict, assets_dir=ASSETS_DIR)
-        # Only projects the client (plus server restore) sent as complete bodies
-        # are rewritten and get project_rev bumps — not siblings merged from disk.
+        # Capture before repair_workspace_dict(fallback=…): repair rehydrates every
+        # library-referenced page from disk, which would make siblings look complete.
         save_project_ids = sorted(str(pid) for pid in _complete_project_ids(data))
+        data = repair_workspace_dict(data, fallback=previous_dict, assets_dir=ASSETS_DIR)
         if previous_dict is not None:
             # Saves without a base revision cannot prove freshness: keep stored
             # bodies the payload omits instead of trusting a possible stale copy.

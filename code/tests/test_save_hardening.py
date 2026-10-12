@@ -26,6 +26,7 @@ from modules.page_view_lock import (
     heartbeat as page_heartbeat,
     reset_registry_for_tests,
 )
+from modules.library_node import LibraryNode
 from modules.project import Project
 from modules.save_workspace import save_workspace
 from modules.space import Space
@@ -70,6 +71,18 @@ def _two_page_workspace_with_text():
     extra = Project.create_default("proj_extra", "Extra")
     _add_text_space(extra, asset_id="a_keep", content="keep text")
     ws.projects[extra.id] = extra
+    root_id = f"{ws.id}_root"
+    extra_page_id = f"{ws.id}_extra_page"
+    root = ws.library_nodes[root_id]
+    ws.library_nodes[extra_page_id] = LibraryNode(
+        id=extra_page_id,
+        kind="page",
+        name="Extra",
+        parent_id=root_id,
+        child_ids=[],
+        target_project_id=extra.id,
+    )
+    root.child_ids.append(extra_page_id)
     return ws, proj_id, extra.id
 
 
@@ -324,6 +337,9 @@ def test_api_trash_routes_list_and_restore():
     tmp, old_path, old_assets = _temp_store(ws)
     try:
         client = _test_client()
+        seeded = client.post("/api/workspace", json=ws.to_dict())
+        assert seeded.status_code == 200, seeded.text
+        current_revision = seeded.json()["workspace_revision"]
         # Remove the sibling page: its asset file must land in the trash.
         payload = ws.to_dict()
         payload["projects"].pop(extra_id)
@@ -331,6 +347,15 @@ def test_api_trash_routes_list_and_restore():
             k: v for k, v in payload["library_nodes"].items()
             if (v.get("target_project_id") if isinstance(v, dict) else None) != extra_id
         }
+        root_id = f"{ws.id}_root"
+        root = payload["library_nodes"].get(root_id)
+        if isinstance(root, dict):
+            root["child_ids"] = [
+                cid
+                for cid in (root.get("child_ids") or [])
+                if cid in payload["library_nodes"]
+            ]
+        payload["base_revision"] = current_revision
         posted = client.post("/api/workspace", json=payload)
         assert posted.status_code == 200, posted.text
 
