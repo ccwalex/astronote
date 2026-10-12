@@ -396,7 +396,7 @@ class TestGroupSpaceConversion(unittest.TestCase):
             y=110.0,
             z=2.0,
             width=140.0,
-            height=40.0,
+            height=64.0,
             parent_space_id="space_group_1",
             child_space_ids=[],
             object_ids=[],
@@ -457,7 +457,8 @@ class TestGroupSpaceConversion(unittest.TestCase):
             self.assertIn("<rect ", svg)
             self.assertIn("caption", svg)
             with Image.open(io.BytesIO(png_bytes)) as rendered:
-                sample = rendered.convert("RGBA").getpixel((16 + 24 + 8, 20 + 24 + 8))
+                # Image is centered in the space content box (8,12) then offset by bake padding.
+                sample = rendered.convert("RGBA").getpixel((16 + 24 + 30, 20 + 24 + 26))
                 self.assertEqual(sample[:3], (220, 30, 40))
 
     def test_convert_paints_text_space_background_color(self):
@@ -686,7 +687,7 @@ class TestGroupSpaceConversion(unittest.TestCase):
             y=60.0,
             z=2.0,
             width=140.0,
-            height=40.0,
+            height=64.0,
             parent_space_id="space_group_1",
             child_space_ids=[],
             object_ids=[],
@@ -748,12 +749,81 @@ class TestGroupSpaceConversion(unittest.TestCase):
             # offset_x/offset_y are the 24px screenshot padding (min bounds 0);
             # the text space sits at (10, 60) so the translation is (34, 84).
             self.assertIn("<g transform='matrix(0.5 0 0 0.5 34 84)'>", overlay)
-            self.assertIn("<text x='0' y='18' font-size='18'", overlay)
-            # Child image layer sits at the scaled bbox position (10+24, 10+24)
-            # with its raster fitted size — the shared transform basis with text.
-            self.assertIn("<image x='34' y='34' width='40' height='30'", overlay)
-            # No leftover layout padding offsets in the text markup.
-            self.assertNotIn("<text x='8'", overlay)
+            self.assertIn("<text x='8' y='30' font-size='18'", overlay)
+            # Child image uses global snapshot coords (centered in scaled content box).
+            self.assertIn("<image x='49' y='46.5' width='20' height='15'", overlay)
+            # Text layout uses the SpaceView content inset, not the outer chrome edge.
+            self.assertNotIn("<text x='0' y='18'", overlay)
+
+    def test_convert_syncs_space_size_to_snapshot(self):
+        from PIL import Image
+
+        workspace = self._build_workspace()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            clone_root = os.path.join(tmpdir, "workspace", "group_space_clones")
+            assets_dir = os.path.join(tmpdir, "assets")
+            os.makedirs(assets_dir, exist_ok=True)
+            convert_group_space_to_image(
+                workspace=workspace,
+                project_id="proj_1",
+                group_space_id="space_group_1",
+                clone_root_dir=clone_root,
+                assets_dir=assets_dir,
+            )
+            project = workspace.projects["proj_1"]
+            converted_group = project.spaces["space_group_1"]
+            snapshot_id = converted_group.reference_asset_id
+            self.assertIsNotNone(snapshot_id)
+            svg_path = os.path.join(assets_dir, f"{snapshot_id}.svg")
+            with open(svg_path, encoding="utf-8") as handle:
+                svg_markup = handle.read()
+            b64 = svg_markup.split("data:image/png;base64,", 1)[1].split("'", 1)[0]
+            with Image.open(io.BytesIO(base64.b64decode(b64))) as rendered:
+                snapshot_w, snapshot_h = rendered.size
+            self.assertEqual(converted_group.width, float(snapshot_w))
+            self.assertEqual(converted_group.height, float(snapshot_h))
+
+    def test_convert_snapshot_size_matches_group_bounds_not_minimum_floor(self):
+        from modules.group_space_conversion import _build_group_screenshot_image
+
+        group_space = Space(
+            id="space_group_1",
+            kind="GroupSpace",
+            x=0.0,
+            y=0.0,
+            z=1.0,
+            width=240.0,
+            height=200.0,
+            parent_space_id=None,
+            child_space_ids=[],
+            object_ids=[],
+            asset_ids=[],
+            scale_x=1.0,
+            scale_y=1.0,
+            reference_asset_id=None,
+            reference_mode="none",
+            transform_matrix=[1, 0, 0, 1, 0, 0],
+        )
+        project = Project(
+            id="proj_1",
+            name="Project 1",
+            root_space_id="space_group_1",
+            spaces={"space_group_1": group_space},
+            objects={},
+            assets={},
+        )
+        png_bytes, _overlay = _build_group_screenshot_image(
+            project=project,
+            group_space_id="space_group_1",
+            subtree_space_ids={"space_group_1"},
+        )
+        from PIL import Image
+
+        with Image.open(io.BytesIO(png_bytes)) as rendered:
+            width, height = rendered.size
+        self.assertEqual(width, 288)
+        self.assertEqual(height, 248)
+        self.assertLess(width, 320)
 
 
 if __name__ == "__main__":

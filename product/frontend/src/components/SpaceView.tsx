@@ -752,7 +752,7 @@ export default function SpaceView({
             ? (isSelected ? '3px solid #0055ff' : '3px solid transparent')
             : (isSelected ? '3px solid #0055ff' : 'none'),
         boxSizing: 'border-box',
-        padding: isLayer ? 0 : '12px 8px',
+        padding: isLayer || inlineSvgSnapshot ? 0 : '12px 8px',
         overflow: showTransformHandles ? 'visible' : 'hidden',
         zIndex: space.z || 0,
         cursor,
@@ -832,7 +832,7 @@ export default function SpaceView({
                               top: `${(layer.y / Math.max(1, inlineSvgSnapshot.height)) * 100}%`,
                               width: `${(layer.width / Math.max(1, inlineSvgSnapshot.width)) * 100}%`,
                               height: `${(layer.height / Math.max(1, inlineSvgSnapshot.height)) * 100}%`,
-                              objectFit: 'contain',
+                              objectFit: 'fill',
                               pointerEvents: 'none'
                             }
                       }

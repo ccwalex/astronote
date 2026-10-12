@@ -27,6 +27,12 @@ _DATA_IMAGE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Match SpaceView chrome (`padding: 12px 8px`, `box-sizing: border-box`).
+SPACE_PAD_X = 8.0
+SPACE_PAD_Y = 12.0
+SPACE_CHROME_W = 16.0
+SPACE_CHROME_H = 24.0
+
 
 class GroupSpaceConversionError(ValueError):
     pass
@@ -485,11 +491,83 @@ def _fmt_svg_num(value: float) -> str:
     return f"{float(value):.2f}".rstrip("0").rstrip(".")
 
 
+def _space_content_rect(space_w: float, space_h: float) -> Tuple[float, float, float, float]:
+    content_w = max(1.0, space_w - SPACE_CHROME_W)
+    content_h = max(1.0, space_h - SPACE_CHROME_H)
+    return SPACE_PAD_X, SPACE_PAD_Y, content_w, content_h
+
+
 def _fit_raster_to_box(image: Image.Image, box_w: int, box_h: int) -> Image.Image:
     fitted = image.copy()
     resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS)
     fitted.thumbnail((max(1, box_w), max(1, box_h)), resample)
     return fitted
+
+
+def _fit_raster_contain_centered(
+    image: Image.Image,
+    box_w: float,
+    box_h: float,
+) -> Tuple[Image.Image, float, float, float, float]:
+    """Return fitted raster and x,y,w,h placement centered in a box (object-fit: contain)."""
+    tw = max(1, int(round(box_w)))
+    th = max(1, int(round(box_h)))
+    fitted = _fit_raster_to_box(image, tw, th)
+    fw, fh = fitted.size
+    fx = (box_w - float(fw)) / 2.0
+    fy = (box_h - float(fh)) / 2.0
+    return fitted, fx, fy, float(fw), float(fh)
+
+
+def _matrix_is_axis_aligned(matrix: Tuple[float, float, float, float, float, float]) -> bool:
+    a, b, c, d, _, _ = matrix
+    return abs(b) < 1e-6 and abs(c) < 1e-6
+
+
+def _svg_matrix_group(matrix: Tuple[float, float, float, float, float, float], inner: str) -> str:
+    ga, gb, gc, gd, ge, gf = matrix
+    return (
+        f"<g transform='matrix("
+        f"{_fmt_svg_num(ga)} {_fmt_svg_num(gb)} {_fmt_svg_num(gc)} "
+        f"{_fmt_svg_num(gd)} {_fmt_svg_num(ge)} {_fmt_svg_num(gf)}"
+        f")'>{inner}</g>"
+    )
+
+
+def _global_rect_from_local(
+    shape_matrix: Optional[Tuple[float, float, float, float, float, float]],
+    offset_x: float,
+    offset_y: float,
+    lx: float,
+    ly: float,
+    lw: float,
+    lh: float,
+) -> Tuple[float, float, float, float]:
+    """Map a local axis-aligned rect to snapshot coordinates for flat SVG <image> layers."""
+    if shape_matrix is None:
+        return lx + offset_x, ly + offset_y, max(1.0, lw), max(1.0, lh)
+
+    group_matrix = _affine_multiply(_translation_matrix(offset_x, offset_y), shape_matrix)
+    a, b, c, d, e, f = group_matrix
+    if _matrix_is_axis_aligned(group_matrix):
+        sx = a if abs(a) >= 1e-6 else 1.0
+        sy = d if abs(d) >= 1e-6 else 1.0
+        return (
+            e + sx * lx,
+            f + sy * ly,
+            max(1.0, abs(sx) * lw),
+            max(1.0, abs(sy) * lh),
+        )
+
+    corners = [
+        _apply_affine_point(group_matrix, lx + dx, ly + dy)
+        for dx, dy in ((0.0, 0.0), (lw, 0.0), (lw, lh), (0.0, lh))
+    ]
+    bounds = _points_bounds(corners)
+    if not bounds:
+        return lx + offset_x, ly + offset_y, max(1.0, lw), max(1.0, lh)
+    bx0, by0, bx1, by1 = bounds
+    return bx0, by0, max(1.0, bx1 - bx0), max(1.0, by1 - by0)
 
 
 def _paste_raster(base: Image.Image, overlay: Image.Image, x: int, y: int) -> Image.Image:
@@ -1315,8 +1393,8 @@ def _build_group_screenshot_image(
             })
 
     pad = 24.0
-    width = int(max(320.0, (max_x - min_x) + pad * 2))
-    height = int(max(220.0, (max_y - min_y) + pad * 2))
+    width = int(max(1.0, math.ceil((max_x - min_x) + pad * 2)))
+    height = int(max(1.0, math.ceil((max_y - min_y) + pad * 2)))
 
     offset_x = pad - min_x
     offset_y = pad - min_y
@@ -1351,22 +1429,63 @@ def _build_group_screenshot_image(
 
         if kind in {"ImageSpace", "PhotoSpace", "GroupPhotoSpace"}:
             placed = False
+            sw, sh = shape.get("local_size") or (rw, rh)
+            content_x, content_y, content_w, content_h = _space_content_rect(sw, sh)
+            shape_matrix = shape.get("matrix")
             if asset:
                 try:
                     p_img = _load_raster_for_asset(asset, assets_dir, workspace_path=workspace_path)
                     if p_img:
-                        tw = int(max(1, rw))
-                        th = int(max(1, rh))
-                        fitted = _fit_raster_to_box(p_img, tw, th)
-                        img = _paste_raster(img, fitted, int(rx0), int(ry0))
-                        draw = ImageDraw.Draw(img, "RGBA")
-                        # Also embed the child photo as a positioned SVG <image> so
-                        # the frontend can paint it as a real HTML <img> even when
-                        # nested SVG <image href=data:...> is suppressed.
+                        fitted, fx, fy, fw, fh = _fit_raster_contain_centered(p_img, content_w, content_h)
+                        lx = content_x + fx
+                        ly = content_y + fy
+                        resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS)
+                        if shape_matrix is not None and _matrix_is_axis_aligned(shape_matrix):
+                            a, _, _, d, e, f = shape_matrix
+                            sx = a if abs(a) >= 1e-6 else 1.0
+                            sy = d if abs(d) >= 1e-6 else 1.0
+                            tw = max(1, int(round(fw * abs(sx))))
+                            th = max(1, int(round(fh * abs(sy))))
+                            scaled = fitted.resize((tw, th), resample) if (tw, th) != fitted.size else fitted
+                            px = int(round(offset_x + e + sx * lx))
+                            py = int(round(offset_y + f + sy * ly))
+                            img = _paste_raster(img, scaled, px, py)
+                            draw = ImageDraw.Draw(img, "RGBA")
+                        elif shape_matrix is not None:
+                            corner_pts = [
+                                _apply_affine_point(shape_matrix, lx + dx, ly + dy)
+                                for dx, dy in ((0.0, 0.0), (fw, 0.0), (fw, fh), (0.0, fh))
+                            ]
+                            bounds = _points_bounds(corner_pts)
+                            if bounds:
+                                bx0, by0, bx1, by1 = bounds
+                                tw = max(1, int(round(bx1 - bx0)))
+                                th = max(1, int(round(by1 - by0)))
+                                scaled = (
+                                    fitted.resize((tw, th), resample)
+                                    if (tw, th) != fitted.size
+                                    else fitted
+                                )
+                                img = _paste_raster(
+                                    img,
+                                    scaled,
+                                    int(round(bx0 + offset_x)),
+                                    int(round(by0 + offset_y)),
+                                )
+                                draw = ImageDraw.Draw(img, "RGBA")
                         child_buf = io.BytesIO()
                         fitted.save(child_buf, format="PNG")
+                        gx, gy, gw, gh = _global_rect_from_local(
+                            shape_matrix,
+                            offset_x,
+                            offset_y,
+                            lx,
+                            ly,
+                            fw,
+                            fh,
+                        )
                         svg_overlay_parts.append(
-                            _svg_image_element(rx0, ry0, float(fitted.size[0]), float(fitted.size[1]), child_buf.getvalue())
+                            _svg_image_element(gx, gy, gw, gh, child_buf.getvalue())
                         )
                         placed = True
                 except Exception as e:
@@ -1377,7 +1496,16 @@ def _build_group_screenshot_image(
                 # Keep that URL in the snapshot so the frontend can do the same.
                 href = _asset_image_href(asset)
                 if href:
-                    svg_overlay_parts.append(_svg_href_image_element(rx0, ry0, rw, rh, href))
+                    gx, gy, gw, gh = _global_rect_from_local(
+                        shape_matrix,
+                        offset_x,
+                        offset_y,
+                        content_x,
+                        content_y,
+                        content_w,
+                        content_h,
+                    )
+                    svg_overlay_parts.append(_svg_href_image_element(gx, gy, gw, gh, href))
 
         if kind == "TextSpace":
             raw = _raw_text_from_space(space, asset)
@@ -1389,8 +1517,9 @@ def _build_group_screenshot_image(
                 # `transform: matrix(...) scale(...)` with a top-left origin —
                 # so converted photos keep text aligned with images for any
                 # space scale/rotation.
-                local_w, local_h = shape.get("local_size") or (rw, rh)
-                local_text = formatted_text_to_svg(raw, 0.0, 0.0, local_w, local_h)
+                sw, sh = shape.get("local_size") or (rw, rh)
+                content_x, content_y, content_w, content_h = _space_content_rect(sw, sh)
+                local_text = formatted_text_to_svg(raw, content_x, content_y, content_w, content_h)
                 if local_text:
                     shape_matrix = shape.get("matrix")
                     if shape_matrix is not None:
@@ -1589,12 +1718,17 @@ def convert_group_space_to_image(
         },
     )
 
+    with Image.open(io.BytesIO(image_bytes)) as snapshot_raster:
+        snapshot_w, snapshot_h = snapshot_raster.size
+
     group_space.kind = "ImageSpace"
     group_space.child_space_ids = []
     group_space.object_ids = []
     group_space.asset_ids = []
     group_space.reference_asset_id = image_asset_id
     group_space.reference_mode = "image_asset"
+    group_space.width = float(max(1, snapshot_w))
+    group_space.height = float(max(1, snapshot_h))
     project.spaces[group_space_id] = group_space
 
     return workspace
