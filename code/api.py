@@ -21,6 +21,7 @@ from modules.workspace import (
     repair_workspace_dict,
 )
 from modules.workspace_lazy import (
+    _complete_project_ids,
     apply_collection_restore,
     incoming_would_drop_stored_collections,
     incoming_would_mass_drop_spaces,
@@ -1487,12 +1488,7 @@ def _post_workspace_sync(
             # Per-project freshness: reject only when a project this save
             # actually rewrites advanced since the client saw it. Editing page
             # A must not be rejected because page B changed elsewhere.
-            incoming_projects = data.get("projects") if isinstance(data.get("projects"), dict) else {}
-            touched_ids = {
-                str(pid)
-                for pid, proj in incoming_projects.items()
-                if isinstance(proj, dict) and not is_project_stub(proj)
-            }
+            touched_ids = {str(pid) for pid in _complete_project_ids(data)}
             stale_ids = sorted(
                 pid
                 for pid in touched_ids
@@ -1593,6 +1589,9 @@ def _post_workspace_sync(
                         trusted[0],
                     )
         data = repair_workspace_dict(data, fallback=previous_dict, assets_dir=ASSETS_DIR)
+        # Only projects the client (plus server restore) sent as complete bodies
+        # are rewritten and get project_rev bumps — not siblings merged from disk.
+        save_project_ids = sorted(str(pid) for pid in _complete_project_ids(data))
         if previous_dict is not None:
             # Saves without a base revision cannot prove freshness: keep stored
             # bodies the payload omits instead of trusting a possible stale copy.
@@ -1604,14 +1603,7 @@ def _post_workspace_sync(
         ws = Workspace.from_dict(data)
 
         data_dir = data_dir_from_workspace_path(WORKSPACE_PATH) or os.path.join(PROJECT_ROOT, "data")
-        # Projects this save actually covers: complete bodies in the merged
-        # payload (stubs are navigation shells, not deletions).
         merged_projects = ws.projects if isinstance(ws.projects, dict) else {}
-        complete_ids = [
-            pid
-            for pid, project in merged_projects.items()
-            if not is_project_stub(project.to_dict() if hasattr(project, "to_dict") else project)
-        ]
         delete_ids: list = []
         if previous_dict is not None:
             disk_ids = set(previous_dict.get("projects") or {})
@@ -1626,17 +1618,21 @@ def _post_workspace_sync(
         use_scoped_save = (
             previous_dict is not None
             and _workspace_store_exists()
-            and bool(complete_ids or delete_ids)
+            and bool(save_project_ids or delete_ids)
         )
         if use_scoped_save:
             cleanup_removed_assets(
                 previous=previous_workspace,
                 current=ws,
                 data_dir=data_dir,
-                changed_project_ids=complete_ids + delete_ids,
+                changed_project_ids=save_project_ids + delete_ids,
             )
-            _sync_asset_tracking_for_workspace(previous_workspace, ws, changed_project_ids=complete_ids or None)
-            _drop_removed_asset_embeddings(previous_workspace, ws, changed_project_ids=complete_ids or None)
+            _sync_asset_tracking_for_workspace(
+                previous_workspace, ws, changed_project_ids=save_project_ids or None
+            )
+            _drop_removed_asset_embeddings(
+                previous_workspace, ws, changed_project_ids=save_project_ids or None
+            )
         else:
             cleanup_removed_assets(previous=previous_workspace, current=ws, data_dir=data_dir)
             _sync_asset_tracking_for_workspace(previous_workspace, ws)
@@ -1652,7 +1648,7 @@ def _post_workspace_sync(
                 ws,
                 WORKSPACE_PATH,
                 "save",
-                complete_ids,
+                save_project_ids,
                 library_nodes_changed=True,
                 coalesce_key=coalesce_key,
                 delete_project_ids=delete_ids,

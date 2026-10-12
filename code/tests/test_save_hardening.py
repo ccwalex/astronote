@@ -186,6 +186,68 @@ def test_per_project_base_revisions_allow_editing_unrelated_page():
         _teardown(tmp, old_path, old_assets)
 
 
+def _partial_save_payload(ws, project_ids):
+    """SPA-shaped save: full library tree, only listed projects hydrated."""
+    full = ws.to_dict()
+    ids = set(project_ids)
+    return {
+        **{k: v for k, v in full.items() if k != "projects"},
+        "library_nodes": full["library_nodes"],
+        "projects": {
+            pid: full["projects"][pid]
+            for pid in ids
+            if pid in full.get("projects", {})
+        },
+    }
+
+
+def test_partial_save_only_bumps_touched_project():
+    ws, proj_id, extra_id = _two_page_workspace_with_text()
+    tmp, old_path, old_assets = _temp_store(ws)
+    try:
+        client = _test_client()
+        seeded = client.post("/api/workspace", json=ws.to_dict())
+        assert seeded.status_code == 200, seeded.text
+        revs = seeded.json()["project_revisions"]
+
+        payload = _partial_save_payload(ws, [proj_id])
+        payload["projects"][proj_id]["name"] = "Partial rename"
+        posted = client.post("/api/workspace", json=payload)
+        assert posted.status_code == 200, posted.text
+        new_revs = posted.json()["project_revisions"]
+        assert new_revs.get(proj_id, 0) > revs.get(proj_id, 0)
+        assert new_revs.get(extra_id) == revs.get(extra_id)
+    finally:
+        _teardown(tmp, old_path, old_assets)
+
+
+def test_sibling_page_save_does_not_stale_unrelated_base_revision():
+    """Saving only page B must not bump page A's revision (different-tab case)."""
+    ws, proj_id, extra_id = _two_page_workspace_with_text()
+    tmp, old_path, old_assets = _temp_store(ws)
+    try:
+        client = _test_client()
+        seeded = client.post("/api/workspace", json=ws.to_dict())
+        assert seeded.status_code == 200, seeded.text
+        revs = seeded.json()["project_revisions"]
+
+        sibling_payload = _partial_save_payload(ws, [extra_id])
+        sibling_payload["projects"][extra_id]["name"] = "Sibling edit"
+        sibling = client.post("/api/workspace", json=sibling_payload)
+        assert sibling.status_code == 200, sibling.text
+        after_sibling = sibling.json()["project_revisions"]
+        assert after_sibling.get(extra_id, 0) > revs.get(extra_id, 0)
+        assert after_sibling.get(proj_id) == revs.get(proj_id)
+
+        tab_a_payload = _partial_save_payload(ws, [proj_id])
+        tab_a_payload["projects"][proj_id]["name"] = "Tab A edit"
+        tab_a_payload["base_revisions"] = {proj_id: revs[proj_id]}
+        tab_a = client.post("/api/workspace", json=tab_a_payload)
+        assert tab_a.status_code == 200, tab_a.text
+    finally:
+        _teardown(tmp, old_path, old_assets)
+
+
 # --- mass-drop guard ---------------------------------------------------------
 
 def test_mass_space_drop_save_rejected_even_with_current_revision():
@@ -291,6 +353,8 @@ def main():
         test_page_load_without_user_id_gets_backend_issued_one,
         test_save_response_and_revision_endpoint_carry_project_revisions,
         test_per_project_base_revisions_allow_editing_unrelated_page,
+        test_partial_save_only_bumps_touched_project,
+        test_sibling_page_save_does_not_stale_unrelated_base_revision,
         test_mass_space_drop_save_rejected_even_with_current_revision,
         test_dropped_assets_are_quarantined_not_deleted_and_restorable,
         test_api_trash_routes_list_and_restore,
