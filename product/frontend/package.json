@@ -13,6 +13,7 @@
     "test:page-presence": "node --experimental-strip-types src/model/pagePresence.test.ts",
     "test:revision-poll": "node --experimental-strip-types src/model/revisionPoll.test.ts",
     "test:stale-save-recovery": "node --experimental-strip-types src/model/staleSaveRecovery.test.ts",
+    "test:pending-persist": "node --experimental-strip-types --import ./scripts/register-ts-resolve.mjs src/model/pendingPersistCache.test.ts",
     "test:asset-source": "node --experimental-strip-types src/model/assetSource.test.ts",
     "test:workspace-load": "node --experimental-strip-types src/model/workspaceLoad.test.ts",
     "test:ungroup-layout": "node --experimental-strip-types src/model/ungroupSpaceWithLayout.test.ts",

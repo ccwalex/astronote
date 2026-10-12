@@ -673,7 +673,13 @@ export default function App() {
     if (listPendingProjectIds().length === 0) return;
     let workspace = presentRef.current;
     if (!workspace || !shouldPersistWorkspace(workspace)) return;
-    const overlaid = applyPendingMarkdownToWorkspace(overlayPendingOntoWorkspace(workspace));
+    const overlaid = applyPendingMarkdownToWorkspace(
+      overlayPendingOntoWorkspace(workspace, undefined, {
+        // Never resurrect a page the user deleted but has not ACKed yet.
+        excludeNodeIds: pendingLibraryDeletionsRef.current.nodeIds,
+        excludeProjectIds: pendingLibraryDeletionsRef.current.projectIds,
+      })
+    );
     if (overlaid !== workspace) {
       skipBackendPersistRef.current = true;
       presentRef.current = overlaid;
@@ -719,6 +725,11 @@ export default function App() {
       return;
     }
     staleSaveRecoveryRef.current = true;
+    if (err.serverRevision != null) {
+      // Adopt the server's current revision so later saves base on it even if
+      // the refresh below fails (per-project 409s now carry this revision).
+      serverRevisionRef.current = err.serverRevision;
+    }
     if (err.projectRevisions) {
       mergeServerProjectRevisions(err.projectRevisions);
     }
@@ -727,22 +738,42 @@ export default function App() {
       try {
         // Snapshot the current local state into the undroppable pending cache
         // before adopting the server workspace, so no edit is lost in the swap.
+        // includeAllHydrated: layout-only mutations (created pages, moves,
+        // renames) have no dirty markdown but must survive the swap too.
         const current = presentRef.current;
         if (
           current &&
           shouldPersistWorkspace(current) &&
           isWorkspaceDirty(workspaceDirtyGateRef.current)
         ) {
-          writeWorkspaceDirtyToPendingPersist(current, collectDirtyMarkdownAssets(current));
+          writeWorkspaceDirtyToPendingPersist(current, collectDirtyMarkdownAssets(current), {
+            includeAllHydrated: true,
+          });
         }
         const result = await refreshWorkspaceFromServer(selectedProjectIdRef.current, {
           forceProjectRefresh: true,
         });
         applyServerRefresh(result);
+        const presentAfterRefresh = presentRef.current;
         if (pendingLibraryDeletionsRef.current.nodeIds.size > 0) {
           // flushPendingPersistInBackground early-returns when the deletions
           // left no hydrated project (e.g. deleting the last page); the
-          // pruned library tree still needs to reach the server.
+          // pruned library tree still needs to reach the server. Overlay any
+          // un-ACKed bodies/creations first so this flush carries them too.
+          if (presentAfterRefresh && shouldPersistWorkspace(presentAfterRefresh)) {
+            const overlaid = applyPendingMarkdownToWorkspace(
+              overlayPendingOntoWorkspace(presentAfterRefresh, undefined, {
+                // Never resurrect a page the user deleted but has not ACKed.
+                excludeNodeIds: pendingLibraryDeletionsRef.current.nodeIds,
+                excludeProjectIds: pendingLibraryDeletionsRef.current.projectIds,
+              })
+            );
+            if (overlaid !== presentAfterRefresh) {
+              skipBackendPersistRef.current = true;
+              presentRef.current = overlaid;
+              setHistoryState(presentOnlyHistory(overlaid));
+            }
+          }
           flushPersist(presentRef.current, pendingCoalesceKeyRef.current);
         } else {
           flushPendingPersistInBackground();
@@ -781,7 +812,9 @@ export default function App() {
       // Persist is blocked (e.g. stale workspace rejected): skip the network but
       // still snapshot dirty state so edits made while the warning is up survive.
       if (persistBlockedRef.current) {
-        writeWorkspaceDirtyToPendingPersist(workspace, collectDirtyMarkdownForPersist(workspace));
+        writeWorkspaceDirtyToPendingPersist(workspace, collectDirtyMarkdownForPersist(workspace), {
+          includeAllHydrated: true,
+        });
       }
       return;
     }
@@ -795,7 +828,7 @@ export default function App() {
     const signal = controller.signal;
     const dirty = collectDirtyMarkdownForPersist(workspace);
     // Undroppable: sync pending before network so abort/tab-close cannot drop payload.
-    writeWorkspaceDirtyToPendingPersist(workspace, dirty);
+    writeWorkspaceDirtyToPendingPersist(workspace, dirty, { includeAllHydrated: true });
     const ackProjectIds = Object.keys(prepareWorkspaceForSave(workspace).projects || {});
     persistInFlightRef.current += 1;
     setPersistStatus('saving');
@@ -1393,7 +1426,7 @@ export default function App() {
       const gateDirty = isWorkspaceDirty(workspaceDirtyGateRef.current);
       if (!gateDirty && dirty.length === 0 && listPendingProjectIds().length === 0) return;
       if (gateDirty || dirty.length > 0) {
-        writeWorkspaceDirtyToPendingPersist(workspace, dirty);
+        writeWorkspaceDirtyToPendingPersist(workspace, dirty, { includeAllHydrated: true });
       }
       try {
         const prepared = prepareWorkspaceForSave(workspace);

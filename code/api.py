@@ -1513,6 +1513,11 @@ def _post_workspace_sync(
                         "message": "Stale save rejected: the listed pages advanced since this view was loaded.",
                         "stale_project_ids": stale_ids,
                         "project_revisions": stored_project_revisions,
+                        # Global revision so the client can resync immediately
+                        # instead of reporting "server revision is unknown".
+                        "workspace_revision": _current_workspace_revision(
+                            getattr(previous_workspace, "id", None)
+                        ),
                     },
                 )
         if base_revision is not None and previous_workspace is not None:
@@ -1557,6 +1562,9 @@ def _post_workspace_sync(
                     detail={
                         "message": "Save rejected: too many pages would lose content. Reload and retry per page.",
                         "dropped_project_ids": unmarked,
+                        "workspace_revision": _current_workspace_revision(
+                            getattr(previous_workspace, "id", None)
+                        ),
                         "project_revisions": stored_project_revisions,
                     },
                 )
