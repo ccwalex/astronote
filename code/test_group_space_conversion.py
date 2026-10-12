@@ -1,3 +1,4 @@
+import base64
 import os
 import tempfile
 import unittest
@@ -195,6 +196,123 @@ class TestGroupSpaceConversion(unittest.TestCase):
                     group_space_id="space_text_1",
                     clone_root_dir=tmpdir,
                 )
+
+    def test_convert_composites_child_image_from_assets_dir(self):
+        root_space = Space(
+            id="space_root_1",
+            kind="RootSpace",
+            x=0.0,
+            y=0.0,
+            z=0.0,
+            width=1920.0,
+            height=1080.0,
+            parent_space_id=None,
+            child_space_ids=["space_group_1"],
+            object_ids=[],
+            asset_ids=[],
+            scale_x=1.0,
+            scale_y=1.0,
+            reference_asset_id=None,
+            reference_mode="none",
+            transform_matrix=[1, 0, 0, 1, 0, 0],
+        )
+        group_space = Space(
+            id="space_group_1",
+            kind="GroupSpace",
+            x=100.0,
+            y=150.0,
+            z=1.0,
+            width=600.0,
+            height=400.0,
+            parent_space_id="space_root_1",
+            child_space_ids=["space_img_1"],
+            object_ids=[],
+            asset_ids=[],
+            scale_x=1.0,
+            scale_y=1.0,
+            reference_asset_id=None,
+            reference_mode="none",
+            transform_matrix=[1, 0, 0, 1, 0, 0],
+        )
+        image_space = Space(
+            id="space_img_1",
+            kind="ImageSpace",
+            x=10.0,
+            y=20.0,
+            z=2.0,
+            width=120.0,
+            height=80.0,
+            parent_space_id="space_group_1",
+            child_space_ids=[],
+            object_ids=[],
+            asset_ids=[],
+            scale_x=1.0,
+            scale_y=1.0,
+            reference_asset_id="asset_img_1",
+            reference_mode="image_asset",
+            transform_matrix=[1, 0, 0, 1, 0, 0],
+        )
+        image_asset = Asset(
+            id="asset_img_1",
+            kind="image",
+            path="asset_img_1.png",
+            filename="tile.png",
+            content=None,
+            mime_type="image/png",
+            metadata={},
+        )
+        project = Project(
+            id="proj_1",
+            name="Project 1",
+            root_space_id="space_root_1",
+            spaces={
+                "space_root_1": root_space,
+                "space_group_1": group_space,
+                "space_img_1": image_space,
+            },
+            objects={},
+            assets={"asset_img_1": image_asset},
+        )
+        workspace = Workspace(
+            id="ws_test_img",
+            name="Workspace Test",
+            library_nodes={},
+            projects={"proj_1": project},
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assets_dir = os.path.join(tmpdir, "assets")
+            os.makedirs(assets_dir, exist_ok=True)
+            png_path = os.path.join(assets_dir, "asset_img_1.png")
+            # Minimal valid 1x1 RGBA PNG (no Pillow dependency in this test module).
+            mini_png = (
+                b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00(\x00\x00\x00\x1e"
+                b"\x08\x06\x00\x00\x00\x8d\xb4\x1c\x8e\x00\x00\x00\x0cIDATx\x9cc"
+                b"\xf8\x0f\x00\x00\x01\x01\x00\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82"
+            )
+            with open(png_path, "wb") as handle:
+                handle.write(mini_png)
+
+            clone_root = os.path.join(tmpdir, "workspace", "group_space_clones")
+            convert_group_space_to_image(
+                workspace=workspace,
+                project_id="proj_1",
+                group_space_id="space_group_1",
+                clone_root_dir=clone_root,
+                assets_dir=assets_dir,
+            )
+            project = workspace.projects["proj_1"]
+            snapshot_id = project.spaces["space_group_1"].reference_asset_id
+            self.assertIsNotNone(snapshot_id)
+            svg_path = os.path.join(assets_dir, f"{snapshot_id}.svg")
+            self.assertTrue(os.path.isfile(svg_path))
+            with open(svg_path, encoding="utf-8") as handle:
+                svg_markup = handle.read()
+            self.assertIn("data:image/png;base64,", svg_markup)
+            b64 = svg_markup.split("data:image/png;base64,", 1)[1].split("'", 1)[0]
+            png_bytes = base64.b64decode(b64)
+            self.assertGreater(len(png_bytes), 32)
+            self.assertTrue(png_bytes.startswith(b"\x89PNG"))
 
 
 if __name__ == "__main__":

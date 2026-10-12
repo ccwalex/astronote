@@ -11,10 +11,12 @@ from datetime import datetime
 from html.parser import HTMLParser
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import quote
+from urllib.request import urlopen
 
 from PIL import Image, ImageDraw, ImageFont
 
 from modules.asset import Asset
+from modules.asset_resolve import resolve_asset_file
 from modules.asset_cleanup import cleanup_snapshot_asset
 from modules.canvas_object import CanvasObject
 from modules.space import Space
@@ -273,33 +275,79 @@ def _rect_points(width: float, height: float) -> List[Tuple[float, float]]:
 
 
 
-def _pick_image_href(asset) -> str:
-    candidates: List[str] = []
+_MAX_REMOTE_IMAGE_BYTES = 8 * 1024 * 1024
+
+
+def _decode_data_image(value: str) -> Optional[Image.Image]:
+    if not value.startswith("data:image"):
+        return None
+    idx = value.find(",")
+    if idx == -1:
+        return None
+    try:
+        img_data = base64.b64decode(value[idx + 1 :])
+        return Image.open(io.BytesIO(img_data)).convert("RGBA")
+    except Exception:
+        return None
+
+
+def _fetch_http_image(url: str) -> Optional[Image.Image]:
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return None
+    try:
+        with urlopen(url, timeout=15) as resp:
+            raw = resp.read(_MAX_REMOTE_IMAGE_BYTES + 1)
+            if len(raw) > _MAX_REMOTE_IMAGE_BYTES:
+                return None
+            return Image.open(io.BytesIO(raw)).convert("RGBA")
+    except Exception:
+        return None
+
+
+def _load_raster_for_asset(asset, assets_dir: Optional[str]) -> Optional[Image.Image]:
+    if asset is None:
+        return None
 
     content = getattr(asset, "content", None)
-    if isinstance(content, str):
-        candidates.append(content.strip())
+    if isinstance(content, str) and content.strip().startswith("data:image"):
+        decoded = _decode_data_image(content.strip())
+        if decoded is not None:
+            return decoded
 
     path = getattr(asset, "path", None)
     if isinstance(path, str):
         path = path.strip()
-        if path:
-            if path.startswith("http://") or path.startswith("https://") or path.startswith("/") or path.startswith("data:"):
-                candidates.append(path)
-            else:
-                candidates.append(f"/{path}")
+        if path.startswith("data:image"):
+            decoded = _decode_data_image(path)
+            if decoded is not None:
+                return decoded
+        if path.startswith("http://") or path.startswith("https://"):
+            fetched = _fetch_http_image(path)
+            if fetched is not None:
+                return fetched
 
-    for value in candidates:
-        if not value:
-            continue
-        if value.startswith("data:image"):
-            return value
-        if value.startswith("http://") or value.startswith("https://"):
-            return value
-        if value.startswith("/"):
-            return value
+    asset_id = str(getattr(asset, "id", "") or "").strip()
+    if assets_dir and asset_id:
+        local_path = resolve_asset_file(asset_id, assets_dir)
+        if local_path and os.path.isfile(local_path):
+            try:
+                return Image.open(local_path).convert("RGBA")
+            except Exception:
+                pass
 
-    return ""
+    if assets_dir and isinstance(path, str) and path:
+        rel = path.replace("\\", "/").lstrip("/")
+        if rel and "://" not in rel and not rel.startswith("data:"):
+            if rel.startswith("api/assets/"):
+                rel = rel[len("api/assets/") :]
+            local = os.path.join(assets_dir, rel)
+            if os.path.isfile(local):
+                try:
+                    return Image.open(local).convert("RGBA")
+                except Exception:
+                    pass
+
+    return None
 
 
 _BASE_FONT_SIZE = 18.0
@@ -1045,38 +1093,15 @@ def _build_group_screenshot_image(project, group_space_id: str, subtree_space_id
         rh = max(1.0, by1 - by0)
 
         if kind in {"ImageSpace", "PhotoSpace", "GroupPhotoSpace"} and asset:
-            href = _pick_image_href(asset)
-            if href:
-                try:
-                    p_img = None
-                    if href.startswith("data:image"):
-                        idx = href.find(",")
-                        if idx != -1:
-                            b64_data = href[idx + 1:]
-                            img_data = base64.b64decode(b64_data)
-                            p_img = Image.open(io.BytesIO(img_data)).convert("RGBA")
-                    elif href.startswith("/api/assets/") and assets_dir:
-                        asset_id = href.split("/")[-1]
-                        local_path = os.path.join(assets_dir, asset_id)
-                        if not os.path.exists(local_path):
-                            for ext in ["", ".png", ".jpg", ".jpeg", ".svg"]:
-                                if os.path.exists(local_path + ext):
-                                    local_path = local_path + ext
-                                    break
-                        if os.path.exists(local_path):
-                            p_img = Image.open(local_path).convert("RGBA")
-                    elif getattr(asset, "path", None):
-                        local_path = asset.path
-                        if os.path.exists(local_path):
-                            p_img = Image.open(local_path).convert("RGBA")
-
-                    if p_img:
-                        tw = int(max(1, rw))
-                        th = int(max(1, rh))
-                        p_img.thumbnail((tw, th))
-                        img.paste(p_img, (int(rx0), int(ry0)), p_img)
-                except Exception as e:
-                    print(f"Failed to composite image: {e}")
+            try:
+                p_img = _load_raster_for_asset(asset, assets_dir)
+                if p_img:
+                    tw = int(max(1, rw))
+                    th = int(max(1, rh))
+                    p_img.thumbnail((tw, th))
+                    img.paste(p_img, (int(rx0), int(ry0)), p_img)
+            except Exception as e:
+                print(f"Failed to composite image: {e}")
 
         if kind == "TextSpace":
             raw = _raw_text_from_space(space, asset)

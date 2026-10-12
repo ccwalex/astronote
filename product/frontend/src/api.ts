@@ -1389,17 +1389,30 @@ export async function fetchLastRagResponse(): Promise<BackendLastRagResponseEnve
 interface SpaceConversionResponse {
   status?: string;
   workspace?: Workspace;
+  workspace_revision?: number;
 }
 
-export async function convertGroupSpaceToImage(projectId: string, groupSpaceId: string): Promise<Workspace> {
+export type SpaceConversionResult = {
+  workspace: Workspace;
+  workspaceRevision: number | null;
+};
+
+export async function convertGroupSpaceToImage(
+  projectId: string,
+  groupSpaceId: string,
+  options?: { pageWriteSessionId?: string }
+): Promise<SpaceConversionResult> {
   const endpoint = `${API_BASE}/spaces/convert-group-to-image`;
+  const pageWriteSessionId = options?.pageWriteSessionId?.trim();
   let response: Response;
 
   try {
     response = await fetch(endpoint, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
+        ...userAndPageSessionHeaders({ pageSessionId: pageWriteSessionId }),
+        ...(pageWriteSessionId ? { 'X-Page-Write-Session': pageWriteSessionId } : {}),
       },
       body: JSON.stringify({
         project_id: projectId,
@@ -1420,18 +1433,30 @@ export async function convertGroupSpaceToImage(projectId: string, groupSpaceId: 
     throw new Error('Failed to convert group space: backend did not return workspace payload.');
   }
 
-  return data.workspace;
+  const workspaceRevision =
+    typeof data.workspace_revision === 'number'
+      ? data.workspace_revision
+      : extractWorkspaceRevision(data.workspace);
+
+  return { workspace: data.workspace, workspaceRevision };
 }
 
-export async function restoreImageToGroup(projectId: string, imageSpaceId: string): Promise<Workspace> {
+export async function restoreImageToGroup(
+  projectId: string,
+  imageSpaceId: string,
+  options?: { pageWriteSessionId?: string }
+): Promise<SpaceConversionResult> {
   const endpoint = `${API_BASE}/spaces/restore-image-to-group`;
+  const pageWriteSessionId = options?.pageWriteSessionId?.trim();
   let response: Response;
 
   try {
     response = await fetch(endpoint, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
+        ...userAndPageSessionHeaders({ pageSessionId: pageWriteSessionId }),
+        ...(pageWriteSessionId ? { 'X-Page-Write-Session': pageWriteSessionId } : {}),
       },
       body: JSON.stringify({
         project_id: projectId,
@@ -1452,5 +1477,10 @@ export async function restoreImageToGroup(projectId: string, imageSpaceId: strin
     throw new Error('Failed to restore group space: backend did not return workspace payload.');
   }
 
-  return data.workspace;
+  const workspaceRevision =
+    typeof data.workspace_revision === 'number'
+      ? data.workspace_revision
+      : extractWorkspaceRevision(data.workspace);
+
+  return { workspace: data.workspace, workspaceRevision };
 }

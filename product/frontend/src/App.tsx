@@ -1749,8 +1749,22 @@ export default function App() {
 
     setSpaceConversionBusy(true);
     try {
-      const nextWorkspace = await convertGroupSpaceToImage(selectedProjectId, selectedSpaceId);
-      applyServerWorkspace(nextWorkspace);
+      const result = await convertGroupSpaceToImage(selectedProjectId, selectedSpaceId, {
+        pageWriteSessionId: getOrCreatePageSessionId(),
+      });
+      applyServerWorkspace(result.workspace);
+      skipBackendPersistRef.current = true;
+      hasUnsavedLocalRef.current = false;
+      clearGateDirty();
+      const rev = result.workspaceRevision;
+      if (rev != null) {
+        serverRevisionRef.current = rev;
+      }
+      writeNavToCache(result.workspace, rev ?? serverRevisionRef.current);
+      updateCacheAfterSave(rev ?? serverRevisionRef.current, { workspace: result.workspace });
+      for (const projectId of listPendingProjectIds()) {
+        clearProjectFromPendingPersist(projectId);
+      }
       handleSelectSpace(null);
     } catch (err: any) {
       alert(`Failed to convert group space: ${err?.message || err}`);
@@ -1771,8 +1785,22 @@ export default function App() {
 
     setSpaceConversionBusy(true);
     try {
-      const nextWorkspace = await restoreImageToGroup(selectedProjectId, selectedSpaceId);
-      applyServerWorkspace(nextWorkspace);
+      const result = await restoreImageToGroup(selectedProjectId, selectedSpaceId, {
+        pageWriteSessionId: getOrCreatePageSessionId(),
+      });
+      applyServerWorkspace(result.workspace);
+      skipBackendPersistRef.current = true;
+      hasUnsavedLocalRef.current = false;
+      clearGateDirty();
+      const rev = result.workspaceRevision;
+      if (rev != null) {
+        serverRevisionRef.current = rev;
+      }
+      writeNavToCache(result.workspace, rev ?? serverRevisionRef.current);
+      updateCacheAfterSave(rev ?? serverRevisionRef.current, { workspace: result.workspace });
+      for (const projectId of listPendingProjectIds()) {
+        clearProjectFromPendingPersist(projectId);
+      }
       handleSelectSpace(null);
     } catch (err: any) {
       alert(`Failed to restore group space: ${err?.message || err}`);

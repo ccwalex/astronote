@@ -14,6 +14,7 @@
     "test:revision-poll": "node --experimental-strip-types src/model/revisionPoll.test.ts",
     "test:stale-save-recovery": "node --experimental-strip-types src/model/staleSaveRecovery.test.ts",
     "test:asset-source": "node --experimental-strip-types src/model/assetSource.test.ts",
+    "test:workspace-load": "node --experimental-strip-types src/model/workspaceLoad.test.ts",
     "preview": "vite preview"
   },
   "dependencies": {

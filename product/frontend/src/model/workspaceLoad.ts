@@ -44,11 +44,12 @@ function isMarkdownAsset(asset: Asset): boolean {
 
 function relativeAssetPath(asset: Asset): string {
   const path = String(asset.path || '').trim().replace(/\\/g, '/');
+  if (path && (path.includes('://') || path.startsWith('/api/'))) {
+    return path;
+  }
   if (
     path
     && !path.startsWith('data:')
-    && !path.startsWith('/api/')
-    && !path.includes('://')
     && !path.startsWith('/')
   ) {
     return path.replace(/^\.\//, '');

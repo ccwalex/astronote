@@ -19,7 +19,14 @@ if not isinstance(_app, FastAPIApp):
     api.app = _app
 ASGI_APP: FastAPIApp = _app
 
-from modules.page_view_lock import VIEWER_TTL_SEC, get_viewed_project_ids, heartbeat, leave, reset_registry_for_tests
+from modules.page_view_lock import (
+    VIEWER_TTL_SEC,
+    check_write_allowed,
+    get_viewed_project_ids,
+    heartbeat,
+    leave,
+    reset_registry_for_tests,
+)
 from modules.library_write import create_page_in_workspace
 from modules.save_workspace import save_workspace
 from modules.workspace import Workspace
@@ -43,6 +50,14 @@ def test_first_heartbeat_grants_write():
     assert status.can_write is True
     assert status.viewer_count == 1
     assert status.write_holder_session_id == "session_a"
+
+
+def test_write_lock_requires_matching_session_id():
+    reset_registry_for_tests()
+    heartbeat("proj_a", "session_a")
+    assert check_write_allowed("proj_a", "session_a") is True
+    assert check_write_allowed("proj_a", "") is False
+    assert check_write_allowed("proj_a", "session_b") is False
 
 
 def test_second_viewer_is_read_only():

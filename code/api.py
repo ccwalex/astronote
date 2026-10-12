@@ -1026,6 +1026,11 @@ def _view_session_from_request(request: Request) -> str:
     return str(request.headers.get("X-Page-View-Session") or "").strip()
 
 
+def _write_session_from_request(request: Request) -> Optional[str]:
+    text = str(request.headers.get("X-Page-Write-Session") or "").strip()
+    return text or None
+
+
 def _maybe_refresh_page_presence(
     request: Request,
     project_id: Optional[str],
@@ -2562,7 +2567,7 @@ def post_rag_call_llm(data: dict = Body(...)):
 
 
 @app.post("/api/spaces/convert-group-to-image")
-def post_convert_group_to_image(data: dict = Body(...)):
+def post_convert_group_to_image(request: Request, data: dict = Body(...)):
     project_id = str(data.get("project_id") or "").strip()
     group_space_id = str(data.get("group_space_id") or "").strip()
 
@@ -2573,7 +2578,7 @@ def post_convert_group_to_image(data: dict = Body(...)):
         _wait_while_page_load_priority()
         with workspace_write_lock():
             workspace = _load_workspace_for_rag()
-            _enforce_project_view_lock(project_id)
+            _enforce_project_view_lock(project_id, _write_session_from_request(request))
             clone_root_dir = os.path.join(PROJECT_ROOT, "data", "workspace", "group_space_clones")
             converted = convert_group_space_to_image(
                 workspace=workspace,
@@ -2583,7 +2588,8 @@ def post_convert_group_to_image(data: dict = Body(...)):
                 assets_dir=ASSETS_DIR,
             )
             save_workspace_and_snapshot(converted, WORKSPACE_PATH, "convert_group")
-        return {"status": "ok", "workspace": converted.to_dict()}
+        revision = _current_workspace_revision(getattr(converted, "id", None))
+        return {"status": "ok", "workspace": converted.to_dict(), "workspace_revision": revision}
     except GroupSpaceConversionError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
@@ -2594,7 +2600,7 @@ def post_convert_group_to_image(data: dict = Body(...)):
 
 
 @app.post("/api/spaces/restore-image-to-group")
-def post_restore_image_to_group(data: dict = Body(...)):
+def post_restore_image_to_group(request: Request, data: dict = Body(...)):
     project_id = str(data.get("project_id") or "").strip()
     image_space_id = str(data.get("image_space_id") or "").strip()
 
@@ -2605,7 +2611,7 @@ def post_restore_image_to_group(data: dict = Body(...)):
         _wait_while_page_load_priority()
         with workspace_write_lock():
             workspace = _load_workspace_for_rag()
-            _enforce_project_view_lock(project_id)
+            _enforce_project_view_lock(project_id, _write_session_from_request(request))
             clone_root_dir = os.path.join(PROJECT_ROOT, "data", "workspace", "group_space_clones")
             restored = restore_image_space_to_group(
                 workspace=workspace,
@@ -2615,7 +2621,8 @@ def post_restore_image_to_group(data: dict = Body(...)):
                 assets_dir=ASSETS_DIR,
             )
             save_workspace_and_snapshot(restored, WORKSPACE_PATH, "restore_group")
-        return {"status": "ok", "workspace": restored.to_dict()}
+        revision = _current_workspace_revision(getattr(restored, "id", None))
+        return {"status": "ok", "workspace": restored.to_dict(), "workspace_revision": revision}
     except GroupSpaceConversionError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
@@ -2752,7 +2759,7 @@ def post_library_folder(data: dict = Body(...)):
 
 
 @app.post("/api/library/page")
-def post_library_page(data: dict = Body(...)):
+def post_library_page(request: Request, data: dict = Body(...)):
     path = str(data.get("path") or "").strip()
     if not path:
         raise HTTPException(status_code=400, detail="path is required")
@@ -2762,7 +2769,7 @@ def post_library_page(data: dict = Body(...)):
             workspace = _load_workspace_nav()
             target_pid = _project_id_for_page_path(workspace, path)
             if target_pid:
-                _enforce_project_view_lock(target_pid)
+                _enforce_project_view_lock(target_pid, _write_session_from_request(request))
             result = create_page_in_workspace(workspace, path)
             if result.get("created"):
                 changed_pids = [result["project_id"]]
@@ -2787,6 +2794,7 @@ def _create_content_space_scoped(
     page_path: str,
     create_fn,
     reason: str,
+    write_session_id: Optional[str] = None,
     **create_kwargs,
 ):
     """Shared scoped write path for text/image/pdf creates on an existing page."""
@@ -2795,7 +2803,7 @@ def _create_content_space_scoped(
         workspace = _load_workspace_nav()
         target_pid = _project_id_for_page_path(workspace, page_path)
         if target_pid:
-            _enforce_project_view_lock(target_pid)
+            _enforce_project_view_lock(target_pid, write_session_id)
         if not target_pid:
             # Page without a target project: keep the legacy full-load behavior.
             workspace = _load_workspace_for_rag()
@@ -2813,7 +2821,7 @@ def _create_content_space_scoped(
 
 
 @app.post("/api/text/create")
-def post_text_create(data: dict = Body(...)):
+def post_text_create(request: Request, data: dict = Body(...)):
     page_path = str(data.get("page_path") or "").strip()
     markdown = data.get("markdown")
     if markdown is None:
@@ -2827,6 +2835,7 @@ def post_text_create(data: dict = Body(...)):
                 ws, p_path, str(markdown), assets_dir=ASSETS_DIR
             ),
             "create_text",
+            write_session_id=_write_session_from_request(request),
             markdown=markdown,
         )
     except ValueError as e:
@@ -2855,7 +2864,7 @@ def _media_create_fields(data: dict):
 
 
 @app.post("/api/image/create")
-def post_image_create(data: dict = Body(...)):
+def post_image_create(request: Request, data: dict = Body(...)):
     page_path, filename, mime_type, content = _media_create_fields(data)
     try:
         return _create_content_space_scoped(
@@ -2864,6 +2873,7 @@ def post_image_create(data: dict = Body(...)):
                 ws, p_path, filename, mime_type, content, assets_dir=ASSETS_DIR
             ),
             "create_image",
+            write_session_id=_write_session_from_request(request),
             filename=filename,
             mime_type=mime_type,
             content=content,
@@ -2878,7 +2888,7 @@ def post_image_create(data: dict = Body(...)):
 
 
 @app.post("/api/pdf/create")
-def post_pdf_create(data: dict = Body(...)):
+def post_pdf_create(request: Request, data: dict = Body(...)):
     page_path, filename, mime_type, content = _media_create_fields(data)
     try:
         return _create_content_space_scoped(
@@ -2887,6 +2897,7 @@ def post_pdf_create(data: dict = Body(...)):
                 ws, p_path, filename, mime_type, content, assets_dir=ASSETS_DIR
             ),
             "create_pdf",
+            write_session_id=_write_session_from_request(request),
             filename=filename,
             mime_type=mime_type,
             content=content,
