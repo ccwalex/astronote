@@ -15,6 +15,8 @@
     "test:stale-save-recovery": "node --experimental-strip-types src/model/staleSaveRecovery.test.ts",
     "test:asset-source": "node --experimental-strip-types src/model/assetSource.test.ts",
     "test:workspace-load": "node --experimental-strip-types src/model/workspaceLoad.test.ts",
+    "test:ungroup-layout": "node --experimental-strip-types src/model/ungroupSpaceWithLayout.test.ts",
+    "test:bounce-above-bg": "node --experimental-strip-types src/model/bounceContentAboveBackground.test.ts",
     "preview": "vite preview"
   },
   "dependencies": {

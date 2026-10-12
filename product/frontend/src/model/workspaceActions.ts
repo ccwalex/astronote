@@ -3,6 +3,7 @@ import { createDefaultProject } from './projectFactory';
 import { createMarkdownAsset, createImageAsset, createRemoteImageAsset, createPDFAsset } from './assetFactory';
 import { createStrokeObject } from './canvasObjectFactory';
 import { createAssetId } from './idFactory';
+import { bounceContentSpacesAboveBackground } from './bounceContentAboveBackground';
 
 export const isLayerSpace = (kind: string): boolean => {
   return [
@@ -1136,26 +1137,39 @@ export const ungroupSpaceWithLayout = (
     child_space_ids: nextParentChildIds
   };
 
-  nextParentChildIds.forEach((childId, zIndex) => {
+  // CanvasView stacks layer spaces and top-level content in one CSS z-index context.
+  // BackgroundSpace is z=0; reindexing siblings from 0 hid the first sibling under it.
+  // Keep existing sibling z values; place promoted children above the current max
+  // (and above BackgroundSpace when the parent is a layer).
+  const zFloor = isLayerSpace(parent.kind) ? 0 : -1;
+  const maxExistingZ = filteredParentChildIds.reduce(
+    (maxZ, id) => Math.max(maxZ, nextSpaces[id]?.z ?? 0),
+    zFloor
+  );
+
+  arrangedOrder.forEach((childId, index) => {
     const child = nextSpaces[childId];
     if (!child) return;
     nextSpaces[childId] = {
       ...child,
-      z: zIndex
+      z: maxExistingZ + 1 + index
     };
   });
 
   delete nextSpaces[groupSpaceId];
+
+  const ungroupedProject: Project = {
+    ...project,
+    spaces: nextSpaces
+  };
+  const { project: bouncedProject } = bounceContentSpacesAboveBackground(ungroupedProject);
 
   return {
     workspace: {
       ...workspace,
       projects: {
         ...workspace.projects,
-        [projectId]: {
-          ...project,
-          spaces: nextSpaces
-        }
+        [projectId]: bouncedProject
       }
     },
     referenceSpaceId

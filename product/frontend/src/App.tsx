@@ -48,6 +48,7 @@ import {
   EraserMode,
   eraseStrokeAtPoint
 } from './model/workspaceActions';
+import { bounceWorkspaceContentAboveBackground } from './model/bounceContentAboveBackground';
 import { insertVerticalPageGap } from './model/insertVerticalPageGap';
 import { createStrokeObject, StrokeDrawStyle } from './model/canvasObjectFactory';
 import { probeCanvas, ProbeMode, ProbeResult } from './model/probeCanvas';
@@ -2937,9 +2938,19 @@ export default function App() {
   };
 
   const handleProbe = (x: number, y: number) => {
-    if (!selectedProject) return;
-    const results = probeCanvas(selectedProject, x, y, probeMode);
-    setProbeResults(results);
+    if (!selectedProjectId) return;
+    const present = presentRef.current;
+    if (!present) return;
+
+    // Lift content that fell under BackgroundSpace so it is visible/selectable again.
+    const { workspace, bouncedIds } = bounceWorkspaceContentAboveBackground(present, selectedProjectId);
+    const project = workspace.projects[selectedProjectId];
+    if (!project) return;
+
+    if (bouncedIds.length > 0) {
+      setWorkspaceState(workspace);
+    }
+    setProbeResults(probeCanvas(project, x, y, probeMode));
   };
 
   if (loading || !historyState.present) {

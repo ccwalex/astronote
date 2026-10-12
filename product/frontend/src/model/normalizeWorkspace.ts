@@ -1,4 +1,5 @@
 import type { Workspace, LibraryNode, Project, Space, CanvasObject, Asset } from '../types';
+import { bounceContentSpacesAboveBackground } from './bounceContentAboveBackground';
 
 function isValidTransformMatrix(matrix: any): boolean {
   return Array.isArray(matrix) && matrix.length === 6 && matrix.every(n => typeof n === 'number');
@@ -168,7 +169,7 @@ export function normalizeProject(raw: any, projectKey?: string): Project {
     warnNormalize(`project ${id} assets is not a map; assets may be dropped during load`);
   }
 
-  return {
+  const normalized: Project = {
     ...raw,
     id: raw.id ?? id,
     name: raw.name ?? '',
@@ -177,6 +178,15 @@ export function normalizeProject(raw: any, projectKey?: string): Project {
     objects,
     assets,
   };
+
+  // Repair content that fell to z <= BackgroundSpace (hidden / unprobeable).
+  const { project: bounced, bouncedIds } = bounceContentSpacesAboveBackground(normalized);
+  if (bouncedIds.length > 0) {
+    warnNormalize(
+      `project ${id}: bounced ${bouncedIds.length} space(s) above BackgroundSpace: ${bouncedIds.join(', ')}`
+    );
+  }
+  return bounced;
 }
 
 /** Nav stub: keep identity fields; do not walk nested spaces/objects/assets. */
