@@ -192,6 +192,11 @@ def incoming_would_wipe_page_bodies(incoming: Any, disk: Any) -> bool:
     incoming_complete = _complete_project_ids(incoming)
     if not disk_complete or incoming_complete:
         return False
+    # Partial SPA saves omit untouched page bodies (`projects: {}`). Merge
+    # restores them from disk; this is not a nav-shell wipe (explicit stubs).
+    incoming_projects = incoming.get("projects") if isinstance(incoming, dict) else None
+    if isinstance(incoming_projects, dict) and len(incoming_projects) == 0:
+        return False
     # A payload that empties every hydrated body is only trusted when its
     # library tree proves the deletions: no remaining page node may reference
     # a project whose complete stored body the payload omits. Deleting the

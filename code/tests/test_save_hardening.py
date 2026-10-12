@@ -234,6 +234,32 @@ def test_partial_save_only_bumps_touched_project():
         _teardown(tmp, old_path, old_assets)
 
 
+def test_partial_save_library_only_empty_projects_accepted():
+    """Library-only SPA saves may POST projects: {} with a full library tree."""
+    ws, proj_id, extra_id = _two_page_workspace_with_text()
+    tmp, old_path, old_assets = _temp_store(ws)
+    try:
+        client = _test_client()
+        seeded = client.post("/api/workspace", json=ws.to_dict())
+        assert seeded.status_code == 200, seeded.text
+        full = ws.to_dict()
+        page_node_id = next(
+            nid
+            for nid, node in full["library_nodes"].items()
+            if node.get("target_project_id") == proj_id
+        )
+        payload = _partial_save_payload(ws, [])
+        payload["library_nodes"][page_node_id]["name"] = "Library rename only"
+        posted = client.post("/api/workspace", json=payload)
+        assert posted.status_code == 200, posted.text
+        disk = api._load_workspace_from_disk()
+        assert disk.library_nodes[page_node_id].name == "Library rename only"
+        assert proj_id in disk.projects
+        assert disk.projects[proj_id].assets
+    finally:
+        _teardown(tmp, old_path, old_assets)
+
+
 def test_stale_global_revision_allowed_when_library_unchanged_and_per_project_fresh():
     """A stale global base_revision must not reject when the library tree matches
     disk and the touched page's per-project base is current."""

@@ -61,6 +61,37 @@ def test_incoming_would_wipe_all_stubs_against_complete_disk():
     assert incoming_would_wipe_page_bodies(incoming, disk) is True
 
 
+def test_incoming_empty_projects_is_partial_omission_not_wipe():
+    """SPA partial saves send projects: {} while library still references disk bodies."""
+    disk = {
+        "projects": {"p1": _complete_project(), "p2": _complete_project("p2", "s2")},
+        "library_nodes": {
+            "n1": {
+                "id": "n1",
+                "kind": "page",
+                "name": "Page",
+                "parent_id": None,
+                "child_ids": [],
+                "target_project_id": "p1",
+            },
+        },
+    }
+    incoming = {
+        "projects": {},
+        "library_nodes": {
+            "n1": {
+                "id": "n1",
+                "kind": "page",
+                "name": "Renamed",
+                "parent_id": None,
+                "child_ids": [],
+                "target_project_id": "p1",
+            },
+        },
+    }
+    assert incoming_would_wipe_page_bodies(incoming, disk) is False
+
+
 def test_incoming_would_not_wipe_one_hydrated_plus_stubs():
     disk = {"projects": {"p1": _complete_project(), "p2": _complete_project("p2", "s2")}}
     incoming = {"projects": {"p1": _complete_project(), "p2": _stub_project("p2")}}
@@ -414,6 +445,7 @@ def test_merge_restored_disk_body_adopts_incoming_library_name():
 def main():
     tests = [
         test_incoming_would_wipe_all_stubs_against_complete_disk,
+        test_incoming_empty_projects_is_partial_omission_not_wipe,
         test_incoming_would_not_wipe_one_hydrated_plus_stubs,
         test_post_all_stubs_rejected_disk_unchanged,
         test_incoming_complete_but_collections_empty_is_flagged,
