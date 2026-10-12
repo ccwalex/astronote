@@ -610,13 +610,6 @@ def _raw_text_from_space(space, asset) -> str:
     return ""
 
 
-def _fmt_svg_num(value: float) -> str:
-    text = f"{value:.2f}"
-    if "." in text:
-        text = text.rstrip("0").rstrip(".")
-    return text or "0"
-
-
 def _new_text_style(**overrides: Any) -> Dict[str, Any]:
     style: Dict[str, Any] = {
         "bold": False,
@@ -982,8 +975,9 @@ class _SvgTextLayouter(HTMLParser):
         self.origin_y = origin_y
         self.width = max(8.0, width)
         self.bottom = origin_y + max(8.0, height)
-        self.pad_x = 8.0
-        self.pad_y = 4.0
+        # Frontend `.editable-area` uses `padding: 0` (TextSpaceArea.tsx).
+        self.pad_x = 0.0
+        self.pad_y = 0.0
         self.left = origin_x + self.pad_x
         self.right = origin_x + width - self.pad_x
         if self.right <= self.left:
@@ -1010,7 +1004,14 @@ class _SvgTextLayouter(HTMLParser):
             self.styles.pop()
 
     def _content_left(self) -> float:
-        return self.left + _LIST_INDENT * len(self.list_stack)
+        # Frontend blockquote style: `padding-left: 10px` (TextSpaceArea.tsx).
+        quote_indent = 10.0 if self._style().get("quote") else 0.0
+        return self.left + quote_indent + _LIST_INDENT * len(self.list_stack)
+
+    def _paragraph_gap(self) -> float:
+        # Frontend p/h1-h6/blockquote/pre use `margin-bottom: 0.5em`.
+        size = float(self._style().get("size") or _BASE_FONT_SIZE)
+        return 0.5 * size
 
     def _newline(self, extra: float = 0.0) -> None:
         size = float(self._style().get("size") or _BASE_FONT_SIZE)
@@ -1121,16 +1122,16 @@ class _SvgTextLayouter(HTMLParser):
         if name in {"h1", "h2", "h3", "h4", "h5", "h6"}:
             self._pop()
             if self.line_started:
-                self._newline(extra=4.0)
+                self._newline(extra=self._paragraph_gap())
         elif name in {"strong", "b", "em", "i", "del", "s", "strike", "code", "a"}:
             self._pop()
         elif name in {"blockquote", "pre"}:
             self._pop()
             if self.line_started:
-                self._newline(extra=4.0)
+                self._newline(extra=self._paragraph_gap())
         elif name in {"p", "div"}:
             if self.line_started:
-                self._newline(extra=4.0)
+                self._newline(extra=self._paragraph_gap())
         elif name == "th":
             self._pop()
         elif name == "tr":
@@ -1138,7 +1139,7 @@ class _SvgTextLayouter(HTMLParser):
                 self._newline()
         elif name == "table":
             if self.line_started:
-                self._newline(extra=4.0)
+                self._newline(extra=self._paragraph_gap())
         elif name == "ul":
             if self.list_stack:
                 self.list_stack.pop()
@@ -1189,7 +1190,7 @@ def formatted_text_to_svg(raw: str, x: float, y: float, width: float, height: fl
         style = _new_text_style()
         fallback = re.sub(r"<[^>]+>", " ", fragment)
         fallback = html.unescape(fallback)
-        return _svg_text_element(x + 8.0, y + float(style["size"]) + 4.0, fallback[:2000], style)
+        return _svg_text_element(x, y + float(style["size"]), fallback[:2000], style)
     return layouter.to_svg()
 
 
@@ -1260,6 +1261,8 @@ def _build_group_screenshot_image(
             "bbox": bounds,
             "asset": asset,
             "space": space,
+            "local_size": (sw, sh),
+            "matrix": matrix,
         })
 
     stroke_paths: List[Dict[str, Any]] = []
@@ -1379,7 +1382,28 @@ def _build_group_screenshot_image(
         if kind == "TextSpace":
             raw = _raw_text_from_space(space, asset)
             if raw.strip():
-                svg_overlay_parts.append(formatted_text_to_svg(raw, rx0, ry0, rw, rh))
+                # Lay the text out in the space's local (unscaled) frame, then
+                # position/scale it with the same matrix used for the baked
+                # image/stroke layers. This mirrors the frontend, which renders
+                # space content at local size and applies CSS
+                # `transform: matrix(...) scale(...)` with a top-left origin —
+                # so converted photos keep text aligned with images for any
+                # space scale/rotation.
+                local_w, local_h = shape.get("local_size") or (rw, rh)
+                local_text = formatted_text_to_svg(raw, 0.0, 0.0, local_w, local_h)
+                if local_text:
+                    shape_matrix = shape.get("matrix")
+                    if shape_matrix is not None:
+                        group_matrix = _affine_multiply(_translation_matrix(offset_x, offset_y), shape_matrix)
+                        ga, gb, gc, gd, ge, gf = group_matrix
+                        svg_overlay_parts.append(
+                            f"<g transform='matrix("
+                            f"{_fmt_svg_num(ga)} {_fmt_svg_num(gb)} {_fmt_svg_num(gc)} "
+                            f"{_fmt_svg_num(gd)} {_fmt_svg_num(ge)} {_fmt_svg_num(gf)}"
+                            f")'>{local_text}</g>"
+                        )
+                    else:
+                        svg_overlay_parts.append(formatted_text_to_svg(raw, rx0, ry0, rw, rh))
 
     for path in stroke_paths:
         pts = [(px + offset_x, py + offset_y) for px, py in path["points"]]

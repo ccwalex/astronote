@@ -638,6 +638,123 @@ class TestGroupSpaceConversion(unittest.TestCase):
         self.assertIn("<image ", overlay)
         self.assertIn("caption", svg)
 
+    def test_convert_scales_text_with_space_transform(self):
+        from PIL import Image
+
+        from modules.group_space_conversion import _build_group_screenshot_image
+
+        group_space = Space(
+            id="space_group_1",
+            kind="GroupSpace",
+            x=0.0,
+            y=0.0,
+            z=1.0,
+            width=240.0,
+            height=200.0,
+            parent_space_id=None,
+            child_space_ids=["space_img_1", "space_text_1"],
+            object_ids=[],
+            asset_ids=[],
+            scale_x=1.0,
+            scale_y=1.0,
+            reference_asset_id=None,
+            reference_mode="none",
+            transform_matrix=[1, 0, 0, 1, 0, 0],
+        )
+        image_space = Space(
+            id="space_img_1",
+            kind="ImageSpace",
+            x=10.0,
+            y=10.0,
+            z=1.0,
+            width=100.0,
+            height=80.0,
+            parent_space_id="space_group_1",
+            child_space_ids=[],
+            object_ids=[],
+            asset_ids=[],
+            scale_x=0.5,
+            scale_y=0.5,
+            reference_asset_id="asset_img_1",
+            reference_mode="image_asset",
+            transform_matrix=[1, 0, 0, 1, 0, 0],
+        )
+        text_space = Space(
+            id="space_text_1",
+            kind="TextSpace",
+            x=10.0,
+            y=60.0,
+            z=2.0,
+            width=140.0,
+            height=40.0,
+            parent_space_id="space_group_1",
+            child_space_ids=[],
+            object_ids=[],
+            asset_ids=[],
+            scale_x=0.5,
+            scale_y=0.5,
+            reference_asset_id="asset_md_1",
+            reference_mode="markdown_asset",
+            transform_matrix=[1, 0, 0, 1, 0, 0],
+        )
+        image_asset = Asset(
+            id="asset_img_1",
+            kind="image",
+            path="asset_img_1.png",
+            filename="tile.png",
+            content=None,
+            mime_type="image/png",
+            metadata={},
+        )
+        markdown_asset = Asset(
+            id="asset_md_1",
+            kind="markdown",
+            path="",
+            filename="note.md",
+            content="caption",
+            mime_type="text/markdown",
+            metadata={},
+        )
+        project = Project(
+            id="proj_1",
+            name="Project 1",
+            root_space_id="space_group_1",
+            spaces={
+                "space_group_1": group_space,
+                "space_img_1": image_space,
+                "space_text_1": text_space,
+            },
+            objects={},
+            assets={"asset_img_1": image_asset, "asset_md_1": markdown_asset},
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assets_dir = os.path.join(tmpdir, "assets")
+            os.makedirs(assets_dir, exist_ok=True)
+            Image.new("RGBA", (40, 30), (220, 30, 40, 255)).save(
+                os.path.join(assets_dir, "asset_img_1.png"), format="PNG"
+            )
+
+            _png_bytes, overlay = _build_group_screenshot_image(
+                project=project,
+                group_space_id="space_group_1",
+                subtree_space_ids={"space_group_1", "space_img_1", "space_text_1"},
+                assets_dir=assets_dir,
+            )
+
+            # Text is laid out in the child space's local frame (origin 0,0,
+            # unscaled 18px font) and positioned/scaled by the same matrix used
+            # for the baked image layers: 0.5 scale + translation.
+            # offset_x/offset_y are the 24px screenshot padding (min bounds 0);
+            # the text space sits at (10, 60) so the translation is (34, 84).
+            self.assertIn("<g transform='matrix(0.5 0 0 0.5 34 84)'>", overlay)
+            self.assertIn("<text x='0' y='18' font-size='18'", overlay)
+            # Child image layer sits at the scaled bbox position (10+24, 10+24)
+            # with its raster fitted size — the shared transform basis with text.
+            self.assertIn("<image x='34' y='34' width='40' height='30'", overlay)
+            # No leftover layout padding offsets in the text markup.
+            self.assertNotIn("<text x='8'", overlay)
+
 
 if __name__ == "__main__":
     unittest.main()

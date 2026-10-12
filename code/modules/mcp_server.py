@@ -277,6 +277,59 @@ def _extend_import_path():
 _extend_import_path()
 
 
+# Fixed write-session id stamped on the stub request header for in-process
+# MCP writes so page-view-lock bookkeeping attributes them to MCP consistently
+# (never to a browser session, never to an empty/anonymous session).
+_MCP_WRITE_SESSION_ID = "mcp"
+
+
+class _McpStubRequestHeaders(dict):
+    """Case-insensitive header mapping for the stub MCP request."""
+
+    def get(self, key, default=None):
+        return super().get(str(key).lower(), default)
+
+
+class _McpStubRequest:
+    """Minimal starlette Request stand-in for in-process MCP handler calls.
+
+    Write handlers declare FastAPI signatures like
+    `(request: Request, data: dict = Body(...))` for HTTP routing, but MCP
+    tools invoke them in-process with just the JSON payload. In-process the
+    handlers only read `request.headers` (`_write_session_from_request`), so
+    a tiny stub carrying the fixed MCP write-session header is sufficient.
+    """
+
+    def __init__(self) -> None:
+        self.headers = _McpStubRequestHeaders(
+            {"x-page-write-session": _MCP_WRITE_SESSION_ID}
+        )
+
+
+def _prepare_handler_args(fn, args, kwargs):
+    """Adapt in-process MCP payloads to handlers that take a Request first.
+
+    MCP tools call handlers as `_call_api(fn, payload_dict)`. For handlers
+    whose first parameter is `request`, the payload must be re-bound to the
+    second (data) parameter and a stub request supplied; otherwise the payload
+    lands in `request` and `data` keeps its `Body(...)` default, which has no
+    `.get` and crashes the write.
+    """
+    if not args or not callable(fn):
+        return args, kwargs
+    try:
+        params = list(inspect.signature(fn).parameters.values())
+    except (TypeError, ValueError):
+        return args, kwargs
+    if not params or params[0].name != "request":
+        return args, kwargs
+    payload = args[0]
+    data_param = params[1].name if len(params) > 1 else "data"
+    call_kwargs = dict(kwargs)
+    call_kwargs[data_param] = payload
+    return (_McpStubRequest(),), call_kwargs
+
+
 def _call_api(fn, *args, **kwargs):
     from fastapi import HTTPException as FastAPIHTTPException
     from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -289,7 +342,8 @@ def _call_api(fn, *args, **kwargs):
     # session and never to `anonymous`.
     token = user_session.set_acting_user_id(user_session.MCP_USER_ID)
     try:
-        return fn(*args, **kwargs)
+        call_args, call_kwargs = _prepare_handler_args(fn, args, kwargs)
+        return fn(*call_args, **call_kwargs)
     except (FastAPIHTTPException, StarletteHTTPException) as exc:
         raise ValueError(str(exc.detail)) from exc
     finally:
