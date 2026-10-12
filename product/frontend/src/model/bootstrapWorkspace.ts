@@ -1,5 +1,6 @@
 import type { Workspace, Project } from '../types';
 import { fetchPageLoad, fetchWorkspaceNav, type PageLoadResponse } from '../api';
+import { ensureUserSessionId } from './userSession';
 import { getOrCreatePageSessionId } from './pagePresence';
 import { normalizeWorkspace } from './normalizeWorkspace';
 import {
@@ -245,6 +246,7 @@ export async function bootstrapWorkspaceLoad(
   lastView: LastViewIds | null,
   hasUnsavedLocal: boolean
 ): Promise<BootstrapWorkspaceResult> {
+  await ensureUserSessionId();
   try {
     const envelope = await fetchPageLoad({
       projectId: lastView?.selectedProjectId ?? null,

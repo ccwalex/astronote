@@ -4,8 +4,8 @@ Every browser page-load/refresh can obtain a backend-issued user-id
 (`POST /api/session`). The id travels back on subsequent requests via the
 `X-User-Id` header (or a `user_id` body field) and is used to:
 
-- key page viewer presence and write leases (released when the session ends,
-  not only after a time-based prune), and
+- release page viewer presence and write leases on session end when the
+  frontend uses the same id for X-User-Id and page view/write sessions, and
 - label saves / revision checks per acting user.
 
 MCP tool calls run in-process and are tagged with the single fixed identity

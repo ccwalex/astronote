@@ -7,20 +7,15 @@ export {
   type WriteProtectionState,
 } from './pagePresenceCore';
 
-const SESSION_STORAGE_KEY = 'astronote_page_session';
+import { getUserIdSync } from './userSession';
 
+/** Page presence/write session id — same as backend user id when bootstrapped. */
 export function getOrCreatePageSessionId(): string {
-  try {
-    const existing = sessionStorage.getItem(SESSION_STORAGE_KEY);
-    if (existing && existing.trim()) {
-      return existing.trim();
-    }
-    const created = `page_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-    sessionStorage.setItem(SESSION_STORAGE_KEY, created);
-    return created;
-  } catch {
-    return `page_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+  const userId = getUserIdSync();
+  if (userId) {
+    return userId;
   }
+  return `pending_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
 export type PagePresenceController = {

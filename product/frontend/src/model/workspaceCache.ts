@@ -431,3 +431,42 @@ export function extractWorkspaceRevision(data: unknown): number | null {
     asFiniteNumber(raw.revision)
   );
 }
+
+export type ProjectRevisions = Record<string, number>;
+
+/** Per-project revision counters from save/revision API responses. */
+export function extractProjectRevisions(data: unknown): ProjectRevisions | null {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+  const raw = (data as { project_revisions?: unknown }).project_revisions;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const out: ProjectRevisions = {};
+  for (const [pid, rev] of Object.entries(raw as Record<string, unknown>)) {
+    const n = asFiniteNumber(rev);
+    if (n != null && n >= 0) {
+      out[pid] = Math.floor(n);
+    }
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+export function mergeProjectRevisions(
+  current: ProjectRevisions,
+  update: ProjectRevisions | null | undefined
+): ProjectRevisions {
+  if (!update) return current;
+  return { ...current, ...update };
+}
+
+export function pickBaseRevisionsForProjects(
+  projectIds: string[],
+  revisions: ProjectRevisions
+): ProjectRevisions {
+  const out: ProjectRevisions = {};
+  for (const pid of projectIds) {
+    const rev = revisions[pid];
+    if (typeof rev === 'number' && Number.isFinite(rev) && rev >= 0) {
+      out[pid] = Math.floor(rev);
+    }
+  }
+  return out;
+}

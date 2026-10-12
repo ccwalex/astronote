@@ -24,17 +24,17 @@ export async function fetchPageLoad(options?: {
   }
   const query = params.toString();
   const endpoint = `${API_BASE}/workspace/page-load${query ? `?${query}` : ''}`;
-  const headers: Record<string, string> = {};
   const sessionId = options?.sessionId?.trim();
-  if (sessionId) {
-    headers['X-Page-View-Session'] = sessionId;
-  }
+  const headers: Record<string, string> = {
+    ...userAndPageSessionHeaders({ pageSessionId: sessionId }),
+  };
   let response: Response;
   try {
     response = await fetch(endpoint, withNoStore({ headers }));
   } catch (err) {
     throw makeNetworkError('Fetch workspace page load', endpoint, err);
   }
+  adoptUserIdFromResponse(response);
   if (!response.ok) {
     const snippet = await getResponseBodySnippet(response);
     throw new Error(`Failed to fetch workspace page load (${response.status} ${response.statusText}) at ${endpoint}${snippet ? `: ${snippet}` : ''}`);
@@ -70,8 +70,23 @@ export async function fetchPageLoad(options?: {
 }
 
 import { Workspace, Project } from './types';
-import { extractWorkspaceRevision } from './model/workspaceCache';
-import { buildSavePayload, parseStaleSaveRevision, StaleWorkspaceSaveError } from './model/staleSaveRecovery';
+import {
+  extractProjectRevisions,
+  extractWorkspaceRevision,
+  type ProjectRevisions,
+} from './model/workspaceCache';
+import {
+  buildSavePayload,
+  parseStaleSaveDetail,
+  StaleWorkspaceSaveError,
+} from './model/staleSaveRecovery';
+import {
+  adoptUserIdFromResponse,
+  ensureUserSessionId,
+  userAndPageSessionHeaders,
+} from './model/userSession';
+
+export { ensureUserSessionId, endUserSession, startUserSessionLifecycle } from './model/userSession';
 
 const envApiBase = ((import.meta as any).env?.VITE_API_BASE as string | undefined)?.replace(/\/$/, '');
 const runtimeDefaultApiBase = '/api';
@@ -151,6 +166,7 @@ export type WorkspaceNavResponse = Workspace & WorkspaceRevisionFields;
 export type WorkspaceRevisionResponse = {
   workspace_id?: string | null;
   workspace_revision: number | null;
+  project_revisions?: ProjectRevisions | null;
   page_presence?: PagePresenceStatus | null;
 };
 
@@ -177,13 +193,17 @@ export async function postPagePresence(
   try {
     response = await fetch(endpoint, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...userAndPageSessionHeaders({ pageSessionId: body.session_id }),
+      },
       body: JSON.stringify(body),
       keepalive: body.action === 'leave',
     });
   } catch (err) {
     throw makeNetworkError('Post page presence', endpoint, err);
   }
+  adoptUserIdFromResponse(response);
   if (!response.ok) {
     const snippet = await getResponseBodySnippet(response);
     throw new Error(
@@ -211,12 +231,16 @@ export async function forcePageWriteUnlock(
   try {
     response = await fetch(endpoint, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...userAndPageSessionHeaders({ pageSessionId: sessionId }),
+      },
       body: JSON.stringify({ session_id: sessionId }),
     });
   } catch (err) {
     throw makeNetworkError('Force page write unlock', endpoint, err);
   }
+  adoptUserIdFromResponse(response);
   if (!response.ok) {
     const snippet = await getResponseBodySnippet(response);
     throw new Error(
@@ -266,11 +290,10 @@ export async function fetchWorkspaceRevision(options?: {
   }
   const query = params.toString();
   const endpoint = `${API_BASE}/workspace/revision${query ? `?${query}` : ''}`;
-  const headers: Record<string, string> = {};
   const sessionId = options?.sessionId?.trim();
-  if (sessionId) {
-    headers['X-Page-View-Session'] = sessionId;
-  }
+  const headers: Record<string, string> = {
+    ...userAndPageSessionHeaders({ pageSessionId: sessionId }),
+  };
   let response: Response;
 
   try {
@@ -278,6 +301,7 @@ export async function fetchWorkspaceRevision(options?: {
   } catch (err) {
     throw makeNetworkError('Fetch workspace revision', endpoint, err);
   }
+  adoptUserIdFromResponse(response);
 
   if (!response.ok) {
     const snippet = await getResponseBodySnippet(response);
@@ -295,6 +319,7 @@ export async function fetchWorkspaceRevision(options?: {
   return {
     workspace_id: workspaceId,
     workspace_revision: revision,
+    project_revisions: extractProjectRevisions(data),
     page_presence: parsePagePresenceStatus(
       data && typeof data === 'object' && !Array.isArray(data)
         ? (data as { page_presence?: unknown }).page_presence
@@ -310,10 +335,14 @@ export async function fetchWorkspaceNav(
   let response: Response;
 
   try {
-    response = await fetch(endpoint, withNoStore({ signal: options?.signal }));
+    response = await fetch(endpoint, withNoStore({
+      headers: userAndPageSessionHeaders(),
+      signal: options?.signal,
+    }));
   } catch (err) {
     throw makeNetworkError('Fetch workspace nav', endpoint, err);
   }
+  adoptUserIdFromResponse(response);
 
   if (!response.ok) {
     const snippet = await getResponseBodySnippet(response);
@@ -336,10 +365,14 @@ export async function fetchProject(
   let response: Response;
 
   try {
-    response = await fetch(endpoint, withNoStore({ signal: options?.signal }));
+    response = await fetch(endpoint, withNoStore({
+      headers: userAndPageSessionHeaders(),
+      signal: options?.signal,
+    }));
   } catch (err) {
     throw makeNetworkError('Fetch project', endpoint, err);
   }
+  adoptUserIdFromResponse(response);
 
   if (!response.ok) {
     const snippet = await getResponseBodySnippet(response);
@@ -582,6 +615,7 @@ export type SaveWorkspaceResponse = {
   status?: string;
   tracking_storage?: AssetTrackingStorageStatus;
   workspace_revision?: number;
+  project_revisions?: ProjectRevisions;
 };
 
 export { StaleWorkspaceSaveError } from './model/staleSaveRecovery';
@@ -591,6 +625,8 @@ export async function saveWorkspace(
   options?: {
     coalesce_key?: string;
     baseRevision?: number | null;
+    baseRevisions?: Record<string, number> | null;
+    clearedProjectIds?: string[] | null;
     signal?: AbortSignal;
     keepalive?: boolean;
     pageWriteSessionId?: string;
@@ -601,11 +637,14 @@ export async function saveWorkspace(
   const payload = buildSavePayload(workspace, {
     coalesceKey: options?.coalesce_key,
     baseRevision: options?.baseRevision,
+    baseRevisions: options?.baseRevisions,
+    clearedProjectIds: options?.clearedProjectIds,
   });
+  const pageWriteSessionId = options?.pageWriteSessionId?.trim();
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
+    ...userAndPageSessionHeaders({ pageSessionId: pageWriteSessionId }),
   };
-  const pageWriteSessionId = options?.pageWriteSessionId?.trim();
   if (pageWriteSessionId) {
     headers['X-Page-Write-Session'] = pageWriteSessionId;
   }
@@ -621,11 +660,12 @@ export async function saveWorkspace(
   } catch (err) {
     throw makeNetworkError('Save workspace', endpoint, err);
   }
+  adoptUserIdFromResponse(response);
 
   if (!response.ok) {
     const bodyText = await response.text();
     if (response.status === 409) {
-      throw new StaleWorkspaceSaveError(parseStaleSaveRevision(bodyText));
+      throw new StaleWorkspaceSaveError(parseStaleSaveDetail(bodyText));
     }
     const snippet = bodyText.slice(0, 400);
     throw new Error(`Failed to save workspace (${response.status} ${response.statusText}) at ${endpoint}${snippet ? `: ${snippet}` : ''}`);
@@ -637,10 +677,12 @@ export async function saveWorkspace(
       ? parseAssetTrackingStorageStatus(data.tracking_storage)
       : undefined;
     const workspaceRevision = extractWorkspaceRevision(data);
+    const projectRevisions = extractProjectRevisions(data);
     return {
       status: typeof data?.status === 'string' ? data.status : 'ok',
       tracking_storage: trackingStorage,
-      workspace_revision: workspaceRevision ?? undefined
+      workspace_revision: workspaceRevision ?? undefined,
+      project_revisions: projectRevisions ?? undefined,
     };
   } catch {
     return { status: 'ok' };

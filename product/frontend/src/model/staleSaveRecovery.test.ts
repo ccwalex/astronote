@@ -54,12 +54,42 @@ function test_parse_stale_revision_from_409_body(): void {
 }
 
 function test_stale_error_carries_server_revision(): void {
-  const err = new StaleWorkspaceSaveError(42);
+  const err = new StaleWorkspaceSaveError({
+    serverRevision: 42,
+    staleProjectIds: [],
+    projectRevisions: null,
+  });
   assert(err instanceof Error, 'must be an Error');
   assert(err.name === 'StaleWorkspaceSaveError', 'typed name');
   assert(err.serverRevision === 42, 'carries server revision');
   assert(err.message.includes('42'), 'message mentions the revision');
-  assert(new StaleWorkspaceSaveError(null).serverRevision === null, 'unknown revision -> null');
+  assert(
+    new StaleWorkspaceSaveError({
+      serverRevision: null,
+      staleProjectIds: [],
+      projectRevisions: null,
+    }).serverRevision === null,
+    'unknown revision -> null'
+  );
+}
+
+function test_payload_includes_per_project_fields(): void {
+  const payload = buildSavePayload(
+    { id: 'ws' },
+    {
+      baseRevisions: { p1: 3, p2: 4.9 },
+      clearedProjectIds: ['p3', ''],
+    }
+  );
+  const typed = payload as {
+    base_revisions?: Record<string, number>;
+    cleared_project_ids?: string[];
+  };
+  assert(typed.base_revisions?.p1 === 3 && typed.base_revisions?.p2 === 4, 'per-project revisions');
+  assert(
+    typed.cleared_project_ids?.length === 1 && typed.cleared_project_ids[0] === 'p3',
+    'cleared_project_ids trimmed'
+  );
 }
 
 function test_recovery_decision_single_retry(): void {
@@ -76,6 +106,7 @@ function main(): void {
     test_payload_includes_coalesce_key_when_provided,
     test_parse_stale_revision_from_409_body,
     test_stale_error_carries_server_revision,
+    test_payload_includes_per_project_fields,
     test_recovery_decision_single_retry,
   ];
   for (const test of tests) {

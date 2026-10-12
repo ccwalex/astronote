@@ -51,15 +51,19 @@ import {
 import { insertVerticalPageGap } from './model/insertVerticalPageGap';
 import { createStrokeObject, StrokeDrawStyle } from './model/canvasObjectFactory';
 import { probeCanvas, ProbeMode, ProbeResult } from './model/probeCanvas';
-import { fetchWorkspaceRevision, saveWorkspace, StaleWorkspaceSaveError, putAssetText, isAssetTrackingPersistError, uploadAsset, convertGroupSpaceToImage, restoreImageToGroup, postCommit, postRevertToBaseline, fetchAssetTrackingStorageStatus, migrateAssetTrackingStore, skipAssetTrackingMigration, type AssetTrackingStorageStatus, fetchWorkspaceStorageStatus, migrateWorkspaceStorage, skipWorkspaceStorageMigration, type WorkspaceStorageStatus, isAbortError } from './api';
+import { fetchWorkspaceRevision, saveWorkspace, StaleWorkspaceSaveError, putAssetText, isAssetTrackingPersistError, uploadAsset, convertGroupSpaceToImage, restoreImageToGroup, postCommit, postRevertToBaseline, fetchAssetTrackingStorageStatus, migrateAssetTrackingStore, skipAssetTrackingMigration, type AssetTrackingStorageStatus, fetchWorkspaceStorageStatus, migrateWorkspaceStorage, skipWorkspaceStorageMigration, type WorkspaceStorageStatus, isAbortError, startUserSessionLifecycle } from './api';
 import { decideStaleSaveRecovery } from './model/staleSaveRecovery';
 import {
   clearAstronoteLoadCaches,
+  extractProjectRevisions,
   extractWorkspaceRevision,
+  mergeProjectRevisions,
+  pickBaseRevisionsForProjects,
   removeProjectFromCache,
   updateCacheAfterSave,
   writeNavToCache,
-  writeProjectToCache
+  writeProjectToCache,
+  type ProjectRevisions,
 } from './model/workspaceCache';
 import { readLastView, validateLastView, writeLastView } from './model/lastViewCache';
 import { collectDirtyMarkdownAssets, isProjectHydrated, loadProjectIntoWorkspace, markMarkdownAssetsPersisted, noteHydratedMarkdownAssets, parseWorkspaceJson, prepareWorkspaceForSave, shouldPersistWorkspace, type DirtyMarkdownAsset } from './model/workspaceLoad';
@@ -194,6 +198,13 @@ export default function App() {
   const lastViewPrefetchRef = useRef<{ projectId: string; promise: Promise<import('./types').Project> } | null>(null);
   const bootSideTrafficStartedRef = useRef(false);
   const serverRevisionRef = useRef<number | null>(null);
+  const projectRevisionsRef = useRef<ProjectRevisions>({});
+  const mergeServerProjectRevisions = (data: unknown) => {
+    const next = extractProjectRevisions(data);
+    if (next) {
+      projectRevisionsRef.current = mergeProjectRevisions(projectRevisionsRef.current, next);
+    }
+  };
   // Guards the 409 stale-save recovery: exactly one automatic refresh-and-retry
   // per save attempt; a second rejection surfaces the error instead of looping.
   const staleSaveRecoveryRef = useRef(false);
@@ -252,6 +263,10 @@ export default function App() {
   const [lastViewRestored, setLastViewRestored] = useState(false);
   const lastViewSnapshotRef = useRef(readLastView());
   const [allowLastViewWrite, setAllowLastViewWrite] = useState(false);
+  useEffect(() => {
+    startUserSessionLifecycle();
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     if (!workspaceBootstrapPromise) {
@@ -685,6 +700,9 @@ export default function App() {
       return;
     }
     staleSaveRecoveryRef.current = true;
+    if (err.projectRevisions) {
+      mergeServerProjectRevisions(err.projectRevisions);
+    }
     setPersistStatus('saving');
     void (async () => {
       try {
@@ -770,9 +788,17 @@ export default function App() {
           keepalive: options?.keepalive
         });
       }
+      const clearedProjectIds = [
+        ...pendingLibraryDeletionsRef.current.projectIds,
+      ];
       return saveWorkspace(prepareWorkspaceForSave(workspace), {
         coalesce_key: coalesceKey || pendingCoalesceKeyRef.current || undefined,
         baseRevision: serverRevisionRef.current,
+        baseRevisions: pickBaseRevisionsForProjects(
+          ackProjectIds,
+          projectRevisionsRef.current
+        ),
+        clearedProjectIds,
         signal: options?.keepalive ? undefined : signal,
         keepalive: options?.keepalive,
         pageWriteSessionId: getOrCreatePageSessionId(),
@@ -798,6 +824,7 @@ export default function App() {
         if (rev != null) {
           serverRevisionRef.current = rev;
         }
+        mergeServerProjectRevisions(saveResult);
         staleSaveRecoveryRef.current = false;
         updateCacheAfterSave(
           rev ?? serverRevisionRef.current,
@@ -1132,15 +1159,21 @@ export default function App() {
         persistInFlightRef.current === 0 &&
         !serverRefreshInFlightRef.current,
       fetch: async (signal) => {
-        const { workspace_revision: serverRev, page_presence: pagePresence } =
-          await fetchWorkspaceRevision({
-            projectId: selectedProjectIdRef.current,
-            sessionId: getOrCreatePageSessionId(),
-            signal,
-          });
+        const {
+          workspace_revision: serverRev,
+          project_revisions: serverProjectRevisions,
+          page_presence: pagePresence,
+        } = await fetchWorkspaceRevision({
+          projectId: selectedProjectIdRef.current,
+          sessionId: getOrCreatePageSessionId(),
+          signal,
+        });
         if (signal.aborted) return;
         if (pagePresence) {
           applyPagePresenceStatus(pagePresence);
+        }
+        if (serverProjectRevisions) {
+          mergeServerProjectRevisions({ project_revisions: serverProjectRevisions });
         }
         if (serverRev == null) return;
         const dirty =
@@ -1346,9 +1379,16 @@ export default function App() {
         const body = JSON.stringify(prepared);
         // ~60k sendBeacon / keepalive budget; pending localStorage already written above.
         if (body.length < 60000) {
+          const ackIds = Object.keys(prepared.projects || {});
           void saveWorkspace(prepared, {
             keepalive: true,
             baseRevision: serverRevisionRef.current,
+            baseRevisions: pickBaseRevisionsForProjects(
+              ackIds,
+              projectRevisionsRef.current
+            ),
+            clearedProjectIds: [...pendingLibraryDeletionsRef.current.projectIds],
+            pageWriteSessionId: getOrCreatePageSessionId(),
           }).catch(() => {
             // Unload save: 409/network failures are expected; the pending
             // localStorage snapshot above keeps the dirty state for next launch.
