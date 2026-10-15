@@ -47,6 +47,7 @@ from modules import user_session
 from modules.load_workspace import load_workspace, parse_workspace_json_text
 from modules.workspace_sync import workspace_write_lock
 from modules.save_workspace import (
+    annotate_unavailable_text_assets,
     assets_dir_from_workspace_path,
     hydrate_text_assets,
     save_workspace,
@@ -1219,7 +1220,8 @@ def get_project(project_id: str):
             raise HTTPException(status_code=404, detail="Project not found")
         ws = load_workspace(
             WORKSPACE_PATH,
-            hydrate=False,
+            hydrate=True,
+            hydrate_text_only=True,
             project_id=project_id,
             persist_repairs=False,
             synthesize_library_bodies=False,
@@ -1227,8 +1229,8 @@ def get_project(project_id: str):
         project = ws.projects.get(project_id)
         if project is None:
             raise HTTPException(status_code=404, detail="Project not found")
-        payload = project.to_dict()
-        strip_asset_content_from_dict(payload)
+        payload = strip_binary_asset_content_from_payload(project.to_dict())
+        annotate_unavailable_text_assets(payload, ASSETS_DIR, workspace_path=WORKSPACE_PATH)
         if is_project_stub(payload):
             raise HTTPException(
                 status_code=422,
@@ -1356,6 +1358,9 @@ def get_workspace_page_load(
                 proj_dict = proj.to_dict() if proj is not None else None
                 if proj_dict is not None and not is_project_stub(proj_dict):
                     project_payload = strip_binary_asset_content_from_payload(proj_dict)
+                    annotate_unavailable_text_assets(
+                        project_payload, ASSETS_DIR, workspace_path=WORKSPACE_PATH
+                    )
                     project_payload["workspace_revision"] = revision
             return _with_page_presence(
                 {
@@ -1397,6 +1402,9 @@ def get_workspace_page_load(
             if proj_dict is not None and not is_project_stub(proj_dict):
                 # Text hydrates inline; binaries resolve via /api/assets/{id}.
                 project_payload = strip_binary_asset_content_from_payload(proj_dict)
+                annotate_unavailable_text_assets(
+                    project_payload, ASSETS_DIR, workspace_path=WORKSPACE_PATH
+                )
                 project_payload["workspace_revision"] = revision
         return _with_page_presence(
             {

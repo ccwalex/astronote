@@ -368,6 +368,50 @@ def hydrate_text_assets(workspace: Workspace, assets_dir: Optional[str]) -> None
         asset.content = text
 
 
+def _strip_ephemeral_asset_metadata(asset: dict) -> None:
+    meta = asset.get("metadata")
+    if isinstance(meta, dict):
+        meta.pop("content_unavailable", None)
+
+
+def annotate_unavailable_text_assets(
+    project_payload: dict,
+    assets_dir: Optional[str],
+    workspace_path: Optional[str] = None,
+) -> dict:
+    """Mark text assets whose bytes cannot be resolved on disk (read-only API hint).
+
+    Clients use metadata.content_unavailable to show an error instead of waiting
+    on GET /api/assets when hydration already proved the file is missing.
+    """
+    if not isinstance(project_payload, dict) or not assets_dir:
+        return project_payload
+    assets = project_payload.get("assets")
+    if not isinstance(assets, dict):
+        return project_payload
+    try:
+        from modules.asset_resolve import resolve_asset_file
+    except Exception:
+        return project_payload
+    for asset in assets.values():
+        if not isinstance(asset, dict) or not _is_text_asset(asset):
+            continue
+        content = asset.get("content")
+        if isinstance(content, str):
+            continue
+        asset_id = str(asset.get("id") or "").strip()
+        if not asset_id:
+            continue
+        if resolve_asset_file(asset_id, assets_dir, workspace_path=workspace_path) is not None:
+            continue
+        meta = asset.get("metadata")
+        if not isinstance(meta, dict):
+            meta = {}
+            asset["metadata"] = meta
+        meta["content_unavailable"] = True
+    return project_payload
+
+
 def strip_asset_content_from_dict(payload: dict) -> dict:
     """Drop in-memory asset bodies so workspace.json stays layout-only."""
     if not isinstance(payload, dict):
@@ -387,6 +431,7 @@ def strip_asset_content_from_dict(payload: dict) -> dict:
         for asset in assets.values():
             if not isinstance(asset, dict):
                 continue
+            _strip_ephemeral_asset_metadata(asset)
             path = asset.get("path")
             if isinstance(path, str) and path.startswith("data:"):
                 raise ValueError("Refusing to persist data-URL blob")
