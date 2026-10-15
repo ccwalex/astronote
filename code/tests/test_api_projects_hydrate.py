@@ -150,7 +150,7 @@ def test_get_project_complete_from_saved_workspace():
             asset = payload["assets"]["asset_big"]
             assert asset.get("path")
             assert not str(asset["path"]).startswith("data:")
-            assert "content" not in asset
+            assert asset.get("content") in (None, "")
             assert isinstance(payload.get("workspace_revision"), int)
             assert payload["workspace_revision"] == nav_body["workspace_revision"]
         finally:

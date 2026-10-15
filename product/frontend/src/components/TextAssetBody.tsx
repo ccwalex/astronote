@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Asset } from '../types';
 import { fetchAssetText } from '../api';
+import { planTextAssetLoad, TEXT_ASSET_UNAVAILABLE_MESSAGE } from '../model/textAssetLoad';
 import { TextSpaceArea } from './TextSpaceArea';
 
 export interface TextAssetBodyProps {
@@ -34,23 +35,28 @@ export function TextAssetBody({
   zoom = 1,
   enterCaretPoint = null
 }: TextAssetBodyProps) {
-  const inline = typeof asset.content === 'string' ? asset.content : null;
-  const [loaded, setLoaded] = useState<string>(inline || '');
-  const [error, setError] = useState<string | null>(null);
-  const [ready, setReady] = useState(inline !== null);
+  const loadPlan = planTextAssetLoad(asset);
+  const [loaded, setLoaded] = useState<string>(
+    loadPlan.mode === 'inline' ? loadPlan.text : ''
+  );
+  const [error, setError] = useState<string | null>(
+    loadPlan.mode === 'unavailable' ? loadPlan.message : null
+  );
+  const [ready, setReady] = useState(loadPlan.mode !== 'fetch');
   const [loadAttempt, setLoadAttempt] = useState(0);
 
   useEffect(() => {
-    if (inline !== null) {
-      setLoaded(inline);
+    const plan = planTextAssetLoad(asset);
+    if (plan.mode === 'inline') {
+      setLoaded(plan.text);
       setReady(true);
       setError(null);
       return;
     }
-    if (!asset.id) {
+    if (plan.mode === 'unavailable') {
       setLoaded('');
       setReady(true);
-      setError(null);
+      setError(plan.message);
       return;
     }
     let cancelled = false;
@@ -71,7 +77,7 @@ export function TextAssetBody({
     return () => {
       cancelled = true;
     };
-  }, [asset.id, inline, loadAttempt]);
+  }, [asset.id, asset.content, asset.metadata, loadAttempt]);
 
   if (!ready) {
     return <div style={{ color: '#666', fontSize: '13px' }}>Loading text...</div>;
@@ -81,7 +87,7 @@ export function TextAssetBody({
     <>
       {error ? (
         <div role="alert" style={{ color: '#c00', fontSize: '12px', marginBottom: '6px' }}>
-          Text failed to load: {error}
+          {error === TEXT_ASSET_UNAVAILABLE_MESSAGE ? error : `Text failed to load: ${error}`}
           <button
             type="button"
             onClick={() => {
