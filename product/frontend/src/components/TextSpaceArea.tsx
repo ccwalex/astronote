@@ -3,6 +3,13 @@ import { createPortal } from 'react-dom';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import TurndownService from 'turndown';
+import {
+  BLANK_PARAGRAPH_MARKDOWN,
+  BLANK_PARAGRAPH_SENTINEL,
+  collapseRunawayBlankParagraphMarkdown,
+  MAX_BLANK_PARAGRAPH_EXPAND_PER_NEWLINE_RUN,
+  normalizeLegacyBlankParagraphMarkdown,
+} from '../model/textSpaceBlankParagraphGuards';
 
 // NOTE: the sentinel must not contain characters turndown escapes in text
 // nodes (its markdownEscapes list includes `_`). The old sentinel
@@ -12,11 +19,6 @@ import TurndownService from 'turndown';
 // the trailing post-sanitize replacement turned it into another
 // blank-paragraph line. Every blur/re-render cycle then doubled the stray
 // "line with a single space" under the edited line.
-const BLANK_PARAGRAPH_MARKDOWN = ' ';
-const BLANK_PARAGRAPH_SENTINEL = '%%BLANKPARAGRAPH%%';
-// Sentinels already persisted by older builds (escaped or plain).
-const LEGACY_BLANK_SENTINEL_RE = /%%BLANK(?:\\_|_)PARAGRAPH%%/g;
-
 const turndownService = new TurndownService({
   headingStyle: 'atx',
   codeBlockStyle: 'fenced',
@@ -227,6 +229,7 @@ function preserveMarkdownBlankLines(markdown: string): string {
       extra -= 1;
     }
     if (extra <= 0) return '\n\n';
+    extra = Math.min(extra, MAX_BLANK_PARAGRAPH_EXPAND_PER_NEWLINE_RUN);
     const blanks = Array.from({ length: extra }, () => BLANK_PARAGRAPH_MARKDOWN).join('\n\n');
     return '\n\n' + blanks + '\n\n';
   });
@@ -268,11 +271,7 @@ function htmlToMarkdown(html: string): string {
   const trailingBlanks = countEdgeEmptyBlocks(container, true);
   markEmptyParagraphsForTurndown(container);
   let markdown = turndownService.turndown(container).replace(/\u00a0/g, BLANK_PARAGRAPH_MARKDOWN);
-  markdown = markdown
-    .split(BLANK_PARAGRAPH_SENTINEL).join(BLANK_PARAGRAPH_MARKDOWN)
-    // Clean up sentinels persisted by older builds (turndown escaped the old
-    // sentinel's underscores, so the plain split above missed those).
-    .replace(LEGACY_BLANK_SENTINEL_RE, BLANK_PARAGRAPH_MARKDOWN);
+  markdown = normalizeLegacyBlankParagraphMarkdown(markdown);
   markdown = preserveMarkdownBlankLines(markdown);
   markdown = stripBlankParagraphsBeforeLists(markdown);
   const startsWithToken = markdown === BLANK_PARAGRAPH_MARKDOWN || markdown.startsWith(BLANK_PARAGRAPH_MARKDOWN + '\n\n');
@@ -285,21 +284,20 @@ function htmlToMarkdown(html: string): string {
     const suffix = Array.from({ length: trailingBlanks }, () => BLANK_PARAGRAPH_MARKDOWN).join('\n\n');
     markdown = markdown ? markdown + '\n\n' + suffix : suffix;
   }
-  return markdown;
+  return collapseRunawayBlankParagraphMarkdown(markdown);
 }
 
 function markdownToEditorHtml(markdown: string): string {
   try {
     // Normalize sentinels persisted by older builds (plain or escaped) into
     // blank-paragraph markers before parsing.
-    const withoutSentinel = markdown
-      .split(BLANK_PARAGRAPH_SENTINEL).join(BLANK_PARAGRAPH_MARKDOWN)
-      .replace(LEGACY_BLANK_SENTINEL_RE, BLANK_PARAGRAPH_MARKDOWN);
+    const withoutSentinel = collapseRunawayBlankParagraphMarkdown(
+      normalizeLegacyBlankParagraphMarkdown(markdown)
+    );
     const sanitized = DOMPurify.sanitize(
       marked.parse(preserveMarkdownBlankLines(stripBlankParagraphsBeforeLists(withoutSentinel)), { async: false, breaks: false, gfm: true }) as string
     );
-    return sanitized
-      .split(BLANK_PARAGRAPH_SENTINEL).join(BLANK_PARAGRAPH_MARKDOWN)
+    return normalizeLegacyBlankParagraphMarkdown(sanitized)
       .split('<thead>').join('')
       .split('</thead>').join('')
       .split('<th ').join('<td ')

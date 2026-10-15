@@ -15,7 +15,11 @@
     "test:stale-save-recovery": "node --experimental-strip-types src/model/staleSaveRecovery.test.ts",
     "test:pending-persist": "node --experimental-strip-types --import ./scripts/register-ts-resolve.mjs src/model/pendingPersistCache.test.ts",
     "test:asset-source": "node --experimental-strip-types src/model/assetSource.test.ts",
+<<<<<<< HEAD
     "test:text-asset-load": "node --experimental-strip-types src/model/textAssetLoad.test.ts",
+=======
+    "test:blank-paragraph-guards": "node --experimental-strip-types src/model/textSpaceBlankParagraphGuards.test.ts",
+>>>>>>> ccc4b79 (Add blank-paragraph inflation guards for TextSpace markdown)
     "test:workspace-load": "node --experimental-strip-types src/model/workspaceLoad.test.ts",
     "test:workspace-save": "node --experimental-strip-types --import ./scripts/register-ts-resolve.mjs src/model/workspaceSave.test.ts",
     "test:ungroup-layout": "node --experimental-strip-types src/model/ungroupSpaceWithLayout.test.ts",
