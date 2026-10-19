@@ -198,6 +198,25 @@ def test_plan_restore_dangling_references():
     assert plan == {"p1": {"objects": True, "assets": True}}
 
 
+def test_same_layout_empty_not_trusted_with_base_revision_proof():
+    """A save with base_revision must not trust same-layout empty collections
+    without cleared_project_ids (409 retry / poisoned body shape)."""
+    disk = {"projects": {"p1": _complete_project_with_bodies()}}
+    client = _complete_project()
+    client["assets"] = {}
+    client["objects"] = {}
+    for space in client["spaces"].values():
+        space["asset_ids"] = []
+        space["object_ids"] = []
+        space["reference_asset_id"] = None
+    plan = plan_collection_restore(
+        {"projects": {"p1": client}},
+        disk,
+        trust_client_deletions=True,
+    )
+    assert plan == {"p1": {"objects": True, "assets": True}}
+
+
 def test_plan_trust_legitimate_empty_page():
     # Client holds the real layout (spaces match disk modulo references) and
     # emptied the page on purpose. The empty body is trusted ONLY when the
@@ -452,6 +471,7 @@ def main():
         test_plan_restore_synthesized_default_body_over_edited_layout,
         test_plan_trust_synthesized_shape_on_pristine_layout,
         test_plan_restore_dangling_references,
+        test_same_layout_empty_not_trusted_with_base_revision_proof,
         test_plan_trust_legitimate_empty_page,
         test_plan_trust_partial_user_wipe,
         test_plan_restore_fabricated_layout_on_total_wipe,

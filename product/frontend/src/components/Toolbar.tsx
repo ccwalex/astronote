@@ -46,11 +46,11 @@ const PERSIST_STATUS_LABEL: Record<
   NonNullable<ToolbarProps['persistStatus']>,
   { text: string; color: string }
 > = {
-  idle: { text: 'Up to date', color: '#666' },
+  idle: { text: 'All changes saved', color: '#666' },
   unsaved: { text: 'Unsaved changes', color: '#b45309' },
   saving: { text: 'Saving…', color: '#1d4ed8' },
-  saved: { text: 'Saved', color: '#15803d' },
-  synced: { text: 'Synced from server', color: '#15803d' },
+  saved: { text: 'Saved to server', color: '#15803d' },
+  synced: { text: 'Loaded from server', color: '#15803d' },
   locked: { text: 'Editing locked', color: '#92400e' },
 };
 
