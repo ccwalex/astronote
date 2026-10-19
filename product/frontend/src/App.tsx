@@ -86,6 +86,7 @@ import {
   isWorkspaceDirty,
   markUserMutation,
 } from './model/workspaceDirtyGate';
+import { resolveBaselinePersistStatus } from './model/workspacePersistStatus';
 import {
   deriveWriteProtection,
   getOrCreatePageSessionId,
@@ -600,8 +601,12 @@ export default function App() {
     }
     savedFlashTimerRef.current = window.setTimeout(() => {
       savedFlashTimerRef.current = null;
-      const dirty = isWorkspaceDirty(workspaceDirtyGateRef.current);
-      setPersistStatus(dirty ? 'unsaved' : 'idle');
+      setPersistStatus(
+        resolveBaselinePersistStatus({
+          dirty: isWorkspaceDirty(workspaceDirtyGateRef.current),
+          pendingProjectCount: listPendingProjectIds().length,
+        })
+      );
     }, ms);
   };
 
@@ -1243,7 +1248,10 @@ export default function App() {
     if (loading || persistInFlightRef.current > 0) return;
     setPersistStatus((prev) => {
       if (prev === 'saving' || prev === 'saved' || prev === 'synced') return prev;
-      return isWorkspaceDirty(workspaceDirtyGateRef.current) ? 'unsaved' : 'idle';
+      return resolveBaselinePersistStatus({
+        dirty: isWorkspaceDirty(workspaceDirtyGateRef.current),
+        pendingProjectCount: listPendingProjectIds().length,
+      });
     });
   }, [historyState.present, loading, dirtyGateVersion]);
 

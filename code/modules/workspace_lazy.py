@@ -348,10 +348,11 @@ def plan_collection_restore(
                 # base revision the client body is authoritative for what went
                 # with them.
                 continue
-            if not trust_client_deletions:
-                # Same-layout empty without a clear mark and without freshness
-                # proof: indistinguishable from a poisoned partial payload.
-                plan.setdefault(str(project_id), {})[key] = True
+            # Same-layout empty without an explicit clear is never trusted, even
+            # when the save carries a fresh base_revision: a 409 retry can post
+            # the current revision with a poisoned empty body that looks like a
+            # deliberate wipe.
+            plan.setdefault(str(project_id), {})[key] = True
     return plan
 
 
