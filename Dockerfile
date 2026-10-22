@@ -1,4 +1,5 @@
-FROM node:latest
+# Pinned for Oct 2026 Node security releases (e.g. CVE-2026-111497); avoid floating node:latest.
+FROM node:26.12.1
 
 RUN apt-get update && \
     apt-get install -y python3 python3-pip python3-venv && \
