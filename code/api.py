@@ -1230,7 +1230,12 @@ def get_project(project_id: str):
         if project is None:
             raise HTTPException(status_code=404, detail="Project not found")
         payload = strip_binary_asset_content_from_payload(project.to_dict())
-        annotate_unavailable_text_assets(payload, ASSETS_DIR, workspace_path=WORKSPACE_PATH)
+        annotate_unavailable_text_assets(
+            payload,
+            ASSETS_DIR,
+            workspace_path=WORKSPACE_PATH,
+            operation="GET /api/projects/{project_id}",
+        )
         if is_project_stub(payload):
             raise HTTPException(
                 status_code=422,
@@ -1359,7 +1364,10 @@ def get_workspace_page_load(
                 if proj_dict is not None and not is_project_stub(proj_dict):
                     project_payload = strip_binary_asset_content_from_payload(proj_dict)
                     annotate_unavailable_text_assets(
-                        project_payload, ASSETS_DIR, workspace_path=WORKSPACE_PATH
+                        project_payload,
+                        ASSETS_DIR,
+                        workspace_path=WORKSPACE_PATH,
+                        operation="GET /api/page-load",
                     )
                     project_payload["workspace_revision"] = revision
             return _with_page_presence(
@@ -1403,7 +1411,10 @@ def get_workspace_page_load(
                 # Text hydrates inline; binaries resolve via /api/assets/{id}.
                 project_payload = strip_binary_asset_content_from_payload(proj_dict)
                 annotate_unavailable_text_assets(
-                    project_payload, ASSETS_DIR, workspace_path=WORKSPACE_PATH
+                    project_payload,
+                    ASSETS_DIR,
+                    workspace_path=WORKSPACE_PATH,
+                    operation="GET /api/page-load",
                 )
                 project_payload["workspace_revision"] = revision
         return _with_page_presence(
@@ -1683,6 +1694,8 @@ def _post_workspace_sync(
                 current=ws,
                 data_dir=data_dir,
                 changed_project_ids=save_project_ids + delete_ids,
+                operation="POST /api/workspace",
+                reason="scoped_save_asset_reconciliation",
             )
             _sync_asset_tracking_for_workspace(
                 previous_workspace, ws, changed_project_ids=save_project_ids or None
@@ -1691,7 +1704,13 @@ def _post_workspace_sync(
                 previous_workspace, ws, changed_project_ids=save_project_ids or None
             )
         else:
-            cleanup_removed_assets(previous=previous_workspace, current=ws, data_dir=data_dir)
+            cleanup_removed_assets(
+                previous=previous_workspace,
+                current=ws,
+                data_dir=data_dir,
+                operation="POST /api/workspace",
+                reason="full_save_asset_reconciliation",
+            )
             _sync_asset_tracking_for_workspace(previous_workspace, ws)
             _drop_removed_asset_embeddings(previous_workspace, ws)
 
@@ -2049,13 +2068,24 @@ def post_assets_trash_purge(data: dict = Body(default={})):
         max_age_days = float(data.get("max_age_days", 30.0))
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="max_age_days must be a number")
-    return purge_assets_trash(_asset_tracking_data_dir(), max_age_days=max_age_days)
+    return purge_assets_trash(
+        _asset_tracking_data_dir(),
+        max_age_days=max_age_days,
+        operation="POST /api/assets/trash/purge",
+        reason="api_trash_retention_purge",
+    )
 
 
 @app.post("/api/assets/trash/{asset_id}/restore")
 def post_assets_trash_restore(asset_id: str):
     assets_dir = os.path.join(_asset_tracking_data_dir(), "assets")
-    restored = restore_asset_files(asset_id, assets_dir, data_dir=_asset_tracking_data_dir())
+    restored = restore_asset_files(
+        asset_id,
+        assets_dir,
+        data_dir=_asset_tracking_data_dir(),
+        operation="POST /api/assets/trash/{asset_id}/restore",
+        reason="api_trash_restore",
+    )
     if not restored:
         raise HTTPException(status_code=404, detail="No quarantined files for this asset id")
     return {"status": "ok", "asset_id": asset_id, "restored_files": restored}
@@ -2755,6 +2785,19 @@ def get_asset(asset_id: str):
     # Keyed resolve: no Workspace.from_dict, no write lock, no migrate/embed wait.
     file_path = resolve_asset_file(asset_id, ASSETS_DIR, workspace_path=WORKSPACE_PATH)
     if file_path is None:
+        try:
+            from modules.asset_file_audit import append_asset_file_audit, data_dir_from_assets_dir
+
+            append_asset_file_audit(
+                event="missing_on_fetch",
+                asset_id=asset_id,
+                path="",
+                operation="GET /api/assets/{asset_id}",
+                reason="resolve_asset_file_returned_none",
+                data_dir=data_dir_from_assets_dir(ASSETS_DIR) or _asset_tracking_data_dir(),
+            )
+        except Exception:
+            pass
         raise HTTPException(status_code=404, detail="Asset not found")
 
     media_type, _ = mimetypes.guess_type(file_path)
