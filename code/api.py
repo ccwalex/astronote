@@ -102,6 +102,7 @@ from modules.asset_cleanup import (
     cleanup_removed_assets,
     data_dir_from_workspace_path,
     list_assets_trash,
+    prune_unused_assets_for_save,
     purge_assets_trash,
     restore_asset_files,
 )
@@ -1688,31 +1689,14 @@ def _post_workspace_sync(
             and _workspace_store_exists()
             and bool(save_project_ids or delete_ids)
         )
-        if use_scoped_save:
-            cleanup_removed_assets(
-                previous=previous_workspace,
-                current=ws,
-                data_dir=data_dir,
-                changed_project_ids=save_project_ids + delete_ids,
-                operation="POST /api/workspace",
-                reason="scoped_save_asset_reconciliation",
+        changed_project_ids = save_project_ids + delete_ids if use_scoped_save else None
+        pruned_asset_ids = None
+        if previous_workspace is not None:
+            pruned_asset_ids = prune_unused_assets_for_save(
+                previous_workspace,
+                ws,
+                changed_project_ids=changed_project_ids,
             )
-            _sync_asset_tracking_for_workspace(
-                previous_workspace, ws, changed_project_ids=save_project_ids or None
-            )
-            _drop_removed_asset_embeddings(
-                previous_workspace, ws, changed_project_ids=save_project_ids or None
-            )
-        else:
-            cleanup_removed_assets(
-                previous=previous_workspace,
-                current=ws,
-                data_dir=data_dir,
-                operation="POST /api/workspace",
-                reason="full_save_asset_reconciliation",
-            )
-            _sync_asset_tracking_for_workspace(previous_workspace, ws)
-            _drop_removed_asset_embeddings(previous_workspace, ws)
 
         os.makedirs(os.path.dirname(WORKSPACE_PATH), exist_ok=True)
         save_started = time.monotonic()
@@ -1736,6 +1720,36 @@ def _post_workspace_sync(
             # bodies at all: fall back to the full-store write.
             save_workspace_and_snapshot(ws, WORKSPACE_PATH, "save", coalesce_key=coalesce_key)
         _log_slow_step("human_save_write", save_started)
+
+        # Quarantine and side stores only after sqlite persist succeeds: a failed
+        # save must not move live files while DB rows still reference them.
+        if use_scoped_save:
+            cleanup_removed_assets(
+                previous=previous_workspace,
+                current=ws,
+                data_dir=data_dir,
+                changed_project_ids=changed_project_ids,
+                operation="POST /api/workspace",
+                reason="scoped_save_asset_reconciliation",
+                pruned_asset_ids=pruned_asset_ids,
+            )
+            _sync_asset_tracking_for_workspace(
+                previous_workspace, ws, changed_project_ids=save_project_ids or None
+            )
+            _drop_removed_asset_embeddings(
+                previous_workspace, ws, changed_project_ids=save_project_ids or None
+            )
+        else:
+            cleanup_removed_assets(
+                previous=previous_workspace,
+                current=ws,
+                data_dir=data_dir,
+                operation="POST /api/workspace",
+                reason="full_save_asset_reconciliation",
+                pruned_asset_ids=pruned_asset_ids,
+            )
+            _sync_asset_tracking_for_workspace(previous_workspace, ws)
+            _drop_removed_asset_embeddings(previous_workspace, ws)
         _bump_search_cache_generation()
         return {
             "status": "ok",

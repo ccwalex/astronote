@@ -424,6 +424,28 @@ def _live_project_ids(workspace: Any) -> Set[str]:
     return {str(pid) for pid in projects if not _project_is_stub(projects.get(pid))}
 
 
+def prune_unused_assets_for_save(
+    previous: Optional[Any],
+    current: Any,
+    changed_project_ids=None,
+) -> Set[str]:
+    """Drop unreferenced assets from `current` before persisting the workspace.
+
+    Returns the pruned asset ids (scoped for per-project saves). Call this
+    before sqlite write, then run `cleanup_removed_assets` with the same
+    `pruned_asset_ids` after a successful save so file quarantine cannot run
+    ahead of a failed or rolled-back persist.
+    """
+    changed = {str(pid) for pid in (changed_project_ids or []) if str(pid or "").strip()}
+    pruned = prune_unused_live_assets(previous, current)
+    if not changed:
+        return pruned
+    untouched_ids: Set[str] = set()
+    for pid in _live_project_ids(current) - changed:
+        untouched_ids |= _project_asset_ids((getattr(current, "projects", None) or {}).get(pid))
+    return {aid for aid in pruned if aid not in untouched_ids}
+
+
 def cleanup_removed_assets(
     *,
     previous: Optional[Any],
@@ -432,6 +454,7 @@ def cleanup_removed_assets(
     changed_project_ids=None,
     operation: str = "cleanup_removed_assets",
     reason: str = "",
+    pruned_asset_ids: Optional[Set[str]] = None,
 ) -> Dict[str, Any]:
     from modules.asset_tracking import (
         get_tracking_storage_status,
@@ -440,7 +463,10 @@ def cleanup_removed_assets(
     )
 
     changed = {str(pid) for pid in (changed_project_ids or []) if str(pid or "").strip()}
-    pruned = prune_unused_live_assets(previous, current)
+    if pruned_asset_ids is None:
+        pruned = prune_unused_live_assets(previous, current)
+    else:
+        pruned = set(pruned_asset_ids)
     prev_ids = workspace_asset_ids(previous) if previous is not None else set()
     curr_ids = workspace_asset_ids(current)
     removed_project_of: dict = {}
@@ -464,7 +490,8 @@ def cleanup_removed_assets(
         untouched_ids = set()
         for pid in _live_project_ids(current) - changed:
             untouched_ids |= _project_asset_ids((getattr(current, "projects", None) or {}).get(pid))
-        pruned = {aid for aid in pruned if aid not in untouched_ids}
+        if pruned_asset_ids is None:
+            pruned = {aid for aid in pruned if aid not in untouched_ids}
     clone_ids = group_clone_asset_ids(current, data_dir=data_dir)
     removed_ids = (prev_ids | pruned) - curr_ids
     if changed:
