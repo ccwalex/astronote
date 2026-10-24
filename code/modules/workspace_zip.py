@@ -215,7 +215,13 @@ def apply_imported_workspace(
     save_workspace(ws, workspace_path)
     data_dir = data_dir_from_workspace_path(workspace_path)
     if data_dir and previous is not None:
-        cleanup_removed_assets(previous=previous, current=ws, data_dir=data_dir)
+        cleanup_removed_assets(
+            previous=previous,
+            current=ws,
+            data_dir=data_dir,
+            operation="apply_imported_workspace",
+            reason="zip_import_removed_assets",
+        )
     if assets_dir:
         hydrate_assets(ws, assets_dir)
     undo_state = reset_working_period_to_live(ws, workspace_path=workspace_path)

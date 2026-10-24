@@ -4,6 +4,8 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Set
 
+from modules.asset_file_audit import append_asset_file_audit, data_dir_from_assets_dir
+
 
 def data_dir_from_workspace_path(path: str) -> Optional[str]:
     if not path:
@@ -78,7 +80,14 @@ def workspace_asset_ids(workspace: Any) -> Set[str]:
     return ids
 
 
-def delete_asset_files(asset_id: str, assets_dir: str) -> list:
+def delete_asset_files(
+    asset_id: str,
+    assets_dir: str,
+    *,
+    operation: str = "delete_asset_files",
+    reason: str = "",
+    data_dir: Optional[str] = None,
+) -> list:
     """Quarantine an asset's files into assets_trash instead of removing them.
 
     A save that drops an asset (legitimately or not) only moves its files to
@@ -90,6 +99,7 @@ def delete_asset_files(asset_id: str, assets_dir: str) -> list:
     asset_id = str(asset_id or "").strip()
     if not asset_id or not assets_dir or not os.path.isdir(assets_dir):
         return moved
+    audit_data_dir = data_dir or data_dir_from_assets_dir(assets_dir)
     trash_root = os.path.join(os.path.dirname(os.path.abspath(assets_dir)), "assets_trash")
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     trash_dir = os.path.join(trash_root, stamp, asset_id)
@@ -110,15 +120,48 @@ def delete_asset_files(asset_id: str, assets_dir: str) -> list:
             dest = os.path.join(trash_dir, name)
             shutil.move(path, dest)
             moved.append(dest)
+            append_asset_file_audit(
+                event="quarantine",
+                asset_id=asset_id,
+                path=path,
+                operation=operation,
+                reason=reason or "moved_to_assets_trash",
+                data_dir=audit_data_dir,
+                extra={"dest": dest, "trash_stamp": stamp},
+            )
         except (OSError, shutil.Error):
             # Quarantine must never fail a save: fall back to leaving the file
             # in place (an orphaned asset file is recoverable; a crashed save
             # is not).
+            append_asset_file_audit(
+                event="quarantine_failed",
+                asset_id=asset_id,
+                path=path,
+                operation=operation,
+                reason=reason or "move_to_assets_trash_failed",
+                data_dir=audit_data_dir,
+            )
             continue
+    if not moved:
+        append_asset_file_audit(
+            event="quarantine_noop",
+            asset_id=asset_id,
+            path="",
+            operation=operation,
+            reason=reason or "no_matching_live_file",
+            data_dir=audit_data_dir,
+        )
     return moved
 
 
-def restore_asset_files(asset_id: str, assets_dir: str, data_dir: Optional[str] = None) -> list:
+def restore_asset_files(
+    asset_id: str,
+    assets_dir: str,
+    data_dir: Optional[str] = None,
+    *,
+    operation: str = "restore_asset_files",
+    reason: str = "",
+) -> list:
     """Restore an asset's quarantined files back into the live assets dir."""
     restored = []
     asset_id = str(asset_id or "").strip()
@@ -142,7 +185,24 @@ def restore_asset_files(asset_id: str, assets_dir: str, data_dir: Optional[str] 
             try:
                 shutil.move(src, dest)
                 restored.append(dest)
+                append_asset_file_audit(
+                    event="restore",
+                    asset_id=asset_id,
+                    path=dest,
+                    operation=operation,
+                    reason=reason or "restored_from_assets_trash",
+                    data_dir=data_dir or data_dir_from_assets_dir(assets_dir),
+                    extra={"source": src},
+                )
             except (OSError, shutil.Error):
+                append_asset_file_audit(
+                    event="restore_failed",
+                    asset_id=asset_id,
+                    path=src,
+                    operation=operation,
+                    reason=reason or "move_from_assets_trash_failed",
+                    data_dir=data_dir or data_dir_from_assets_dir(assets_dir),
+                )
                 continue
         try:
             os.rmdir(asset_dir)
@@ -177,7 +237,13 @@ def list_assets_trash(data_dir: str) -> list:
     return entries
 
 
-def purge_assets_trash(data_dir: str, max_age_days: float = 30.0) -> dict:
+def purge_assets_trash(
+    data_dir: str,
+    max_age_days: float = 30.0,
+    *,
+    operation: str = "purge_assets_trash",
+    reason: str = "",
+) -> dict:
     """Delete quarantined assets older than the retention window."""
     trash_root = os.path.join(os.path.abspath(data_dir or ""), "assets_trash")
     cutoff = time.time() - max(0.0, float(max_age_days)) * 86400.0
@@ -194,6 +260,24 @@ def purge_assets_trash(data_dir: str, max_age_days: float = 30.0) -> dict:
             stamp_time = os.path.getmtime(stamp_dir)
         if stamp_time >= cutoff:
             continue
+        for asset_id in os.listdir(stamp_dir):
+            asset_dir = os.path.join(stamp_dir, asset_id)
+            if not os.path.isdir(asset_dir):
+                continue
+            for name in os.listdir(asset_dir):
+                if name.startswith("."):
+                    continue
+                file_path = os.path.join(asset_dir, name)
+                if os.path.isfile(file_path):
+                    append_asset_file_audit(
+                        event="purge",
+                        asset_id=asset_id,
+                        path=file_path,
+                        operation=operation,
+                        reason=reason or f"retention_exceeded_{max_age_days}d",
+                        data_dir=data_dir,
+                        extra={"trash_stamp": stamp},
+                    )
         shutil.rmtree(stamp_dir, ignore_errors=True)
         purged.append(stamp)
     return {"purged_stamps": purged, "max_age_days": max_age_days}
@@ -283,16 +367,30 @@ def cleanup_snapshot_asset(
     project_id: Optional[str] = None,
     assets_dir: Optional[str] = None,
     data_dir: Optional[str] = None,
+    operation: str = "cleanup_snapshot_asset",
+    reason: str = "group_photo_restore",
 ) -> Dict[str, Any]:
     asset_id = str(asset_id or "").strip()
     deleted_files = []
     dropped = 0
     if assets_dir:
-        deleted_files = delete_asset_files(asset_id, assets_dir)
+        deleted_files = delete_asset_files(
+            asset_id,
+            assets_dir,
+            operation=operation,
+            reason=reason,
+            data_dir=data_dir,
+        )
         if not data_dir:
             data_dir = os.path.dirname(os.path.abspath(assets_dir))
     elif data_dir:
-        deleted_files = delete_asset_files(asset_id, os.path.join(data_dir, "assets"))
+        deleted_files = delete_asset_files(
+            asset_id,
+            os.path.join(data_dir, "assets"),
+            operation=operation,
+            reason=reason,
+            data_dir=data_dir,
+        )
     if data_dir and asset_id:
         persist_path = os.path.join(data_dir, "embeddings.pkl")
         dropped = drop_asset_from_embeddings(project_id, asset_id, persist_path)
@@ -332,6 +430,8 @@ def cleanup_removed_assets(
     current: Any,
     data_dir: str,
     changed_project_ids=None,
+    operation: str = "cleanup_removed_assets",
+    reason: str = "",
 ) -> Dict[str, Any]:
     from modules.asset_tracking import (
         get_tracking_storage_status,
@@ -376,7 +476,15 @@ def cleanup_removed_assets(
         if aid in clone_ids:
             clone_retained_ids.append(aid)
             continue
-        deleted_files.extend(delete_asset_files(aid, assets_dir))
+        deleted_files.extend(
+            delete_asset_files(
+                aid,
+                assets_dir,
+                operation=operation,
+                reason=reason or "asset_no_longer_in_workspace_kept_set",
+                data_dir=data_dir,
+            )
+        )
     tracking_storage = get_tracking_storage_status(data_dir)
     try:
         tracking = reconcile_workspace_asset_tracking(workspace=current, data_dir=data_dir)

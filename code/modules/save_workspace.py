@@ -378,6 +378,9 @@ def annotate_unavailable_text_assets(
     project_payload: dict,
     assets_dir: Optional[str],
     workspace_path: Optional[str] = None,
+    *,
+    operation: str = "annotate_unavailable_text_assets",
+    reason: str = "db_row_or_reference_without_live_file",
 ) -> dict:
     """Mark text assets whose bytes cannot be resolved on disk (read-only API hint).
 
@@ -408,7 +411,23 @@ def annotate_unavailable_text_assets(
         if not isinstance(meta, dict):
             meta = {}
             asset["metadata"] = meta
+        if meta.get("content_unavailable"):
+            continue
         meta["content_unavailable"] = True
+        try:
+            from modules.asset_file_audit import append_asset_file_audit, data_dir_from_assets_dir
+
+            path_hint = str(asset.get("path") or "").strip()
+            append_asset_file_audit(
+                event="missing_on_load",
+                asset_id=asset_id,
+                path=path_hint,
+                operation=operation,
+                reason=reason,
+                data_dir=data_dir_from_assets_dir(assets_dir),
+            )
+        except Exception:
+            pass
     return project_payload
 
 
