@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+from unittest import mock
 
 CODE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 if CODE_DIR not in sys.path:
@@ -465,6 +466,51 @@ def test_api_trash_routes_list_and_restore():
         _teardown(tmp, old_path, old_assets)
 
 
+def test_asset_quarantine_runs_only_after_successful_workspace_save():
+    """If sqlite persist fails, live asset files must stay in assets/ (not trash)."""
+    ws, _proj_id, extra_id = _two_page_workspace_with_text()
+    tmp, old_path, old_assets = _temp_store(ws)
+    try:
+        client = _test_client()
+        seeded = client.post("/api/workspace", json=ws.to_dict())
+        assert seeded.status_code == 200, seeded.text
+        current_revision = seeded.json()["workspace_revision"]
+
+        assets_dir = api.ASSETS_DIR
+        live_path = os.path.join(assets_dir, "a_keep.md")
+        assert os.path.isfile(live_path)
+
+        payload = ws.to_dict()
+        payload["projects"].pop(extra_id)
+        payload["library_nodes"] = {
+            k: v
+            for k, v in payload["library_nodes"].items()
+            if (v.get("target_project_id") if isinstance(v, dict) else None) != extra_id
+        }
+        root_id = f"{ws.id}_root"
+        root = payload["library_nodes"].get(root_id)
+        if isinstance(root, dict):
+            root["child_ids"] = [
+                cid
+                for cid in (root.get("child_ids") or [])
+                if cid in payload["library_nodes"]
+            ]
+        payload["base_revision"] = current_revision
+
+        with mock.patch(
+            "api.save_workspace_scoped_and_snapshot",
+            side_effect=RuntimeError("simulated sqlite save failure"),
+        ):
+            failed = client.post("/api/workspace", json=payload)
+        assert failed.status_code == 400, failed.text
+
+        assert os.path.isfile(live_path), "live file must not be quarantined before a successful save"
+        entries = client.get("/api/assets/trash").json()["entries"]
+        assert not any(entry["asset_id"] == "a_keep" for entry in entries)
+    finally:
+        _teardown(tmp, old_path, old_assets)
+
+
 def main():
     tests = [
         test_session_issue_heartbeat_and_end,
@@ -479,6 +525,7 @@ def main():
         test_mass_space_drop_save_rejected_even_with_current_revision,
         test_dropped_assets_are_quarantined_not_deleted_and_restorable,
         test_api_trash_routes_list_and_restore,
+        test_asset_quarantine_runs_only_after_successful_workspace_save,
     ]
     failures = 0
     for test in tests:

@@ -4,7 +4,11 @@ import os
 import zipfile
 from typing import Optional
 
-from modules.asset_cleanup import cleanup_removed_assets, data_dir_from_workspace_path
+from modules.asset_cleanup import (
+    cleanup_removed_assets,
+    data_dir_from_workspace_path,
+    prune_unused_assets_for_save,
+)
 from modules.load_workspace import load_workspace, parse_workspace_json_text
 from modules.save_workspace import hydrate_assets, save_workspace, strip_asset_content_from_dict
 from modules.workspace import Workspace, repair_workspace_dict
@@ -212,6 +216,9 @@ def apply_imported_workspace(
     parent_dir = os.path.dirname(workspace_path)
     if parent_dir:
         os.makedirs(parent_dir, exist_ok=True)
+    pruned_asset_ids = None
+    if previous is not None:
+        pruned_asset_ids = prune_unused_assets_for_save(previous, ws)
     save_workspace(ws, workspace_path)
     data_dir = data_dir_from_workspace_path(workspace_path)
     if data_dir and previous is not None:
@@ -221,6 +228,7 @@ def apply_imported_workspace(
             data_dir=data_dir,
             operation="apply_imported_workspace",
             reason="zip_import_removed_assets",
+            pruned_asset_ids=pruned_asset_ids,
         )
     if assets_dir:
         hydrate_assets(ws, assets_dir)
