@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, type ChangeEvent } from 'react';
+import { useState, useEffect, useRef, useCallback, type ChangeEvent } from 'react';
 import './index.css';
 import { Workspace, Space } from './types';
 import { normalizeWorkspace } from './model/normalizeWorkspace';
@@ -113,6 +113,11 @@ import {
   type PendingOverlapPrompt,
   type GroupingMode
 } from './model/overlapGrouping';
+import {
+  firstImageFileFromClipboardData,
+  isEmptyImageSpace,
+  shouldInterceptCanvasImagePaste
+} from './model/clipboardImage';
 
 const ASSET_TRACKING_MIGRATION_DEFER_KEY = 'astronote_asset_tracking_migration_deferred_session';
 const WORKSPACE_STORAGE_MIGRATION_DEFER_KEY = 'astronote_workspace_storage_migration_deferred_session';
@@ -266,6 +271,10 @@ export default function App() {
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   selectedProjectIdRef.current = selectedProjectId;
   const [selectedSpaceId, setSelectedSpaceId] = useState<string | null>(null);
+  const selectedSpaceIdRef = useRef<string | null>(null);
+  selectedSpaceIdRef.current = selectedSpaceId;
+  const lastCanvasPointerWorldRef = useRef<{ x: number; y: number } | null>(null);
+  const viewportWorldCenterRef = useRef<{ x: number; y: number }>({ x: 40, y: 40 });
   const [selectedLibraryNodeId, setSelectedLibraryNodeId] = useState<string | null>(null);
   const [lastViewRestored, setLastViewRestored] = useState(false);
   const lastViewSnapshotRef = useRef(readLastView());
@@ -1533,6 +1542,14 @@ export default function App() {
   const [zoom, setZoom] = useState(1);
   const [snapGuides, setSnapGuides] = useState<SnapGuide[]>([]);
   const handleZoomChange = (next: number) => setZoom(clampCameraScale(next));
+
+  const handleCanvasPointerWorld = useCallback((x: number, y: number) => {
+    lastCanvasPointerWorldRef.current = { x, y };
+  }, []);
+
+  const handleViewportWorldCenter = useCallback((x: number, y: number) => {
+    viewportWorldCenterRef.current = { x, y };
+  }, []);
   const handleLayoutGestureEnd = (_spaceId?: string) => {
     setSnapGuides([]);
     suppressPersistRef.current = false;
@@ -2551,51 +2568,106 @@ export default function App() {
   };
 
 
+  const attachImageFileToSpace = async (spaceId: string, file: File, options: { crop: boolean }) => {
+    const projectId = selectedProjectIdRef.current;
+    if (!projectId) return;
+
+    try {
+      const preparedFile = options.crop ? await cropImageBeforeInsert(file) : file;
+      const uploaded = await uploadAsset(preparedFile);
+      setWorkspaceState(prev =>
+        uploadImageToSpace(
+          prev,
+          projectId,
+          spaceId,
+          uploaded.filename || preparedFile.name,
+          uploaded.url,
+          uploaded.mime_type || preparedFile.type,
+          uploaded.id
+        )
+      );
+    } catch (err: any) {
+      alert(`Failed to upload image asset: ${err?.message || err}`);
+    }
+  };
+  const attachImageFileToSpaceRef = useRef(attachImageFileToSpace);
+  attachImageFileToSpaceRef.current = attachImageFileToSpace;
+
+  useEffect(() => {
+    const onPaste = (event: ClipboardEvent) => {
+      if (pageWriteProtectedRef.current) return;
+      if (!selectedProjectIdRef.current) return;
+      if (!shouldInterceptCanvasImagePaste(event.target)) return;
+
+      const file = firstImageFileFromClipboardData(event.clipboardData);
+      if (!file) return;
+
+      event.preventDefault();
+
+      void (async () => {
+        const projectId = selectedProjectIdRef.current;
+        if (!projectId) return;
+        const workspace = presentRef.current;
+        const project = workspace?.projects[projectId];
+        if (!project) return;
+
+        const selectedId = selectedSpaceIdRef.current;
+        const selectedSpace = selectedId ? project.spaces[selectedId] : undefined;
+
+        let targetSpaceId: string;
+
+        if (isEmptyImageSpace(selectedSpace)) {
+          targetSpaceId = selectedId!;
+        } else {
+          const ptr = lastCanvasPointerWorldRef.current;
+          const center = viewportWorldCenterRef.current;
+          const x = ptr?.x ?? center.x;
+          const y = ptr?.y ?? center.y;
+
+          let createdId: string | null = null;
+          setWorkspaceState(prev => {
+            const effectiveTargetGroupId = selectedSpaceIdRef.current;
+            const { workspace: next, newSpaceId } = createImageSpace(
+              prev,
+              projectId,
+              x,
+              y,
+              effectiveTargetGroupId
+            );
+            createdId = newSpaceId;
+            if (newSpaceId) {
+              handleSelectSpace(newSpaceId);
+              setSelectedTool('pointer');
+              return resolveOverlap(next, projectId, newSpaceId, true);
+            }
+            return next;
+          });
+          if (!createdId) return;
+          targetSpaceId = createdId;
+        }
+
+        await attachImageFileToSpaceRef.current(targetSpaceId, file, { crop: false });
+      })();
+    };
+
+    window.addEventListener('paste', onPaste);
+    return () => window.removeEventListener('paste', onPaste);
+  }, []);
+
   const handleImageUpload = async (e: ChangeEvent<HTMLInputElement>, spaceId: string) => {
     const files = e.target.files;
     if (!files || files.length === 0 || !selectedProjectId) return;
     const file = files[0];
 
     try {
-      const preparedFile = await cropImageBeforeInsert(file);
-      const uploaded = await uploadAsset(preparedFile);
-      setWorkspaceState(prev =>
-        uploadImageToSpace(
-          prev,
-          selectedProjectId,
-          spaceId,
-          preparedFile.name,
-          uploaded.url,
-          preparedFile.type,
-          uploaded.id
-        )
-      );
-    } catch (err: any) {
-      alert(`Failed to upload image asset: ${err?.message || err}`);
+      await attachImageFileToSpace(spaceId, file, { crop: true });
     } finally {
       e.target.value = '';
     }
   };
 
   const handleDrawImageCreate = async (spaceId: string, file: File) => {
-    if (!selectedProjectId) return;
-
-    try {
-      const uploaded = await uploadAsset(file);
-      setWorkspaceState(prev =>
-        uploadImageToSpace(
-          prev,
-          selectedProjectId,
-          spaceId,
-          file.name,
-          uploaded.url,
-          file.type,
-          uploaded.id
-        )
-      );
-    } catch (err: any) {
-      alert(`Failed to save drawn image: ${err?.message || err}`);
-    }
+    await attachImageFileToSpace(spaceId, file, { crop: false });
   };
 
   const handleImageUrlInsert = (spaceId: string, imageUrl: string) => {
@@ -3426,6 +3498,8 @@ export default function App() {
               onEraseStrokeAtPoint={handleEraseStrokeAtPoint}
               onProbe={handleProbe}
               onInsertVerticalPageGap={handleInsertVerticalPageGap}
+              onCanvasPointerWorld={handleCanvasPointerWorld}
+              onViewportWorldCenter={handleViewportWorldCenter}
               onEnterTextEdit={() => setSelectedTool('pointer')}
             />
             </ErrorBoundary>

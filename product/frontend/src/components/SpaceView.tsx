@@ -6,6 +6,7 @@ import { PDFSpaceView } from './PDFSpaceView';
 import ImageDrawComposer from './ImageDrawComposer';
 import { EraserMode, isLayerSpace } from '../model/workspaceActions';
 import { resolveAssetSource } from '../model/assetSource';
+import { IMAGE_FILE_INPUT_ACCEPT } from '../model/clipboardImage';
 import { resetSpaceRotationMatrix } from '../model/spaceTransform';
 
 type SnapshotImageLayer = {
@@ -894,7 +895,7 @@ export default function SpaceView({
                 <input
                   id={`image-upload-${space.id}`}
                   type="file"
-                  accept="image/*"
+                  accept={IMAGE_FILE_INPUT_ACCEPT}
                   style={{ display: 'none' }}
                   onChange={(e) => onImageUpload(e, space.id)}
                 />
@@ -907,7 +908,7 @@ export default function SpaceView({
                   Draw Image
                 </button>
               </div>
-              <div style={{ fontSize: '12px', color: '#666' }}>or paste image URL</div>
+              <div style={{ fontSize: '12px', color: '#666' }}>Paste image (⌘V / Ctrl+V), or paste image URL</div>
               <div style={{ display: 'flex', gap: '6px' }}>
                 <input
                   type="url"

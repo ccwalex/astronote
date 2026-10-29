@@ -9,6 +9,7 @@ function extFromFilename(filename: string, mimeType: string, fallback: string): 
   const mime = (mimeType || '').toLowerCase();
   if (mime.includes('svg')) return '.svg';
   if (mime.includes('jpeg') || mime.endsWith('/jpg')) return '.jpg';
+  if (mime.includes('tiff') || mime.endsWith('/tif')) return '.tif';
   if (mime.includes('webp')) return '.webp';
   if (mime.includes('gif')) return '.gif';
   if (mime.includes('pdf')) return '.pdf';

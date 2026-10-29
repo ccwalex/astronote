@@ -17,6 +17,7 @@
     "test:asset-source": "node --experimental-strip-types src/model/assetSource.test.ts",
     "test:text-asset-load": "node --experimental-strip-types src/model/textAssetLoad.test.ts",
     "test:blank-paragraph-guards": "node --experimental-strip-types src/model/textSpaceBlankParagraphGuards.test.ts",
+    "test:clipboard-image": "node --experimental-strip-types src/model/clipboardImage.test.ts",
     "test:workspace-load": "node --experimental-strip-types src/model/workspaceLoad.test.ts",
     "test:workspace-save": "node --experimental-strip-types --import ./scripts/register-ts-resolve.mjs src/model/workspaceSave.test.ts",
     "test:ungroup-layout": "node --experimental-strip-types src/model/ungroupSpaceWithLayout.test.ts",

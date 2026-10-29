@@ -11,6 +11,7 @@ from modules.project import Project
 from modules.space import Space
 from modules.workspace import Workspace
 from modules.pdf_compress import compress_pdf_bytes
+from modules.image_transform import transform_image_upload
 from modules.storage import ASSETS_DIR as STORAGE_ASSETS_DIR
 
 LAYER_SPACE_KINDS = {
@@ -706,6 +707,12 @@ def _ext_for_filename(filename: str, mime_type: str, kind: str) -> str:
         return ".pdf"
     if "jpeg" in mime or mime.endswith("/jpg"):
         return ".jpg"
+    if "tiff" in mime or mime.endswith("/tif"):
+        return ".tif"
+    if "webp" in mime:
+        return ".webp"
+    if "gif" in mime:
+        return ".gif"
     if "png" in mime or kind_l == "image":
         return ".png"
     return ".bin"
@@ -859,11 +866,17 @@ def create_image_in_workspace(
         raise ValueError("mime_type is required")
     stored = _normalize_media_content(content, mime)
     blob = _bytes_from_normalized_media(stored)
+    transformed = transform_image_upload(name, mime, blob)
+    blob = transformed.data
+    mime = transformed.mime_type
+    name = transformed.filename
+    if transformed.converted:
+        stored = f"data:{mime};base64,{base64.b64encode(blob).decode('ascii')}"
     container = _object_container(project)
     x, y = _stack_position(project, container)
     asset_id = _new_id("asset")
     space_id = _new_id("space")
-    rel_path = _write_asset_bytes(asset_id, blob, _ext_for_filename(name, mime, "image"), _resolve_assets_dir(assets_dir))
+    rel_path = _write_asset_bytes(asset_id, blob, transformed.extension or _ext_for_filename(name, mime, "image"), _resolve_assets_dir(assets_dir))
     asset = Asset(
         id=asset_id,
         kind="image",

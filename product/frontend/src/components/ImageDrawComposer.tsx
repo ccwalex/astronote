@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { IMAGE_FILE_INPUT_ACCEPT } from '../model/clipboardImage';
 
 type ImageLayer = {
   id: string;
@@ -379,7 +380,7 @@ export default function ImageDrawComposer({ onCancel, onSave }: ImageDrawCompose
           <div style={{ borderTop: '1px solid #ddd', paddingTop: '8px' }}>
             <strong>Image layers</strong>
             <div style={{ marginTop: '6px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
-              <input type="file" accept="image/*" onChange={handleUploadLayerImage} />
+              <input type="file" accept={IMAGE_FILE_INPUT_ACCEPT} onChange={handleUploadLayerImage} />
               <div style={{ display: 'flex', gap: '6px' }}>
                 <input
                   value={urlInput}

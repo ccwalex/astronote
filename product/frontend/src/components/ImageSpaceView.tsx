@@ -1,6 +1,7 @@
 import React from 'react';
 import { Space, Asset } from '../types';
 import { resolveAssetSource } from '../model/assetSource';
+import { IMAGE_FILE_INPUT_ACCEPT } from '../model/clipboardImage';
 
 export interface ImageSpaceViewProps {
   space: Space;
@@ -44,7 +45,7 @@ export const ImageSpaceView: React.FC<ImageSpaceViewProps> = ({ space, asset, on
       <input
         id={inputId}
         type="file"
-        accept="image/*"
+        accept={IMAGE_FILE_INPUT_ACCEPT}
         style={{ display: 'none' }}
         onChange={(e) => onUploadImage(e, space.id)}
       />

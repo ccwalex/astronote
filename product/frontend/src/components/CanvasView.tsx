@@ -55,6 +55,8 @@ interface CanvasViewProps {
   onRotateSpace?: (spaceId: string, transformMatrix: number[]) => void;
   readOnly?: boolean;
   onEnterTextEdit?: () => void;
+  onCanvasPointerWorld?: (x: number, y: number) => void;
+  onViewportWorldCenter?: (x: number, y: number) => void;
 }
 
 const CANVAS_PADDING = 400;
@@ -210,7 +212,9 @@ export default function CanvasView({
   onScaleSpace,
   onRotateSpace,
   readOnly = false,
-  onEnterTextEdit
+  onEnterTextEdit,
+  onCanvasPointerWorld,
+  onViewportWorldCenter
 }: CanvasViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const worldLayerRef = useRef<HTMLDivElement>(null);
@@ -436,6 +440,47 @@ export default function CanvasView({
     zoom: safeZoom
   });
 
+  useLayoutEffect(() => {
+    if (!onViewportWorldCenter) return;
+    const scrollNode = containerRef.current;
+    const worldNode = worldLayerRef.current;
+    if (!scrollNode || !worldNode) return;
+    const rect = scrollNode.getBoundingClientRect();
+    const clientX = rect.left + rect.width / 2;
+    const clientY = rect.top + rect.height / 2;
+    const { x, y } = getPointerPosition(
+      worldNode,
+      clientX,
+      clientY,
+      safeZoom,
+      canvasOffsetX,
+      canvasOffsetY
+    );
+    onViewportWorldCenter(x, y);
+  }, [
+    onViewportWorldCenter,
+    scrollPos.left,
+    scrollPos.top,
+    viewportSize.width,
+    viewportSize.height,
+    safeZoom,
+    canvasOffsetX,
+    canvasOffsetY
+  ]);
+
+  const reportCanvasPointerWorld = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!onCanvasPointerWorld) return;
+    const { x, y } = getPointerPosition(
+      event.currentTarget,
+      event.clientX,
+      event.clientY,
+      zoom,
+      canvasOffsetX,
+      canvasOffsetY
+    );
+    onCanvasPointerWorld(x, y);
+  };
+
   const renderableSpaces = spaces.filter(space => {
     if (isLayerSpace(space.kind)) {
       return true;
@@ -470,6 +515,7 @@ export default function CanvasView({
   };
 
   const handleCanvasPointerDownCapture = (e: React.PointerEvent<HTMLDivElement>) => {
+    reportCanvasPointerWorld(e);
     if (readOnly) return;
     if (selectedTool === 'insert_vertical_space') {
       if (e.button !== 0) return;
@@ -500,6 +546,7 @@ export default function CanvasView({
   };
 
   const handleCanvasPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    reportCanvasPointerWorld(e);
     if (readOnly) return;
     if (selectedTool === 'insert_vertical_space') return;
     if (!isCreateTool(selectedTool)) return;
@@ -515,6 +562,7 @@ export default function CanvasView({
   };
 
   const handleCanvasPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    reportCanvasPointerWorld(e);
     const drag = insertGapDragRef.current;
     if (!drag || drag.pointerId !== e.pointerId) return;
     const { y } = getPointerPosition(e.currentTarget, e.clientX, e.clientY, zoom, canvasOffsetX, canvasOffsetY);

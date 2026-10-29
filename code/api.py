@@ -108,6 +108,7 @@ from modules.asset_cleanup import (
 )
 from modules.workspace_sqlite import get_project_revisions
 from modules.pdf_compress import compress_pdf_bytes, should_compress_pdf_upload
+from modules.image_transform import transform_image_upload
 from modules.asset_resolve import invalidate_asset_cache, resolve_asset_file
 from modules.library_write import (
     create_folder_in_workspace,
@@ -2745,15 +2746,24 @@ def _normalize_upload_asset_id(requested: str) -> Optional[str]:
 async def upload_asset(file: UploadFile = File(...), asset_id: Optional[str] = Form(None)):
     os.makedirs(ASSETS_DIR, exist_ok=True)
     raw = await file.read()
-    if should_compress_pdf_upload(file.filename, file.content_type, raw):
+    filename = file.filename
+    mime_type = file.content_type
+    if should_compress_pdf_upload(filename, mime_type, raw):
         raw = compress_pdf_bytes(raw)
+    else:
+        transformed = transform_image_upload(filename, mime_type, raw)
+        raw = transformed.data
+        filename = transformed.filename
+        mime_type = transformed.mime_type
 
     requested = ""
     if asset_id is not None:
         requested = str(asset_id).strip()
     normalized_id = _normalize_upload_asset_id(requested) if requested else None
     if not normalized_id:
-        ext = os.path.splitext(file.filename)[1] if file.filename else ""
+        ext = os.path.splitext(filename)[1] if filename else ""
+        if not ext:
+            ext = os.path.splitext(file.filename)[1] if file.filename else ""
         new_id = "asset_" + uuid.uuid4().hex
         stored_filename = new_id + ext
         file_path = os.path.join(ASSETS_DIR, stored_filename)
@@ -2763,8 +2773,8 @@ async def upload_asset(file: UploadFile = File(...), asset_id: Optional[str] = F
         return {
             "id": new_id,
             "url": "/api/assets/" + new_id,
-            "filename": file.filename,
-            "mime_type": file.content_type,
+            "filename": filename,
+            "mime_type": mime_type,
         }
 
     requested = normalized_id
@@ -2775,18 +2785,32 @@ async def upload_asset(file: UploadFile = File(...), asset_id: Optional[str] = F
             if name.startswith(requested):
                 matched_name = name
                 break
-    if matched_name:
+    ext = os.path.splitext(filename)[1] if filename else ""
+    if not ext:
+        ext = os.path.splitext(file.filename)[1] if file.filename else ""
+    if not ext:
+        ext = ".md"
+    if matched_name and os.path.splitext(matched_name)[1].lower() == ext.lower():
         stored_filename = matched_name
     else:
-        ext = os.path.splitext(file.filename)[1] if file.filename else ""
-        if not ext:
-            ext = ".md"
         stored_filename = requested + ext
     file_path = os.path.join(ASSETS_DIR, stored_filename)
     with open(file_path, "wb") as buffer:
         buffer.write(raw)
+    if matched_name and matched_name != stored_filename:
+        stale = os.path.join(ASSETS_DIR, matched_name)
+        if os.path.isfile(stale):
+            try:
+                os.remove(stale)
+            except OSError:
+                pass
     invalidate_asset_cache(requested)
-    return {"id": requested, "url": "/api/assets/" + requested}
+    return {
+        "id": requested,
+        "url": "/api/assets/" + requested,
+        "filename": filename,
+        "mime_type": mime_type,
+    }
 
 
 @app.get("/api/assets/{asset_id}")

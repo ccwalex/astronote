@@ -77,6 +77,12 @@ def _ext_for_asset(asset, mime_hint: Optional[str] = None) -> str:
         return ".pdf"
     if "jpeg" in mime or mime.endswith("/jpg"):
         return ".jpg"
+    if "tiff" in mime or mime.endswith("/tif"):
+        return ".tif"
+    if "webp" in mime:
+        return ".webp"
+    if "gif" in mime:
+        return ".gif"
     if "png" in mime or kind == "image":
         return ".png"
     if "json" in mime:

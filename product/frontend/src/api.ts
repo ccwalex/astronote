@@ -807,7 +807,7 @@ export async function importWorkspaceZip(file: File, confirm: boolean): Promise<
   };
 }
 
-export async function uploadAsset(file: File): Promise<{ id: string; url: string }> {
+export async function uploadAsset(file: File): Promise<{ id: string; url: string; filename?: string; mime_type?: string }> {
   const endpoint = `${API_BASE}/assets`;
   const formData = new FormData();
   formData.append('file', file);
@@ -827,10 +827,12 @@ export async function uploadAsset(file: File): Promise<{ id: string; url: string
     throw new Error(`Failed to upload asset (${response.status} ${response.statusText}) at ${endpoint}${snippet ? `: ${snippet}` : ''}`);
   }
 
-  const data = (await response.json()) as { id: string; url: string };
+  const data = (await response.json()) as { id: string; url: string; filename?: string; mime_type?: string };
   return {
     id: data.id,
-    url: resolveAssetUrl(data.url)
+    url: resolveAssetUrl(data.url),
+    filename: data.filename,
+    mime_type: data.mime_type
   };
 }
 
