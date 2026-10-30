@@ -39,6 +39,7 @@ interface ToolbarProps {
   onRestoreImageToGroup: () => void;
   spaceConversionBusy?: boolean;
   persistStatus?: 'idle' | 'unsaved' | 'saving' | 'saved' | 'synced' | 'locked';
+  commitCheckpointTitle?: string;
   readOnly?: boolean;
 }
 
@@ -80,6 +81,7 @@ export function Toolbar({
   onRestoreImageToGroup,
   spaceConversionBusy = false,
   persistStatus = 'idle',
+  commitCheckpointTitle = 'No checkpoint yet',
   readOnly = false
 }: ToolbarProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -243,6 +245,7 @@ export function Toolbar({
         type="button"
         onClick={onCommit}
         disabled={readOnly}
+        title={commitCheckpointTitle}
         style={{
           padding: '4px 8px',
           cursor: 'pointer',

@@ -1,5 +1,11 @@
 import { Workspace } from '../types';
 
+export type WorkingCommitRecord = {
+  id?: string;
+  at?: string;
+  hash?: string;
+};
+
 export type WorkingUndoState = {
   workspace_id?: string;
   baseline?: string;
@@ -9,6 +15,7 @@ export type WorkingUndoState = {
   can_undo: boolean;
   can_redo: boolean;
   commits_count?: number;
+  commits?: WorkingCommitRecord[];
 };
 
 export const EMPTY_UNDO_STATE: WorkingUndoState = {

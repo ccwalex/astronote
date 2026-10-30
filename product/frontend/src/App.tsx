@@ -52,7 +52,7 @@ import { bounceWorkspaceContentAboveBackground } from './model/bounceContentAbov
 import { insertVerticalPageGap } from './model/insertVerticalPageGap';
 import { createStrokeObject, StrokeDrawStyle } from './model/canvasObjectFactory';
 import { probeCanvas, ProbeMode, ProbeResult } from './model/probeCanvas';
-import { fetchWorkspaceRevision, saveWorkspace, StaleWorkspaceSaveError, putAssetText, isAssetTrackingPersistError, uploadAsset, convertGroupSpaceToImage, restoreImageToGroup, postCommit, postRevertToBaseline, fetchAssetTrackingStorageStatus, migrateAssetTrackingStore, skipAssetTrackingMigration, type AssetTrackingStorageStatus, fetchWorkspaceStorageStatus, migrateWorkspaceStorage, skipWorkspaceStorageMigration, type WorkspaceStorageStatus, isAbortError, startUserSessionLifecycle } from './api';
+import { fetchWorkspaceRevision, saveWorkspace, StaleWorkspaceSaveError, putAssetText, isAssetTrackingPersistError, uploadAsset, convertGroupSpaceToImage, restoreImageToGroup, postCommit, postRevertToBaseline, fetchUndoState, fetchAssetTrackingStorageStatus, migrateAssetTrackingStore, skipAssetTrackingMigration, type AssetTrackingStorageStatus, fetchWorkspaceStorageStatus, migrateWorkspaceStorage, skipWorkspaceStorageMigration, type WorkspaceStorageStatus, isAbortError, startUserSessionLifecycle } from './api';
 import { decideStaleSaveRecovery } from './model/staleSaveRecovery';
 import {
   clearAstronoteLoadCaches,
@@ -71,6 +71,11 @@ import { consumePendingSpaceSelection, resolveSpaceSelection } from './model/def
 import { collectDirtyMarkdownAssets, isProjectHydrated, loadProjectIntoWorkspace, markMarkdownAssetsPersisted, noteHydratedMarkdownAssets, parseWorkspaceJson, shouldPersistWorkspace, type DirtyMarkdownAsset } from './model/workspaceLoad';
 import { computeSaveProjectIds, preparePartialWorkspaceForSave } from './model/workspaceSave';
 import { bootstrapWorkspaceLoad, type BootstrapWorkspaceResult } from './model/bootstrapWorkspace';
+import {
+  commitCheckpointHoverTitle,
+  commitSuccessNotice,
+  lastCommitAtFromUndoState,
+} from './model/commitCheckpoint';
 import {
   refreshWorkspaceFromServer,
   type RefreshWorkspaceFromServerResult,
@@ -260,6 +265,9 @@ export default function App() {
   const [canForcePageUnlock, setCanForcePageUnlock] = useState(false);
   const [pageWriteProtected, setPageWriteProtected] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
+  const [lastCheckpointAt, setLastCheckpointAt] = useState<string | null>(null);
+  const [commitSuccessBanner, setCommitSuccessBanner] = useState<string | null>(null);
+  const commitSuccessBannerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [migrationPromptOpen, setMigrationPromptOpen] = useState(false);
   const [migrationStatus, setMigrationStatus] = useState<AssetTrackingStorageStatus | null>(null);
   const [migrationBusy, setMigrationBusy] = useState(false);
@@ -282,6 +290,43 @@ export default function App() {
   useEffect(() => {
     startUserSessionLifecycle();
   }, []);
+
+  const showCommitSuccessBanner = useCallback((isoUtc: string | null) => {
+    if (commitSuccessBannerTimerRef.current) {
+      clearTimeout(commitSuccessBannerTimerRef.current);
+      commitSuccessBannerTimerRef.current = null;
+    }
+    setCommitSuccessBanner(commitSuccessNotice(isoUtc));
+    commitSuccessBannerTimerRef.current = setTimeout(() => {
+      setCommitSuccessBanner(null);
+      commitSuccessBannerTimerRef.current = null;
+    }, 5000);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (commitSuccessBannerTimerRef.current) {
+        clearTimeout(commitSuccessBannerTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (loading) return;
+    let cancelled = false;
+    fetchUndoState()
+      .then((state) => {
+        if (cancelled) return;
+        setLastCheckpointAt(lastCommitAtFromUndoState(state));
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setLastCheckpointAt(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [loading]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1097,8 +1142,11 @@ export default function App() {
 
   const handleCommit = () => {
     if (pageWriteProtectedRef.current) return;
-    postCommit().then(() => {
+    postCommit().then((response) => {
+      const at = lastCommitAtFromUndoState(response.undo_state);
+      setLastCheckpointAt(at);
       setHistoryError(null);
+      showCommitSuccessBanner(at);
     }).catch(err => {
       setHistoryError(err instanceof Error && err.message ? err.message : 'Failed to commit workspace');
     });
@@ -1134,6 +1182,7 @@ export default function App() {
       for (const projectId of listPendingProjectIds()) {
         clearProjectFromPendingPersist(projectId);
       }
+      setLastCheckpointAt(lastCommitAtFromUndoState(response.undo_state));
       setHistoryError(null);
     }).catch(err => {
       setHistoryError(err instanceof Error && err.message ? err.message : 'Failed to revert workspace to baseline');
@@ -3208,6 +3257,24 @@ export default function App() {
             <button type="button" onClick={() => handleReloadFromServer()} style={recoveryButtonStyle}>Reload now</button>
           </div>
         ) : null}
+        {commitSuccessBanner ? (
+          <div role="status" style={{ padding: '8px 12px', backgroundColor: '#ecfdf5', color: '#15803d', borderBottom: '1px solid #bbf7d0', display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+            <span style={{ flex: 1 }}>{commitSuccessBanner}</span>
+            <button
+              type="button"
+              onClick={() => {
+                if (commitSuccessBannerTimerRef.current) {
+                  clearTimeout(commitSuccessBannerTimerRef.current);
+                  commitSuccessBannerTimerRef.current = null;
+                }
+                setCommitSuccessBanner(null);
+              }}
+              style={recoveryButtonStyle}
+            >
+              Dismiss
+            </button>
+          </div>
+        ) : null}
         {(navError || persistError || historyError) ? (
           <div role="alert" style={{ padding: '8px 12px', backgroundColor: '#fdecea', color: '#c00', borderBottom: '1px solid #f5c2c0', display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
             <span style={{ flex: 1 }}>{navError || persistError || historyError}</span>
@@ -3320,6 +3387,7 @@ export default function App() {
               onCommit={handleCommit}
               onRevert={handleRevert}
               onSave={handleSave}
+              commitCheckpointTitle={commitCheckpointHoverTitle(lastCheckpointAt)}
               canUndo={historyState.past.length !== 0}
               canRedo={historyState.future.length !== 0}
               probeMode={probeMode}

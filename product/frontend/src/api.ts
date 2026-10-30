@@ -567,6 +567,12 @@ export async function searchWorkspaceServer(
   return data.search_results;
 }
 
+export type WorkspaceCommitRecord = {
+  id?: string;
+  at?: string;
+  hash?: string;
+};
+
 export type WorkspaceUndoState = {
   workspace_id?: string;
   baseline?: string;
@@ -576,6 +582,7 @@ export type WorkspaceUndoState = {
   can_undo: boolean;
   can_redo: boolean;
   commits_count?: number;
+  commits?: WorkspaceCommitRecord[];
 };
 
 export type UndoWorkspaceResponse = {
