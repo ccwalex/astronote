@@ -17,7 +17,7 @@ python3 astronote_token_cli.py mint --label "MacBook"
 
 Store the printed `an_…` token in the Mac app connection screen.
 
-## Build & run
+## Build & run (development)
 
 ```bash
 cd product/macos
@@ -30,6 +30,17 @@ Open the package in Xcode:
 ```bash
 open Package.swift
 ```
+
+## Ship a Mac package (client only)
+
+The app bundle does **not** include the backend. Users connect over Tailscale to your server origin and paste a minted device token.
+
+```bash
+cd product/macos
+./scripts/package.sh 0.1.0
+```
+
+See [DISTRIBUTION.md](DISTRIBUTION.md) for zip/DMG output and GitHub release tags (`astronote-macos-v0.1.0`).
 
 ## Architecture
 

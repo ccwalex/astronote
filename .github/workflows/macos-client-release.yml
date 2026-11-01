@@ -1,0 +1,73 @@
+name: macOS client release
+
+on:
+  push:
+    tags:
+      - "astronote-macos-v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Marketing version (e.g. 0.1.0)
+        required: true
+        default: "0.1.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            v="${GITHUB_REF_NAME#astronote-macos-v}"
+          else
+            v="${{ inputs.version }}"
+          fi
+          echo "marketing=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Package AstroNote.app
+        working-directory: product/macos
+        env:
+          MARKETING_VERSION: ${{ steps.ver.outputs.marketing }}
+          BUILD_VERSION: ${{ github.run_number }}
+        run: |
+          chmod +x scripts/package.sh
+          ./scripts/package.sh "$MARKETING_VERSION"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: astronote-macos-${{ steps.ver.outputs.marketing }}
+          path: |
+            product/macos/dist/AstroNote.app
+            product/macos/dist/*.zip
+            product/macos/dist/*.dmg
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/astronote-macos-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: AstroNote macOS ${{ steps.ver.outputs.marketing }}
+          body: |
+            Native AstroNote client for macOS 14+. **No backend included** — point the app at your AstroNote server over Tailscale and sign in with a device token.
+
+            ### Install
+            1. Download `AstroNote-*-macOS-universal.dmg` (or `.zip`).
+            2. Drag **AstroNote** into Applications.
+            3. On first launch, allow the app if macOS warns about an unsigned build (or sign/notarize with your Apple ID for your team).
+
+            ### Connect
+            - **Server origin:** `https://<tailscale-host>:5173` (same URL as the web UI proxy).
+            - **Token:** on the server machine run `python3 code/astronote_token_cli.py mint --label "MacBook"` and paste the `an_…` value.
+
+            Tailscale must reach the host running AstroNote (FastAPI + Vite). The Mac app only speaks HTTP(S) to that origin.
+          files: |
+            product/macos/dist/*.zip
+            product/macos/dist/*.dmg
+          draft: false
+          prerelease: false
