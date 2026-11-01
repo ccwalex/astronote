@@ -84,6 +84,40 @@ def _clear_asset_content(workspace: Workspace) -> None:
                 asset.content = None
 
 
+def _persist_text_layout_scoped(workspace: Workspace, path: str, project_id: str) -> None:
+    """Persist TextSpace geometry fixes without a full-store rewrite.
+
+    Scoped GET loads keep sibling projects as stubs in memory; calling
+    save_workspace() would rebuild sqlite from that partial view and wipe every
+    other page body (the production Nov-2026 failure mode).
+    """
+    from modules.workspace_sqlite import detect_workspace_backend, save_workspace_project_sqlite
+    from modules.workspace_save_audit import append_workspace_save_audit, data_dir_from_workspace_path
+    from modules.workspace_save_guard import _load_disk_totals
+    from modules.workspace_content_stats import totals_from_workspace
+
+    if detect_workspace_backend(path) != "sqlite":
+        save_workspace(workspace, path)
+        return
+    pid = str(project_id or "").strip()
+    if not pid:
+        save_workspace(workspace, path)
+        return
+    before = _load_disk_totals(path)
+    save_workspace_project_sqlite(workspace, path, [pid], include_meta=False)
+    after = totals_from_workspace(workspace)
+    append_workspace_save_audit(
+        event="scoped_persist",
+        operation="load_workspace",
+        reason="text_space_layout_normalize",
+        data_dir=data_dir_from_workspace_path(path),
+        mode="scoped",
+        project_ids=[pid],
+        before=before,
+        after=after,
+    )
+
+
 def _finish_load(
     data: dict,
     path: str,
@@ -142,7 +176,16 @@ def _finish_load(
 
     if should_persist and (persist_repairs or text_layout_changed):
         try:
-            save_workspace(workspace, path)
+            scoped_pid = str(project_id or "").strip() if project_id else ""
+            if text_layout_changed and scoped_pid:
+                _persist_text_layout_scoped(workspace, path, scoped_pid)
+            else:
+                save_workspace(
+                    workspace,
+                    path,
+                    operation="load_workspace",
+                    reason="repair_or_inline_spill",
+                )
         except Exception:
             logger.warning("Failed to persist repaired workspace JSON at %s", path)
 
