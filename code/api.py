@@ -45,6 +45,7 @@ from modules.page_view_lock import (
     release_session as release_page_session,
 )
 from modules import user_session
+from modules import api_tokens
 from modules.load_workspace import load_workspace, parse_workspace_json_text
 from modules.workspace_sync import workspace_write_lock
 from modules.save_workspace import (
@@ -240,7 +241,52 @@ class UserSessionMiddleware:
         await self.app(scope, receive, send_with_session)
 
 
+class BearerAuthMiddleware:
+    """Require Bearer tokens for non-loopback clients once any token is minted."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        path = scope.get("path") or ""
+        if not (path.startswith("/api/") or path == "/mcp" or path.startswith("/mcp/")):
+            await self.app(scope, receive, send)
+            return
+        if not api_tokens.requires_bearer_auth():
+            await self.app(scope, receive, send)
+            return
+        if api_tokens.is_loopback_scope(scope):
+            await self.app(scope, receive, send)
+            return
+        try:
+            header_map = {k.lower(): v for k, v in (scope.get("headers") or [])}
+            auth = header_map.get(b"authorization", b"").decode("latin-1")
+        except Exception:
+            auth = ""
+        ok, _token_id = api_tokens.verify_bearer(auth)
+        if not ok:
+            body = json.dumps({"detail": "Authorization Bearer token required"}).encode("utf-8")
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 401,
+                    "headers": [
+                        (b"content-type", b"application/json"),
+                        (b"content-length", str(len(body)).encode("ascii")),
+                        (b"www-authenticate", b'Bearer realm="astronote"'),
+                    ],
+                }
+            )
+            await send({"type": "http.response.body", "body": body})
+            return
+        await self.app(scope, receive, send)
+
+
 app.add_middleware(UserSessionMiddleware)
+app.add_middleware(BearerAuthMiddleware)
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 WORKSPACE_PATH = os.path.join(PROJECT_ROOT, "data", "workspace", "workspace.json")
@@ -1925,6 +1971,43 @@ def get_session(request: Request):
     return {"user_id": user_id or None, "active": exists, "session_count": user_session.session_count()}
 
 
+@app.post("/api/auth/tokens")
+def post_auth_tokens(request: Request, body: dict = Body(default={})):
+    if not _request_is_loopback(request):
+        raise HTTPException(status_code=403, detail="Token mint is localhost-only")
+    label = body.get("label") if isinstance(body, dict) else None
+    try:
+        minted = api_tokens.mint_token(label=label)
+        return {
+            "status": "ok",
+            "id": minted.id,
+            "prefix": minted.prefix,
+            "token": minted.token,
+            "label": minted.label,
+            "created_at": minted.created_at,
+        }
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/auth/tokens")
+def get_auth_tokens(request: Request):
+    if not _request_is_loopback(request):
+        raise HTTPException(status_code=403, detail="Token list is localhost-only")
+    return {"status": "ok", "tokens": api_tokens.list_tokens_public(), "requires_auth": api_tokens.requires_bearer_auth()}
+
+
+@app.delete("/api/auth/tokens/{token_id}")
+def delete_auth_token(token_id: str, request: Request):
+    if not _request_is_loopback(request):
+        raise HTTPException(status_code=403, detail="Token revoke is localhost-only")
+    revoked = api_tokens.revoke_token(token_id)
+    if not revoked:
+        raise HTTPException(status_code=404, detail="Token not found")
+    return {"status": "ok", "revoked": True, "requires_auth": api_tokens.requires_bearer_auth()}
+
+
 def _undo_state_payload(state: Optional[dict], workspace_id: Optional[str] = None) -> dict:
     payload = dict(state) if isinstance(state, dict) else {}
     entries = payload.get("entries") if isinstance(payload.get("entries"), list) else []
@@ -2446,11 +2529,19 @@ def _embed_all_assets(job_id: Optional[str] = None) -> dict:
     }
 
 
+def _request_is_loopback(request: Request) -> bool:
+    client = request.client
+    host = client.host if client else ""
+    return api_tokens.is_loopback_host(host)
+
+
 @app.get("/api/rag-config")
-def get_rag_config():
+def get_rag_config(request: Request):
     try:
         config = load_library_config(default={})
         rag_config = _normalize_rag_config(config.get(RAG_CONFIG_KEY) if isinstance(config, dict) else None)
+        if not _request_is_loopback(request) and rag_config.get("apiKey"):
+            rag_config = {**rag_config, "apiKey": ""}
         return rag_config
     except Exception as e:
         traceback.print_exc()
