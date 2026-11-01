@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from modules.project import Project
 from modules.save_workspace import save_workspace
 from modules.workspace import Workspace
-from modules.workspace_lazy import merge_incoming_workspace_dict
+from modules.workspace_lazy import merge_incoming_workspace_dict, workspace_mutation_signals_from_lists
 from modules.workspace_working_undo import save_workspace_and_snapshot
 import api
 
@@ -187,9 +187,8 @@ def test_stale_save_without_revision_keeps_mcp_spaces_and_asset_file():
         _teardown_temp_store(tmp, old_path, old_assets)
 
 
-def test_fresh_save_keeps_client_authority_over_disk_only_entries():
-    """A save carrying the current base revision is trusted: the client may
-    have deleted the space on purpose, so it must not be resurrected."""
+def test_fresh_save_restores_disk_space_without_delete_signal():
+    """A save with base_revision but no delete signal must not drop disk-only spaces."""
     ws = Workspace.create_default("ws_1", "Test", True)
     proj_id = f"{ws.id}_default_proj"
     disk_project = _complete_project(
@@ -215,13 +214,53 @@ def test_fresh_save_keeps_client_authority_over_disk_only_entries():
     try:
         current = api._current_workspace_revision(ws.id)
         payload = ws.to_dict()
-        # Deletion shape: the user removed s_mcp but kept a live object on the
-        # root, so neither collection is provably-wiped; the fresh base
-        # revision makes the client body authoritative.
         deleted_space = _complete_project(proj_id, f"{proj_id}_root")
         deleted_space["objects"] = {"o_keep": {"id": "o_keep", "kind": "Note"}}
         payload["projects"][proj_id] = deleted_space
         payload["base_revision"] = current
+        client = TestClient(api.app)
+        posted = client.post("/api/workspace", json=payload)
+        assert posted.status_code == 200, posted.text
+        disk = api._load_workspace_from_disk()
+        saved = disk.projects[proj_id]
+        assert "s_mcp" in saved.spaces
+        assert "a_mcp" in saved.assets
+    finally:
+        _teardown_temp_store(tmp, old_path, old_assets)
+
+
+def test_fresh_save_drops_space_with_explicit_delete_signal():
+    ws = Workspace.create_default("ws_1", "Test", True)
+    proj_id = f"{ws.id}_default_proj"
+    disk_project = _complete_project(
+        proj_id,
+        space_id=f"{proj_id}_root",
+        spaces={
+            f"{proj_id}_root": _space(f"{proj_id}_root"),
+            "s_mcp": _space("s_mcp", kind="TextSpace"),
+        },
+    )
+    disk_project["assets"] = {
+        "a_mcp": {
+            "id": "a_mcp",
+            "kind": "markdown",
+            "path": "a_mcp.md",
+            "filename": "a_mcp.md",
+            "content": "mcp text",
+            "mime_type": "text/markdown",
+        }
+    }
+    ws.projects[proj_id] = Project.from_dict(disk_project)
+    tmp, old_path, old_assets = _setup_temp_store(ws, with_revision=True)
+    try:
+        current = api._current_workspace_revision(ws.id)
+        payload = ws.to_dict()
+        deleted_space = _complete_project(proj_id, f"{proj_id}_root")
+        deleted_space["objects"] = {"o_keep": {"id": "o_keep", "kind": "Note"}}
+        payload["projects"][proj_id] = deleted_space
+        payload["base_revision"] = current
+        payload["deleted_space_ids"] = ["s_mcp"]
+        payload["deleted_asset_ids"] = ["a_mcp"]
         client = TestClient(api.app)
         posted = client.post("/api/workspace", json=payload)
         assert posted.status_code == 200, posted.text
@@ -244,14 +283,21 @@ def test_merge_preserves_disk_only_referenced_project_for_untrusted_save():
     assert merged["projects"]["p2"]["root_space_id"] == "s2"
 
 
-def test_merge_drops_disk_only_project_for_trusted_save():
+def test_merge_drops_disk_only_project_with_library_delete_signal():
     disk = {
         "library_nodes": {"node_p2": _library_node("node_p2", "p2")},
         "projects": {"p1": _complete_project(), "p2": _complete_project("p2", "s2")},
     }
     incoming = {"library_nodes": {}, "projects": {"p1": _complete_project()}}
-    merged = merge_incoming_workspace_dict(incoming, disk, preserve_disk_only=False)
+    signals = workspace_mutation_signals_from_lists(
+        deleted_library_node_ids=["node_p2"],
+        fields_present=True,
+    )
+    merged = merge_incoming_workspace_dict(
+        incoming, disk, mutation_signals=signals
+    )
     assert "p2" not in merged["projects"]
+    assert "node_p2" not in merged["library_nodes"]
 
 
 def test_merge_still_drops_unreferenced_disk_stub():
@@ -319,9 +365,10 @@ def main():
         test_unparseable_base_revision_treated_as_absent,
         test_stale_if_match_header_rejected,
         test_stale_save_without_revision_keeps_mcp_spaces_and_asset_file,
-        test_fresh_save_keeps_client_authority_over_disk_only_entries,
+        test_fresh_save_restores_disk_space_without_delete_signal,
+        test_fresh_save_drops_space_with_explicit_delete_signal,
         test_merge_preserves_disk_only_referenced_project_for_untrusted_save,
-        test_merge_drops_disk_only_project_for_trusted_save,
+        test_merge_drops_disk_only_project_with_library_delete_signal,
         test_merge_still_drops_unreferenced_disk_stub,
         test_merge_restores_intentional_emptying_without_clear_mark,
         test_merge_does_not_resurrect_unreferenced_disk_only_project,

@@ -71,7 +71,7 @@ export async function fetchPageLoad(options?: {
   };
 }
 
-import { Workspace, Project } from './types';
+import type { Workspace, Project } from './types';
 import {
   extractProjectRevisions,
   extractWorkspaceRevision,
@@ -636,6 +636,7 @@ export async function saveWorkspace(
     baseRevision?: number | null;
     baseRevisions?: Record<string, number> | null;
     clearedProjectIds?: string[] | null;
+    mutationSignals?: import('./staleSaveRecovery').WorkspaceMutationSignalFields | null;
     signal?: AbortSignal;
     keepalive?: boolean;
     pageWriteSessionId?: string;
@@ -648,6 +649,7 @@ export async function saveWorkspace(
     baseRevision: options?.baseRevision,
     baseRevisions: options?.baseRevisions,
     clearedProjectIds: options?.clearedProjectIds,
+    mutationSignals: options?.mutationSignals,
   });
   const pageWriteSessionId = options?.pageWriteSessionId?.trim();
   const headers: Record<string, string> = {

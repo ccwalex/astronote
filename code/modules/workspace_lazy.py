@@ -1,9 +1,263 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class WorkspaceMutationSignals:
+    """Client-declared edits/deletes for signal-gated workspace merge."""
+
+    edited_space_ids: set = field(default_factory=set)
+    deleted_space_ids: set = field(default_factory=set)
+    edited_object_ids: set = field(default_factory=set)
+    deleted_object_ids: set = field(default_factory=set)
+    edited_asset_ids: set = field(default_factory=set)
+    deleted_asset_ids: set = field(default_factory=set)
+    edited_library_node_ids: set = field(default_factory=set)
+    deleted_library_node_ids: set = field(default_factory=set)
+    provided: bool = False
+
+
+def _strip_mutation_id_list(raw: Any) -> list:
+    if not isinstance(raw, list):
+        return []
+    return [str(entry or "").strip() for entry in raw if str(entry or "").strip()]
+
+
+def workspace_mutation_signals_from_lists(
+    *,
+    edited_space_ids: Optional[list] = None,
+    deleted_space_ids: Optional[list] = None,
+    edited_object_ids: Optional[list] = None,
+    deleted_object_ids: Optional[list] = None,
+    edited_asset_ids: Optional[list] = None,
+    deleted_asset_ids: Optional[list] = None,
+    edited_library_node_ids: Optional[list] = None,
+    deleted_library_node_ids: Optional[list] = None,
+    fields_present: bool = False,
+) -> WorkspaceMutationSignals:
+    """Build signal sets from POST /api/workspace metadata lists (delete wins)."""
+    if not fields_present:
+        return WorkspaceMutationSignals()
+
+    def _set(raw: Optional[list]) -> set:
+        return {str(entry) for entry in _strip_mutation_id_list(raw)}
+
+    deleted_spaces = _set(deleted_space_ids)
+    deleted_objects = _set(deleted_object_ids)
+    deleted_assets = _set(deleted_asset_ids)
+    deleted_library = _set(deleted_library_node_ids)
+
+    edited_spaces = _set(edited_space_ids) - deleted_spaces
+    edited_objects = _set(edited_object_ids) - deleted_objects
+    edited_assets = _set(edited_asset_ids) - deleted_assets
+    edited_library = _set(edited_library_node_ids) - deleted_library
+
+    return WorkspaceMutationSignals(
+        edited_space_ids=edited_spaces,
+        deleted_space_ids=deleted_spaces,
+        edited_object_ids=edited_objects,
+        deleted_object_ids=deleted_objects,
+        edited_asset_ids=edited_assets,
+        deleted_asset_ids=deleted_assets,
+        edited_library_node_ids=edited_library,
+        deleted_library_node_ids=deleted_library,
+        provided=True,
+    )
+
+
+def _merge_id_dict_signal_gated(
+    disk_collection: Any,
+    client_collection: Any,
+    edited_ids: set,
+    deleted_ids: set,
+) -> dict:
+    disk = disk_collection if isinstance(disk_collection, dict) else {}
+    client = client_collection if isinstance(client_collection, dict) else {}
+    merged: dict = {
+        str(entry_id): entry
+        for entry_id, entry in disk.items()
+        if str(entry_id) not in deleted_ids
+    }
+    for entry_id in edited_ids:
+        sid = str(entry_id)
+        if sid in deleted_ids:
+            continue
+        client_entry = client.get(sid)
+        if client_entry is None and entry_id in client:
+            client_entry = client[entry_id]
+        if isinstance(client_entry, dict):
+            merged[sid] = client_entry
+    return merged
+
+
+def _merge_id_list_membership(
+    client_list: Any,
+    disk_list: Any,
+    deleted_ids: set,
+) -> list:
+    client_ids = [str(item) for item in (client_list or []) if item]
+    disk_ids = [str(item) for item in (disk_list or []) if item]
+    seen = set(client_ids)
+    merged = list(client_ids)
+    for disk_id in disk_ids:
+        if disk_id in deleted_ids or disk_id in seen:
+            continue
+        merged.append(disk_id)
+        seen.add(disk_id)
+    return merged
+
+
+def _merge_edited_space_membership(
+    client_space: dict,
+    disk_space: dict,
+    signals: WorkspaceMutationSignals,
+) -> dict:
+    space = dict(client_space)
+    space["object_ids"] = _merge_id_list_membership(
+        client_space.get("object_ids"),
+        disk_space.get("object_ids"),
+        signals.deleted_object_ids,
+    )
+    space["asset_ids"] = _merge_id_list_membership(
+        client_space.get("asset_ids"),
+        disk_space.get("asset_ids"),
+        signals.deleted_asset_ids,
+    )
+    space["child_space_ids"] = _merge_id_list_membership(
+        client_space.get("child_space_ids"),
+        disk_space.get("child_space_ids"),
+        signals.deleted_space_ids,
+    )
+    disk_ref = disk_space.get("reference_asset_id")
+    client_ref = client_space.get("reference_asset_id")
+    if (client_ref is None or client_ref == "") and disk_ref:
+        if str(disk_ref) not in signals.deleted_asset_ids:
+            space["reference_asset_id"] = disk_ref
+    return space
+
+
+def _merge_spaces_signal_gated(
+    disk_spaces: Any,
+    client_spaces: Any,
+    signals: WorkspaceMutationSignals,
+) -> dict:
+    merged = _merge_id_dict_signal_gated(
+        disk_spaces,
+        client_spaces,
+        signals.edited_space_ids,
+        signals.deleted_space_ids,
+    )
+    disk = disk_spaces if isinstance(disk_spaces, dict) else {}
+    client = client_spaces if isinstance(client_spaces, dict) else {}
+    for space_id in signals.edited_space_ids:
+        sid = str(space_id)
+        client_space = client.get(sid)
+        if client_space is None:
+            client_space = client.get(space_id)
+        disk_space = disk.get(sid)
+        if disk_space is None:
+            disk_space = disk.get(space_id)
+        if not isinstance(client_space, dict) or not isinstance(disk_space, dict):
+            continue
+        if sid in merged:
+            merged[sid] = _merge_edited_space_membership(client_space, disk_space, signals)
+    return merged
+
+
+def _merge_project_asset_content_for_edited(
+    merged_proj: dict,
+    disk_proj: dict,
+    edited_asset_ids: set,
+) -> dict:
+    if not edited_asset_ids:
+        return merged_proj
+    disk_assets = disk_proj.get("assets") if isinstance(disk_proj.get("assets"), dict) else {}
+    merged_assets = merged_proj.get("assets") if isinstance(merged_proj.get("assets"), dict) else {}
+    if not disk_assets or not merged_assets:
+        return merged_proj
+    out_assets = dict(merged_assets)
+    changed = False
+    for asset_id in edited_asset_ids:
+        sid = str(asset_id)
+        client_asset = out_assets.get(sid)
+        if not isinstance(client_asset, dict):
+            continue
+        disk_asset = disk_assets.get(sid)
+        if not isinstance(disk_asset, dict):
+            continue
+        client_content = client_asset.get("content")
+        disk_content = disk_asset.get("content")
+        if (client_content is None or client_content == "") and disk_content:
+            if isinstance(disk_content, str) and disk_content.startswith("data:"):
+                continue
+            out_assets[sid] = dict(client_asset)
+            out_assets[sid]["content"] = disk_content
+            changed = True
+    if not changed:
+        return merged_proj
+    result = dict(merged_proj)
+    result["assets"] = out_assets
+    return result
+
+
+def _merge_library_nodes_signal_gated(
+    disk_nodes: Any,
+    client_nodes: Any,
+    signals: WorkspaceMutationSignals,
+) -> dict:
+    return _merge_id_dict_signal_gated(
+        disk_nodes,
+        client_nodes,
+        signals.edited_library_node_ids,
+        signals.deleted_library_node_ids,
+    )
+
+
+def _merge_project_with_signals(
+    client_proj: dict,
+    disk_proj: dict,
+    signals: WorkspaceMutationSignals,
+    cleared: bool = False,
+) -> dict:
+    if cleared:
+        merged = dict(client_proj)
+        merged["spaces"] = _merge_spaces_signal_gated(
+            disk_proj.get("spaces"),
+            client_proj.get("spaces"),
+            signals,
+        )
+        merged["objects"] = {}
+        merged["assets"] = {}
+        return merged
+
+    merged = dict(disk_proj)
+    if isinstance(client_proj.get("name"), str) and client_proj.get("name"):
+        merged["name"] = client_proj["name"]
+    if client_proj.get("root_space_id") is not None:
+        merged["root_space_id"] = client_proj.get("root_space_id")
+    merged["spaces"] = _merge_spaces_signal_gated(
+        disk_proj.get("spaces"),
+        client_proj.get("spaces"),
+        signals,
+    )
+    merged["objects"] = _merge_id_dict_signal_gated(
+        disk_proj.get("objects"),
+        client_proj.get("objects"),
+        signals.edited_object_ids,
+        signals.deleted_object_ids,
+    )
+    merged["assets"] = _merge_id_dict_signal_gated(
+        disk_proj.get("assets"),
+        client_proj.get("assets"),
+        signals.edited_asset_ids,
+        signals.deleted_asset_ids,
+    )
+    return _merge_project_asset_content_for_edited(merged, disk_proj, signals.edited_asset_ids)
 
 
 def _spaces_empty(project: dict) -> bool:
@@ -454,18 +708,30 @@ def merge_incoming_workspace_dict(
     disk: Optional[dict],
     preserve_disk_only: bool = False,
     cleared_project_ids: Optional[set] = None,
+    mutation_signals: Optional[WorkspaceMutationSignals] = None,
 ) -> dict:
     if not isinstance(incoming, dict):
         return disk if isinstance(disk, dict) else {}
     if not isinstance(disk, dict):
         return incoming
+    signals = mutation_signals or WorkspaceMutationSignals()
     cleared = {str(pid) for pid in (cleared_project_ids or set()) if str(pid or "").strip()}
+    result = dict(incoming)
+    if signals.provided:
+        result["library_nodes"] = _merge_library_nodes_signal_gated(
+            disk.get("library_nodes"),
+            incoming.get("library_nodes"),
+            signals,
+        )
     incoming_projects = incoming.get("projects") if isinstance(incoming.get("projects"), dict) else {}
     disk_projects = disk.get("projects") if isinstance(disk.get("projects"), dict) else {}
-    referenced = _referenced_project_ids(incoming)
+    referenced = _referenced_project_ids(result)
     disk_referenced = _referenced_project_ids(disk)
     merged_projects = dict(incoming_projects)
     restored_disk_only = []
+    # Saves without mutation signals cannot prove entity-level intent; keep
+    # stored bodies the payload omits (base_revision is freshness only).
+    restore_omitted_bodies = preserve_disk_only or not signals.provided
 
     def _name_synced_disk_copy(project_id: str, disk_proj: dict) -> dict:
         """Keep a stored body but adopt the incoming library's title for it.
@@ -476,7 +742,7 @@ def merge_incoming_workspace_dict(
         name. Syncing here keeps GET /nav + GET /project from answering with
         the stale copy while the library already shows the renamed one.
         """
-        incoming_name = _library_name_for_project(incoming, project_id)
+        incoming_name = _library_name_for_project(result, project_id)
         if incoming_name and disk_proj.get("name") != incoming_name:
             disk_proj = dict(disk_proj)
             disk_proj["name"] = incoming_name
@@ -488,7 +754,8 @@ def merge_incoming_workspace_dict(
             if project_id in referenced:
                 merged_projects[project_id] = _name_synced_disk_copy(project_id, disk_proj)
             elif (
-                preserve_disk_only
+                restore_omitted_bodies
+                and not signals.provided
                 and disk_referenced
                 and project_id in disk_referenced
                 and not is_project_stub(disk_proj)
@@ -496,8 +763,8 @@ def merge_incoming_workspace_dict(
                 # A hydrated body the payload omits entirely, while the stored
                 # library tree still references it, is a stale or partial save
                 # (e.g. a tab that loaded before a server-side page creation):
-                # keep the stored body. Saves carrying a fresh base revision are
-                # trusted to delete instead.
+                # keep the stored body unless the client sent explicit delete
+                # signals for the entities involved.
                 merged_projects[project_id] = _name_synced_disk_copy(project_id, disk_proj)
                 restored_disk_only.append(str(project_id))
             continue
@@ -509,11 +776,19 @@ def merge_incoming_workspace_dict(
         elif is_project_stub(client_proj) and project_id not in referenced:
             merged_projects.pop(project_id, None)
         elif not is_project_stub(client_proj):
-            merged_projects[project_id] = (
-                _merge_project_body(client_proj, disk_proj, cleared=str(project_id) in cleared)
-                if preserve_disk_only
-                else _merge_project_asset_content(client_proj, disk_proj)
-            )
+            if signals.provided:
+                merged_projects[project_id] = _merge_project_with_signals(
+                    client_proj,
+                    disk_proj,
+                    signals,
+                    cleared=str(project_id) in cleared,
+                )
+            else:
+                merged_projects[project_id] = _merge_project_body(
+                    client_proj,
+                    disk_proj,
+                    cleared=str(project_id) in cleared,
+                )
     if restored_disk_only:
         logger.warning(
             "RESTORED %d disk-only project body(s) the client save omitted "
@@ -521,7 +796,6 @@ def merge_incoming_workspace_dict(
             len(restored_disk_only),
             ", ".join(sorted(restored_disk_only)[:10]),
         )
-    result = dict(incoming)
     result["projects"] = merged_projects
     return result
 

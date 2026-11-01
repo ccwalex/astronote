@@ -92,6 +92,24 @@ function test_payload_includes_per_project_fields(): void {
   );
 }
 
+function test_payload_includes_mutation_signal_fields(): void {
+  const payload = buildSavePayload(
+    { id: 'ws' },
+    {
+      mutationSignals: {
+        edited_space_ids: ['s1'],
+        deleted_library_node_ids: ['n1'],
+      },
+    }
+  );
+  const typed = payload as {
+    edited_space_ids?: string[];
+    deleted_library_node_ids?: string[];
+  };
+  assert(typed.edited_space_ids?.[0] === 's1', 'edited_space_ids forwarded');
+  assert(typed.deleted_library_node_ids?.[0] === 'n1', 'deleted_library_node_ids forwarded');
+}
+
 function test_recovery_decision_single_retry(): void {
   assert(decideStaleSaveRecovery(false).action === 'recover', 'first 409 must recover');
   assert(decideStaleSaveRecovery(true).action === 'surface-error',
@@ -109,6 +127,7 @@ function main(): void {
     test_parse_stale_revision_from_409_body,
     test_stale_error_carries_server_revision,
     test_payload_includes_per_project_fields,
+    test_payload_includes_mutation_signal_fields,
     test_recovery_decision_single_retry,
   ];
   for (const test of tests) {

@@ -78,12 +78,54 @@ export function parseStaleSaveRevision(text: string): number | null {
   return parseStaleSaveDetail(text).serverRevision;
 }
 
+export type WorkspaceMutationSignalFields = {
+  edited_space_ids?: string[];
+  deleted_space_ids?: string[];
+  edited_object_ids?: string[];
+  deleted_object_ids?: string[];
+  edited_asset_ids?: string[];
+  deleted_asset_ids?: string[];
+  edited_library_node_ids?: string[];
+  deleted_library_node_ids?: string[];
+};
+
 export type SavePayloadOptions = {
   coalesceKey?: string | null;
   baseRevision?: number | null;
   baseRevisions?: Record<string, number> | null;
   clearedProjectIds?: string[] | null;
+  mutationSignals?: WorkspaceMutationSignalFields | null;
 };
+
+function nonEmptyIdList(raw: string[] | null | undefined): string[] | undefined {
+  if (!Array.isArray(raw) || raw.length === 0) return undefined;
+  const out = raw.map((id) => String(id || '').trim()).filter(Boolean);
+  return out.length > 0 ? out : undefined;
+}
+
+function signalFieldsFromOptions(
+  signals: WorkspaceMutationSignalFields | null | undefined
+): WorkspaceMutationSignalFields {
+  if (!signals) return {};
+  const out: WorkspaceMutationSignalFields = {};
+  const editedSpaces = nonEmptyIdList(signals.edited_space_ids);
+  const deletedSpaces = nonEmptyIdList(signals.deleted_space_ids);
+  const editedObjects = nonEmptyIdList(signals.edited_object_ids);
+  const deletedObjects = nonEmptyIdList(signals.deleted_object_ids);
+  const editedAssets = nonEmptyIdList(signals.edited_asset_ids);
+  const deletedAssets = nonEmptyIdList(signals.deleted_asset_ids);
+  const editedLibrary = nonEmptyIdList(signals.edited_library_node_ids);
+  const deletedLibrary = nonEmptyIdList(signals.deleted_library_node_ids);
+  if (editedSpaces) out.edited_space_ids = editedSpaces;
+  if (deletedSpaces) out.deleted_space_ids = deletedSpaces;
+  if (editedObjects) out.edited_object_ids = editedObjects;
+  if (deletedObjects) out.deleted_object_ids = deletedObjects;
+  if (editedAssets) out.edited_asset_ids = editedAssets;
+  if (deletedAssets) out.deleted_asset_ids = deletedAssets;
+  if (editedLibrary) out.edited_library_node_ids = editedLibrary;
+  if (deletedLibrary) out.deleted_library_node_ids = deletedLibrary;
+  return out;
+}
 
 /** Shape the POST /api/workspace body: workspace + optional coalesce_key +
  * base_revision / base_revisions / cleared_project_ids. */
@@ -122,7 +164,8 @@ export function buildSavePayload<T extends object>(
             .filter(Boolean),
         }
       : {};
-  return { ...workspace, ...coalesce, ...base, ...perProjectField, ...cleared };
+  const signalFields = signalFieldsFromOptions(options?.mutationSignals);
+  return { ...workspace, ...coalesce, ...base, ...perProjectField, ...cleared, ...signalFields };
 }
 
 export type StaleSaveRecoveryDecision =

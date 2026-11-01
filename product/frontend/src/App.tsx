@@ -53,7 +53,7 @@ import { insertVerticalPageGap } from './model/insertVerticalPageGap';
 import { createStrokeObject, StrokeDrawStyle } from './model/canvasObjectFactory';
 import { probeCanvas, ProbeMode, ProbeResult } from './model/probeCanvas';
 import { fetchWorkspaceRevision, saveWorkspace, StaleWorkspaceSaveError, putAssetText, isAssetTrackingPersistError, uploadAsset, convertGroupSpaceToImage, restoreImageToGroup, postCommit, postRevertToBaseline, fetchUndoState, fetchAssetTrackingStorageStatus, migrateAssetTrackingStore, skipAssetTrackingMigration, type AssetTrackingStorageStatus, fetchWorkspaceStorageStatus, migrateWorkspaceStorage, skipWorkspaceStorageMigration, type WorkspaceStorageStatus, isAbortError, startUserSessionLifecycle } from './api';
-import { decideStaleSaveRecovery } from './model/staleSaveRecovery';
+import { decideStaleSaveRecovery, buildSavePayload } from './model/staleSaveRecovery';
 import {
   clearAstronoteLoadCaches,
   extractProjectRevisions,
@@ -69,7 +69,15 @@ import {
 import { readLastView, validateLastView, writeLastView } from './model/lastViewCache';
 import { consumePendingSpaceSelection, resolveSpaceSelection } from './model/deferredSpaceSelection';
 import { collectDirtyMarkdownAssets, isProjectHydrated, loadProjectIntoWorkspace, markMarkdownAssetsPersisted, noteHydratedMarkdownAssets, parseWorkspaceJson, shouldPersistWorkspace, type DirtyMarkdownAsset } from './model/workspaceLoad';
-import { computeSaveProjectIds, preparePartialWorkspaceForSave } from './model/workspaceSave';
+import { computeSaveProjectIds, preparePartialWorkspaceForSave, buildPendingPersistWriteOptions, listNewProjectIdsFromPending, shouldPostWorkspaceSave } from './model/workspaceSave';
+import {
+  captureAuthoritativeFromWorkspace,
+  captureAuthoritativeLibrary,
+  captureAuthoritativeProject,
+  hasAuthoritativeProject,
+} from './model/authoritativeWorkspaceSnapshot';
+import { computeWorkspaceMutationSignals } from './model/workspaceMutationSignals';
+import { shouldSkipProjectHydrateFetch } from './model/projectHydrateGate';
 import { bootstrapWorkspaceLoad, type BootstrapWorkspaceResult } from './model/bootstrapWorkspace';
 import {
   commitCheckpointHoverTitle,
@@ -360,6 +368,14 @@ export default function App() {
         lastViewPrefetchRef.current = null;
       }
 
+      captureAuthoritativeLibrary(result.workspace.library_nodes);
+      if (result.usedPageLoad && result.selectedProjectId) {
+        const pageLoadProject = result.workspace.projects?.[result.selectedProjectId];
+        if (pageLoadProject && isProjectHydrated(pageLoadProject)) {
+          captureAuthoritativeProject(pageLoadProject);
+        }
+      }
+
       skipBackendPersistRef.current = true;
       presentRef.current = result.workspace;
       setHistoryState(presentOnlyHistory(result.workspace));
@@ -493,7 +509,7 @@ export default function App() {
   ) => {
     if (!projectId) return;
     const existing = workspace.projects?.[projectId];
-    if (isProjectHydrated(existing)) {
+    if (shouldSkipProjectHydrateFetch(isProjectHydrated(existing), hasAuthoritativeProject(projectId))) {
       launchSettledRef.current = true;
       setProjectBodyError(null);
       applyPendingSpaceSelection(projectId);
@@ -552,6 +568,7 @@ export default function App() {
             serverRevisionRef.current = projectRev;
           }
           writeProjectToCache(loadedProject, projectRev ?? serverRevisionRef.current);
+          captureAuthoritativeProject(loadedProject);
         }
         setHistoryState((prev) => {
           if (!prev.present) return prev;
@@ -713,6 +730,7 @@ export default function App() {
       armDebouncedPersist();
     }
     presentRef.current = present;
+    captureAuthoritativeFromWorkspace(present, Object.keys(present.projects || {}));
     setHistoryState(presentOnlyHistory(present));
     setProjectBodyError(result.projectBodyError);
     setNavError(null);
@@ -785,9 +803,11 @@ export default function App() {
       shouldPersistWorkspace(current) &&
       isWorkspaceDirty(workspaceDirtyGateRef.current)
     ) {
-      writeWorkspaceDirtyToPendingPersist(current, collectDirtyMarkdownAssets(current), {
-        includeAllHydrated: true,
-      });
+      writeWorkspaceDirtyToPendingPersist(
+        current,
+        collectDirtyMarkdownAssets(current),
+        buildPendingPersistWriteOptions(current, collectDirtyMarkdownAssets(current))
+      );
     }
     const result = await refreshWorkspaceFromServer(selectedProjectIdRef.current, {
       forceProjectRefresh: true,
@@ -875,33 +895,33 @@ export default function App() {
     options?: { keepalive?: boolean }
   ) => {
     if (!workspace) return;
-    // Library-only mutations (page create/rename/delete) are valid saves even
-    // when no hydrated project body remains — e.g. deleting the last page,
-    // which leaves only library_nodes to persist.
-    if (
-      !shouldPersistWorkspace(workspace) &&
-      !isWorkspaceDirty(workspaceDirtyGateRef.current) &&
-      pendingLibraryDeletionsRef.current.nodeIds.size === 0
-    ) {
+    const dirty = collectDirtyMarkdownForPersist(workspace);
+    const clearedProjectIds = [...pendingLibraryDeletionsRef.current.projectIds];
+    const newProjectIds = listNewProjectIdsFromPending(workspace);
+    const mutationSignals = computeWorkspaceMutationSignals(workspace, { newProjectIds });
+    const libraryDeletePending = pendingLibraryDeletionsRef.current.nodeIds.size > 0;
+    const shouldPost =
+      shouldPostWorkspaceSave(workspace, { clearedProjectIds, newProjectIds }) ||
+      libraryDeletePending;
+    if (!shouldPost && dirty.length === 0) {
       return;
     }
     if (persistBlockedRef.current || pageWriteProtectedRef.current) {
-      // Persist is blocked (e.g. stale workspace rejected): skip the network but
-      // still snapshot dirty state so edits made while the warning is up survive.
       if (persistBlockedRef.current) {
-        writeWorkspaceDirtyToPendingPersist(workspace, collectDirtyMarkdownForPersist(workspace), {
-          includeAllHydrated: true,
-        });
+        writeWorkspaceDirtyToPendingPersist(
+          workspace,
+          dirty,
+          buildPendingPersistWriteOptions(workspace, dirty)
+        );
       }
       return;
     }
     clearPersistTimer();
     if (coalesceKey) pendingCoalesceKeyRef.current = coalesceKey;
+    const pendingWriteOptions = buildPendingPersistWriteOptions(workspace, dirty);
     if (persistInFlightRef.current > 0 && !options?.keepalive) {
       persistQueuedRef.current = true;
-      writeWorkspaceDirtyToPendingPersist(workspace, collectDirtyMarkdownForPersist(workspace), {
-        includeAllHydrated: true,
-      });
+      writeWorkspaceDirtyToPendingPersist(workspace, dirty, pendingWriteOptions);
       return;
     }
     if (persistAbortRef.current) {
@@ -910,14 +930,8 @@ export default function App() {
     const controller = new AbortController();
     persistAbortRef.current = controller;
     const signal = controller.signal;
-    const dirty = collectDirtyMarkdownForPersist(workspace);
-    // Undroppable: sync pending before network so abort/tab-close cannot drop payload.
-    writeWorkspaceDirtyToPendingPersist(workspace, dirty, { includeAllHydrated: true });
-    const gateDirty = isWorkspaceDirty(workspaceDirtyGateRef.current);
-    const ackProjectIds = computeSaveProjectIds(workspace, dirty, {
-      gateDirty,
-      selectedProjectId: selectedProjectIdRef.current,
-    });
+    writeWorkspaceDirtyToPendingPersist(workspace, dirty, pendingWriteOptions);
+    const ackProjectIds = computeSaveProjectIds(workspace, dirty, { newProjectIds });
     const prepared = preparePartialWorkspaceForSave(workspace, ackProjectIds);
     persistInFlightRef.current += 1;
     setPersistStatus('saving');
@@ -929,9 +943,9 @@ export default function App() {
           keepalive: options?.keepalive
         });
       }
-      const clearedProjectIds = [
-        ...pendingLibraryDeletionsRef.current.projectIds,
-      ];
+      if (!shouldPost) {
+        return null;
+      }
       return saveWorkspace(prepared, {
         coalesce_key: coalesceKey || pendingCoalesceKeyRef.current || undefined,
         baseRevision: serverRevisionRef.current,
@@ -940,6 +954,7 @@ export default function App() {
           projectRevisionsRef.current
         ),
         clearedProjectIds,
+        mutationSignals,
         signal: options?.keepalive ? undefined : signal,
         keepalive: options?.keepalive,
         pageWriteSessionId: getOrCreatePageSessionId(),
@@ -947,6 +962,19 @@ export default function App() {
     };
     run()
       .then((saveResult) => {
+        if (saveResult === null) {
+          if (persistAbortRef.current === controller) {
+            persistAbortRef.current = null;
+          }
+          markMarkdownAssetsPersisted(dirty);
+          setPersistStatus(
+            resolveBaselinePersistStatus({
+              dirty: isWorkspaceDirty(workspaceDirtyGateRef.current),
+              pendingProjectCount: listPendingProjectIds().length,
+            })
+          );
+          return;
+        }
         if (persistAbortRef.current === controller) {
           persistAbortRef.current = null;
         }
@@ -967,6 +995,7 @@ export default function App() {
         }
         mergeServerProjectRevisions(saveResult);
         staleSaveRecoveryRef.current = false;
+        captureAuthoritativeFromWorkspace(workspace, ackProjectIds);
         updateCacheAfterSave(
           rev ?? serverRevisionRef.current,
           { workspace }
@@ -1541,23 +1570,35 @@ export default function App() {
   useEffect(() => {
     const syncPendingOnUnload = () => {
       const workspace = presentRef.current;
-      if (!workspace || !shouldPersistWorkspace(workspace)) return;
-      const dirty = collectDirtyMarkdownAssets(workspace);
-      const gateDirty = isWorkspaceDirty(workspaceDirtyGateRef.current);
-      if (!gateDirty && dirty.length === 0 && listPendingProjectIds().length === 0) return;
-      if (gateDirty || dirty.length > 0) {
-        writeWorkspaceDirtyToPendingPersist(workspace, dirty, { includeAllHydrated: true });
+      if (!workspace) return;
+      const dirtyUnload = collectDirtyMarkdownForPersist(workspace);
+      const clearedProjectIds = [...pendingLibraryDeletionsRef.current.projectIds];
+      const newProjectIds = listNewProjectIdsFromPending(workspace);
+      const mutationSignals = computeWorkspaceMutationSignals(workspace, { newProjectIds });
+      const libraryDeletePending = pendingLibraryDeletionsRef.current.nodeIds.size > 0;
+      const shouldPost =
+        shouldPostWorkspaceSave(workspace, { clearedProjectIds, newProjectIds }) ||
+        libraryDeletePending;
+      if (!shouldPost && dirtyUnload.length === 0 && listPendingProjectIds().length === 0) {
+        return;
       }
+      const pendingWriteOptions = buildPendingPersistWriteOptions(workspace, dirtyUnload);
+      writeWorkspaceDirtyToPendingPersist(workspace, dirtyUnload, pendingWriteOptions);
+      if (!shouldPost) return;
       try {
-        const dirtyUnload = collectDirtyMarkdownForPersist(workspace);
-        const gateDirtyUnload = isWorkspaceDirty(workspaceDirtyGateRef.current);
-        const ackIds = computeSaveProjectIds(workspace, dirtyUnload, {
-          gateDirty: gateDirtyUnload,
-          selectedProjectId: selectedProjectIdRef.current,
-        });
+        const ackIds = computeSaveProjectIds(workspace, dirtyUnload, { newProjectIds });
         const prepared = preparePartialWorkspaceForSave(workspace, ackIds);
-        const body = JSON.stringify(prepared);
-        // ~60k sendBeacon / keepalive budget; pending localStorage already written above.
+        const body = JSON.stringify(
+          buildSavePayload(prepared, {
+            baseRevision: serverRevisionRef.current,
+            baseRevisions: pickBaseRevisionsForProjects(
+              ackIds,
+              projectRevisionsRef.current
+            ),
+            clearedProjectIds,
+            mutationSignals,
+          })
+        );
         if (body.length < 60000) {
           void saveWorkspace(prepared, {
             keepalive: true,
@@ -1566,7 +1607,8 @@ export default function App() {
               ackIds,
               projectRevisionsRef.current
             ),
-            clearedProjectIds: [...pendingLibraryDeletionsRef.current.projectIds],
+            clearedProjectIds,
+            mutationSignals,
             pageWriteSessionId: getOrCreatePageSessionId(),
           }).catch(() => {
             // Unload save: 409/network failures are expected; the pending

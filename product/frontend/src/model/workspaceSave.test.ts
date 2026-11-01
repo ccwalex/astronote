@@ -5,6 +5,11 @@
 
 import { computeSaveProjectIds } from './workspaceSave.ts';
 import type { Workspace } from '../types';
+import {
+  captureAuthoritativeProject,
+  captureAuthoritativeLibrary,
+  resetAuthoritativeSnapshots,
+} from './authoritativeWorkspaceSnapshot.ts';
 
 function assert(cond: unknown, msg: string): void {
   if (!cond) throw new Error(msg);
@@ -15,13 +20,35 @@ function hydratedProject(id: string) {
     id,
     name: id,
     root_space_id: `${id}_root`,
-    spaces: { [`${id}_root`]: { id: `${id}_root`, kind: 'Space' } },
+    spaces: {
+      [`${id}_root`]: {
+        id: `${id}_root`,
+        kind: 'Space',
+        x: 0,
+        y: 0,
+        z: 0,
+        width: 10,
+        height: 10,
+        parent_space_id: null,
+        child_space_ids: [],
+        object_ids: [],
+        asset_ids: [],
+        scale_x: 1,
+        scale_y: 1,
+        reference_asset_id: null,
+        reference_mode: 'none',
+      },
+    },
     objects: {},
     assets: {},
   };
 }
 
 function test_dirty_markdown_selects_project(): void {
+  resetAuthoritativeSnapshots();
+  captureAuthoritativeLibrary({});
+  captureAuthoritativeProject(hydratedProject('p1') as Workspace['projects'][string]);
+  captureAuthoritativeProject(hydratedProject('p2') as Workspace['projects'][string]);
   const ws = {
     id: 'ws',
     name: 'W',
@@ -34,20 +61,33 @@ function test_dirty_markdown_selects_project(): void {
   assert(ids.length === 1 && ids[0] === 'p1', 'only markdown-dirty project');
 }
 
-function test_gate_dirty_includes_selected_layout_only(): void {
+function test_layout_edit_selected_page_not_sibling(): void {
+  resetAuthoritativeSnapshots();
+  captureAuthoritativeLibrary({});
+  const p1 = hydratedProject('p1');
+  const p2 = hydratedProject('p2');
+  captureAuthoritativeProject(p1 as Workspace['projects'][string]);
+  captureAuthoritativeProject(p2 as Workspace['projects'][string]);
+  const moved = {
+    ...p2,
+    spaces: {
+      ...p2.spaces,
+      p2_root: { ...p2.spaces.p2_root, x: 99 },
+    },
+  };
   const ws = {
     id: 'ws',
     name: 'W',
     library_nodes: {},
-    projects: { p1: hydratedProject('p1'), p2: hydratedProject('p2') },
+    projects: { p1, p2: moved },
   } as Workspace;
-  const ids = computeSaveProjectIds(ws, [], { gateDirty: true, selectedProjectId: 'p2' });
-  assert(ids.includes('p2'), 'layout-only edit on selected page');
+  const ids = computeSaveProjectIds(ws, []);
+  assert(ids.includes('p2'), 'layout edit on p2 included');
   assert(!ids.includes('p1'), 'sibling hydrated page must not be included');
 }
 
 function main(): void {
-  const tests = [test_dirty_markdown_selects_project, test_gate_dirty_includes_selected_layout_only];
+  const tests = [test_dirty_markdown_selects_project, test_layout_edit_selected_page_not_sibling];
   for (const test of tests) {
     test();
     console.log('PASS', test.name);

@@ -31,6 +31,7 @@ from modules.workspace_lazy import (
     merge_incoming_workspace_dict,
     plan_collection_restore,
     referenced_project_ids,
+    workspace_mutation_signals_from_lists,
     workspace_nav_dict,
 )
 from modules.page_view_lock import (
@@ -1506,6 +1507,7 @@ def _post_workspace_sync(
     base_revision: Optional[int] = None,
     cleared_project_ids=None,
     base_revisions: Optional[dict] = None,
+    mutation_signals=None,
 ):
     """Heavy save work off the asyncio event loop (see post_workspace).
 
@@ -1602,7 +1604,11 @@ def _post_workspace_sync(
         if previous_dict is not None:
             # A current global revision never proves intent when many projects
             # lose spaces at once: that is the nav-shell failure mode.
-            mass_dropped = incoming_would_mass_drop_spaces(data, previous_dict)
+            mass_dropped = (
+                []
+                if mutation_signals is not None and mutation_signals.provided
+                else incoming_would_mass_drop_spaces(data, previous_dict)
+            )
             unmarked = [pid for pid in mass_dropped if pid not in cleared]
             if len(unmarked) >= 3:
                 # Many projects shrinking at once is never a per-page edit; a
@@ -1637,7 +1643,7 @@ def _post_workspace_sync(
                     data,
                     previous_dict,
                     cleared_project_ids=cleared,
-                    trust_client_deletions=base_revision is not None,
+                    trust_client_deletions=False,
                 )
                 if restore_plan:
                     data = apply_collection_restore(data, previous_dict, restore_plan)
@@ -1665,8 +1671,11 @@ def _post_workspace_sync(
             # Saves without a base revision cannot prove freshness: keep stored
             # bodies the payload omits instead of trusting a possible stale copy.
             data = merge_incoming_workspace_dict(
-                data, previous_dict, preserve_disk_only=base_revision is None,
+                data,
+                previous_dict,
+                preserve_disk_only=True,
                 cleared_project_ids=cleared,
+                mutation_signals=mutation_signals,
             )
             data = repair_workspace_dict(data, fallback=previous_dict, assets_dir=ASSETS_DIR)
         save_project_ids = sorted(str(pid) for pid in _complete_project_ids(data))
@@ -1790,6 +1799,28 @@ async def post_workspace(request: Request):
             for pid in (cleared_raw if isinstance(cleared_raw, list) else [])
             if str(pid or "").strip()
         ]
+        mutation_signal_keys = (
+            "edited_space_ids",
+            "deleted_space_ids",
+            "edited_object_ids",
+            "deleted_object_ids",
+            "edited_asset_ids",
+            "deleted_asset_ids",
+            "edited_library_node_ids",
+            "deleted_library_node_ids",
+        )
+        mutation_fields_present = any(key in data for key in mutation_signal_keys)
+        mutation_signals = workspace_mutation_signals_from_lists(
+            edited_space_ids=data.pop("edited_space_ids", None),
+            deleted_space_ids=data.pop("deleted_space_ids", None),
+            edited_object_ids=data.pop("edited_object_ids", None),
+            deleted_object_ids=data.pop("deleted_object_ids", None),
+            edited_asset_ids=data.pop("edited_asset_ids", None),
+            deleted_asset_ids=data.pop("deleted_asset_ids", None),
+            edited_library_node_ids=data.pop("edited_library_node_ids", None),
+            deleted_library_node_ids=data.pop("deleted_library_node_ids", None),
+            fields_present=mutation_fields_present,
+        )
         write_session_id = request.headers.get("X-Page-Write-Session")
         user_id = str(
             request.headers.get("X-User-Id")
@@ -1811,6 +1842,7 @@ async def post_workspace(request: Request):
                 base_revision,
                 cleared_project_ids,
                 base_revisions,
+                mutation_signals,
             )
         finally:
             if token is not None:

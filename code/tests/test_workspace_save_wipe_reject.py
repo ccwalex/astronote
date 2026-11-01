@@ -18,6 +18,7 @@ from modules.workspace_lazy import (
     incoming_would_wipe_page_bodies,
     merge_incoming_workspace_dict,
     plan_collection_restore,
+    workspace_mutation_signals_from_lists,
     workspace_nav_dict,
 )
 import api
@@ -432,6 +433,81 @@ def test_delete_last_page_rejected_without_library_tree():
     assert incoming_would_wipe_page_bodies(incoming, disk) is True
 
 
+def test_signal_merge_restores_emptied_object_ids_without_delete_signal():
+    disk = {"projects": {"p1": _complete_project_with_bodies()}}
+    disk["projects"]["p1"]["spaces"]["s1"]["object_ids"] = ["o1"]
+    client = _complete_project_with_bodies()
+    client["spaces"]["s1"]["object_ids"] = []
+    signals = workspace_mutation_signals_from_lists(
+        edited_space_ids=["s1"],
+        fields_present=True,
+    )
+    merged = merge_incoming_workspace_dict(
+        {"projects": {"p1": client}}, disk, mutation_signals=signals
+    )
+    assert merged["projects"]["p1"]["spaces"]["s1"]["object_ids"] == ["o1"]
+
+
+def test_signal_merge_applies_edited_space_layout_only():
+    disk = {"projects": {"p1": _complete_project()}}
+    disk["projects"]["p1"]["spaces"]["s1"]["width"] = 100
+    disk["projects"]["p1"]["spaces"]["s2"] = {
+        "id": "s2",
+        "kind": "TextSpace",
+        "x": 0,
+        "y": 0,
+        "z": 0,
+        "width": 50,
+        "height": 50,
+    }
+    client = _complete_project()
+    client["spaces"]["s1"]["width"] = 200
+    client["spaces"]["s2"] = {
+        "id": "s2",
+        "kind": "TextSpace",
+        "x": 0,
+        "y": 0,
+        "z": 0,
+        "width": 999,
+        "height": 50,
+    }
+    signals = workspace_mutation_signals_from_lists(
+        edited_space_ids=["s1"],
+        fields_present=True,
+    )
+    merged = merge_incoming_workspace_dict(
+        {"projects": {"p1": client}}, disk, mutation_signals=signals
+    )
+    assert merged["projects"]["p1"]["spaces"]["s1"]["width"] == 200
+    assert merged["projects"]["p1"]["spaces"]["s2"]["width"] == 50
+
+
+def test_signal_merge_keeps_omitted_library_node_without_delete_signal():
+    disk = {
+        "library_nodes": {
+            "n1": {"id": "n1", "kind": "page", "name": "Keep", "parent_id": None,
+                   "child_ids": [], "target_project_id": "p1"},
+            "n2": {"id": "n2", "kind": "folder", "name": "Folder", "parent_id": None,
+                   "child_ids": [], "target_project_id": None},
+        },
+        "projects": {"p1": _complete_project()},
+    }
+    incoming = {
+        "library_nodes": {
+            "n1": {"id": "n1", "kind": "page", "name": "Renamed", "parent_id": None,
+                   "child_ids": [], "target_project_id": "p1"},
+        },
+        "projects": {"p1": _complete_project()},
+    }
+    signals = workspace_mutation_signals_from_lists(
+        edited_library_node_ids=["n1"],
+        fields_present=True,
+    )
+    merged = merge_incoming_workspace_dict(incoming, disk, mutation_signals=signals)
+    assert merged["library_nodes"]["n1"]["name"] == "Renamed"
+    assert merged["library_nodes"]["n2"]["name"] == "Folder"
+
+
 def test_merge_restored_disk_body_adopts_incoming_library_name():
     """Renaming a page whose project body is a stub in the payload must still
     update the stored project name, so the canvas header matches the library
@@ -482,6 +558,9 @@ def main():
         test_delete_last_page_allowed_when_library_proves_deletion,
         test_delete_last_page_still_rejected_when_library_still_references_body,
         test_delete_last_page_rejected_without_library_tree,
+        test_signal_merge_restores_emptied_object_ids_without_delete_signal,
+        test_signal_merge_applies_edited_space_layout_only,
+        test_signal_merge_keeps_omitted_library_node_without_delete_signal,
         test_merge_restored_disk_body_adopts_incoming_library_name,
     ]
     for test in tests:

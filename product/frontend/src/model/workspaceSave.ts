@@ -2,28 +2,61 @@ import type { Workspace } from '../types';
 import {
   listPendingProjectIds,
   readPendingPersistCache,
+  type WriteWorkspaceDirtyOptions,
 } from './pendingPersistCache';
 import {
   isProjectHydrated,
   prepareWorkspaceForSave,
   type DirtyMarkdownAsset,
 } from './workspaceLoad';
+import {
+  computeWorkspaceMutationSignals,
+  filterSaveProjectIds,
+  hasWorkspaceMutationSignals,
+  projectIdsFromMutationSignals,
+} from './workspaceMutationSignals';
+import { hasAuthoritativeProject } from './authoritativeWorkspaceSnapshot';
 
 export type ComputeSaveProjectIdsOptions = {
+  /** @deprecated Prefer mutation signals; kept for pending-cache layout entries. */
   gateDirty?: boolean;
   selectedProjectId?: string | null;
+  newProjectIds?: Iterable<string>;
 };
 
+/** Collect un-ACKed local page creations from the pending library snapshot. */
+export function listNewProjectIdsFromPending(
+  workspace: Workspace
+): string[] {
+  const snap = readPendingPersistCache();
+  if (!snap?.libraryNodes) return [];
+  const out = new Set<string>();
+  for (const node of Object.values(snap.libraryNodes)) {
+    const pid = node?.target_project_id;
+    if (!pid) continue;
+    const onServer = Boolean(workspace.projects?.[pid]);
+    const referencedInLibrary = Boolean(workspace.library_nodes?.[node.id]);
+    if (!onServer || !referencedInLibrary) {
+      out.add(pid);
+    }
+  }
+  return [...out];
+}
+
 /**
- * Project bodies to include in POST /api/workspace: markdown-dirty pages,
- * pending un-ACKed pages (with dirty markdown or layout-only on the selected
- * page), and newly created pages captured in the pending library snapshot.
+ * Project bodies to include in POST /api/workspace: pages with mutation signals,
+ * markdown-dirty pages, and newly created pages captured in the pending library snapshot.
  */
 export function computeSaveProjectIds(
   workspace: Workspace,
   dirtyMarkdown: DirtyMarkdownAsset[],
   options?: ComputeSaveProjectIdsOptions
 ): string[] {
+  const newProjectIds = new Set([
+    ...listNewProjectIdsFromPending(workspace),
+    ...(options?.newProjectIds ? options.newProjectIds : []),
+  ]);
+  const signals = computeWorkspaceMutationSignals(workspace, { newProjectIds });
   const ids = new Set<string>();
   for (const item of dirtyMarkdown) {
     if (item.projectId) ids.add(item.projectId);
@@ -34,27 +67,27 @@ export function computeSaveProjectIds(
     const entry = snap?.projects?.[pid];
     if (entry?.dirtyMarkdown?.length) {
       ids.add(pid);
-      continue;
     }
-    if (options?.gateDirty && options.selectedProjectId === pid) {
+  }
+  for (const pid of newProjectIds) {
+    ids.add(pid);
+  }
+  if (hasWorkspaceMutationSignals(signals)) {
+    for (const pid of projectIdsFromMutationSignals(workspace, signals)) {
       ids.add(pid);
     }
   }
-  if (snap?.libraryNodes) {
-    for (const node of Object.values(snap.libraryNodes)) {
-      const pid = node?.target_project_id;
-      if (!pid) continue;
-      const onServer = Boolean(workspace.projects?.[pid]);
-      const referencedInLibrary = Boolean(workspace.library_nodes?.[node.id]);
-      if (!onServer || !referencedInLibrary) {
-        ids.add(pid);
-      }
+  const hydrated = [...ids].filter((pid) => isProjectHydrated(workspace.projects?.[pid]));
+  const filtered = filterSaveProjectIds(hydrated, workspace, { newProjectIds });
+  const out = new Set(filtered);
+  for (const item of dirtyMarkdown) {
+    const pid = item.projectId;
+    if (!pid || !isProjectHydrated(workspace.projects?.[pid])) continue;
+    if (hasAuthoritativeProject(pid) || newProjectIds.has(pid)) {
+      out.add(pid);
     }
   }
-  if (options?.gateDirty && options.selectedProjectId) {
-    ids.add(options.selectedProjectId);
-  }
-  return [...ids].filter((pid) => isProjectHydrated(workspace.projects?.[pid]));
+  return [...out].sort();
 }
 
 /** Partial workspace save: full library tree, only listed hydrated project bodies. */
@@ -73,4 +106,32 @@ export function preparePartialWorkspaceForSave(
     library_nodes: workspace.library_nodes,
     projects,
   };
+}
+
+/** Whether POST /api/workspace should run for the current tree (signals or library deletions). */
+export function shouldPostWorkspaceSave(
+  workspace: Workspace,
+  options?: {
+    clearedProjectIds?: string[];
+    newProjectIds?: Iterable<string>;
+  }
+): boolean {
+  const newProjectIds = new Set([
+    ...listNewProjectIdsFromPending(workspace),
+    ...(options?.newProjectIds ? options.newProjectIds : []),
+  ]);
+  const signals = computeWorkspaceMutationSignals(workspace, { newProjectIds });
+  if (hasWorkspaceMutationSignals(signals)) return true;
+  const cleared = options?.clearedProjectIds?.filter(Boolean) ?? [];
+  return cleared.length > 0;
+}
+
+export function buildPendingPersistWriteOptions(
+  workspace: Workspace,
+  dirtyMarkdown: DirtyMarkdownAsset[]
+): WriteWorkspaceDirtyOptions {
+  const newProjectIds = listNewProjectIdsFromPending(workspace);
+  const signals = computeWorkspaceMutationSignals(workspace, { newProjectIds });
+  const projectIds = computeSaveProjectIds(workspace, dirtyMarkdown, { newProjectIds });
+  return { projectIds, mutationSignals: signals };
 }

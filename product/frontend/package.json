@@ -21,6 +21,7 @@
     "test:text-space-clipboard": "node --experimental-strip-types src/model/textSpaceClipboard.test.ts",
     "test:workspace-load": "node --experimental-strip-types src/model/workspaceLoad.test.ts",
     "test:workspace-save": "node --experimental-strip-types --import ./scripts/register-ts-resolve.mjs src/model/workspaceSave.test.ts",
+    "test:workspace-mutation-signals": "node --experimental-strip-types --import ./scripts/register-ts-resolve.mjs src/model/workspaceMutationSignals.test.ts",
     "test:ungroup-layout": "node --experimental-strip-types src/model/ungroupSpaceWithLayout.test.ts",
     "test:bounce-above-bg": "node --experimental-strip-types src/model/bounceContentAboveBackground.test.ts",
     "test:deferred-space-selection": "node --experimental-strip-types src/model/deferredSpaceSelection.test.ts",

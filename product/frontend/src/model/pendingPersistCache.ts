@@ -2,6 +2,7 @@ import type { Workspace, Project, Asset, LibraryNode } from '../types';
 import { projectForCache } from './workspaceCache';
 import { reconcileProjectNamesWithLibrary } from './normalizeWorkspace';
 import type { DirtyMarkdownAsset } from './workspaceLoad';
+import type { WorkspaceMutationSignals } from './workspaceMutationSignals';
 
 /** Undroppable unsynced dirty bodies until POST /api/workspace ACK. Not astronote_workspace_cache. */
 export const PENDING_PERSIST_STORAGE_KEY = 'astronote_pending_persist';
@@ -24,6 +25,7 @@ export type PendingPersistSnapshot = {
   /** Library tree snapshot captured with the last dirty write, so locally
    * created pages (node + project, not yet ACKed) survive a server refresh. */
   libraryNodes?: Record<string, LibraryNode>;
+  mutationSignals?: WorkspaceMutationSignals;
   updatedAt: number;
 };
 
@@ -203,12 +205,11 @@ export function writeProjectToPendingPersist(
   return snapshot;
 }
 
-/** Upsert every hydrated dirty project from a workspace snapshot. */
+/** Upsert unsynced project bodies referenced by mutation signals or dirty markdown. */
 export type WriteWorkspaceDirtyOptions = {
-  /** Snapshot every hydrated project, not just markdown-dirty ones. Use when
-   * the dirty gate is set: layout-only changes (created pages, moves, renames)
-   * have no dirty markdown yet but must still survive a server refresh. */
-  includeAllHydrated?: boolean;
+  /** Explicit hydrated project ids to snapshot (signal-bearing pages only). */
+  projectIds?: string[];
+  mutationSignals?: WorkspaceMutationSignals;
 };
 
 export function writeWorkspaceDirtyToPendingPersist(
@@ -217,21 +218,18 @@ export function writeWorkspaceDirtyToPendingPersist(
   options?: WriteWorkspaceDirtyOptions,
   storage: PendingPersistStorage = defaultStorage()
 ): PendingPersistSnapshot | null {
-  const projectIds = new Set<string>();
+  const targets = new Set<string>();
   for (const item of dirtyMarkdown) {
-    if (item.projectId) projectIds.add(item.projectId);
+    if (item.projectId) targets.add(item.projectId);
   }
-  for (const [id, project] of Object.entries(workspace.projects || {})) {
-    if (isHydratedProject(project)) projectIds.add(id);
+  if (options?.projectIds) {
+    for (const pid of options.projectIds) {
+      if (pid) targets.add(pid);
+    }
   }
-  // Only write projects that have dirty markdown OR caller marked whole workspace dirty.
-  // With includeAllHydrated the dirty gate speaks for every hydrated project:
-  // layout-only mutations (created pages, moves, renames) have no dirty
-  // markdown but are still un-ACKed and must not be dropped by a refresh.
-  const targets =
-    dirtyMarkdown.length > 0 && !options?.includeAllHydrated
-      ? new Set(dirtyMarkdown.map((d) => d.projectId))
-      : projectIds;
+  if (targets.size === 0) {
+    return readPendingPersistCache(storage);
+  }
   let snapshot = readPendingPersistCache(storage) || emptySnapshot();
   let changed = false;
   for (const projectId of targets) {
@@ -247,11 +245,12 @@ export function writeWorkspaceDirtyToPendingPersist(
     changed = true;
   }
   if (changed) {
-    // Refresh the library tree with each dirty write so the overlay can
-    // restore un-ACKed page creations against a fresh server nav.
     snapshot = {
       ...snapshot,
       libraryNodes: cloneJson(workspace.library_nodes || {}),
+      mutationSignals: options?.mutationSignals
+        ? cloneJson(options.mutationSignals)
+        : snapshot.mutationSignals,
       updatedAt: Date.now()
     };
     persistSnapshot(snapshot, storage);

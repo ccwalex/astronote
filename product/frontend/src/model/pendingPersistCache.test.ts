@@ -13,6 +13,10 @@ import {
   writeWorkspaceDirtyToPendingPersist,
   type PendingPersistStorage,
 } from './pendingPersistCache.ts';
+import {
+  captureAuthoritativeProject,
+  resetAuthoritativeSnapshots,
+} from './authoritativeWorkspaceSnapshot.ts';
 
 function assert(cond: unknown, msg: string): void {
   if (!cond) throw new Error(msg);
@@ -59,17 +63,32 @@ function node(id: string, target: string | null, parentId: string | null = null)
   };
 }
 
-function test_include_all_hydrated_snapshots_layout_only_projects(): void {
+function test_signal_snapshots_layout_only_projects(): void {
+  resetAuthoritativeSnapshots();
   const storage = memoryStorage();
   const mdProject = { ...project('md_page'), assets: { a1: { id: 'a1', kind: 'markdown', content: 'edited', mime_type: 'text/markdown' } } } as unknown as Project;
+  const created = project('created_page');
+  captureAuthoritativeProject(created);
+  const movedCreated = {
+    ...created,
+    spaces: {
+      ...created.spaces,
+      'created_page-root': { ...Object.values(created.spaces)[0], x: 5 },
+    },
+  } as Project;
   const ws = workspace({
-    projects: { md_page: mdProject, created_page: project('created_page') },
+    projects: { md_page: mdProject, created_page: movedCreated },
   });
   const dirty = [{ projectId: 'md_page', assetId: 'a1', content: 'edited', path: 'a1.md' }];
-  writeWorkspaceDirtyToPendingPersist(ws, dirty, { includeAllHydrated: true }, storage);
+  writeWorkspaceDirtyToPendingPersist(
+    ws,
+    dirty,
+    { projectIds: ['md_page', 'created_page'] },
+    storage
+  );
   const snap = JSON.parse(storage.getItem('astronote_pending_persist')!) as { projects: Record<string, unknown> };
   assert('md_page' in snap.projects, 'markdown-dirty project must be snapshotted');
-  assert('created_page' in snap.projects, 'layout-only (created) project must be snapshotted with includeAllHydrated');
+  assert('created_page' in snap.projects, 'signal-bearing layout project must be snapshotted');
 }
 
 function test_snapshot_captures_library_nodes(): void {
@@ -78,7 +97,7 @@ function test_snapshot_captures_library_nodes(): void {
     library_nodes: { n1: node('n1', 'p1') },
     projects: { p1: project('p1') },
   });
-  writeWorkspaceDirtyToPendingPersist(ws, [], { includeAllHydrated: true }, storage);
+  writeWorkspaceDirtyToPendingPersist(ws, [], { projectIds: ['p1'] }, storage);
   const snap = JSON.parse(storage.getItem('astronote_pending_persist')!) as { libraryNodes?: Record<string, LibraryNode> };
   assert(snap.libraryNodes?.n1?.target_project_id === 'p1', 'library tree must be captured with the dirty write');
 }
@@ -92,9 +111,7 @@ function test_overlay_readds_unacked_created_page(): void {
     },
     projects: { p_new: project('p_new') },
   });
-  writeWorkspaceDirtyToPendingPersist(local, [], { includeAllHydrated: true }, storage);
-
-  // Server refresh knows neither the created page nor its project body.
+  writeWorkspaceDirtyToPendingPersist(local, [], { projectIds: ['p_new'] }, storage);
   const server = workspace({
     library_nodes: { other: node('other', 'p_old') },
     projects: { p_old: project('p_old') },
@@ -112,7 +129,7 @@ function test_overlay_respects_exclusions(): void {
     library_nodes: { page1: node('page1', 'p_del'), page2: node('page2', 'p_keep') },
     projects: { p_del: project('p_del'), p_keep: project('p_keep') },
   });
-  writeWorkspaceDirtyToPendingPersist(local, [], { includeAllHydrated: true }, storage);
+  writeWorkspaceDirtyToPendingPersist(local, [], { projectIds: ['p_del', 'p_keep'] }, storage);
 
   const server = workspace({
     library_nodes: { other: node('other', 'p_old') },
@@ -137,7 +154,7 @@ function test_overlay_replaces_existing_project_bodies(): void {
     library_nodes: { page1: node('page1', 'p1') },
     projects: { p1: localProject },
   });
-  writeWorkspaceDirtyToPendingPersist(local, [], { includeAllHydrated: true }, storage);
+  writeWorkspaceDirtyToPendingPersist(local, [], { projectIds: ['p1'] }, storage);
   const server = workspace({
     library_nodes: { page1: node('page1', 'p1') },
     projects: { p1: project('p1') },
@@ -151,7 +168,7 @@ function test_overlay_replaces_existing_project_bodies(): void {
 
 function run(): void {
   const tests: Array<[string, () => void]> = [
-    ['includeAllHydrated snapshots layout-only projects', test_include_all_hydrated_snapshots_layout_only_projects],
+    ['signal snapshots layout-only projects', test_signal_snapshots_layout_only_projects],
     ['snapshot captures library nodes', test_snapshot_captures_library_nodes],
     ['overlay re-adds un-ACKed created page', test_overlay_readds_unacked_created_page],
     ['overlay respects deletion exclusions', test_overlay_respects_exclusions],
