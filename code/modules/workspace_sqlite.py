@@ -494,9 +494,19 @@ def _bump_project_revisions(conn: sqlite3.Connection, project_ids) -> Dict[str, 
     return bumped
 
 
-def save_workspace_sqlite(workspace: Workspace, path: str) -> str:
+def save_workspace_sqlite(
+    workspace: Workspace,
+    path: str,
+    *,
+    operation: str = "save_workspace_sqlite",
+    reason: str = "full_sqlite_rewrite",
+) -> str:
     from modules.save_workspace import strip_asset_content_from_dict
+    from modules.workspace_save_audit import append_workspace_save_audit, data_dir_from_workspace_path
+    from modules.workspace_save_guard import _load_disk_totals
+    from modules.workspace_content_stats import totals_from_workspace
 
+    before = _load_disk_totals(path)
     payload = workspace.to_dict()
     strip_asset_content_from_dict(payload)
     dest = sqlite_path_from_workspace_path(path)
@@ -548,8 +558,16 @@ def save_workspace_sqlite(workspace: Workspace, path: str) -> str:
             live.close()
     except sqlite3.Error:
         pass
-    # The old workspace.storage.meta.json backend pin is no longer written:
-    # sqlite is the only backend and detection is purely file-existence based.
+    after = totals_from_workspace(workspace)
+    append_workspace_save_audit(
+        event="full_persist",
+        operation=operation,
+        reason=reason,
+        data_dir=data_dir_from_workspace_path(path),
+        mode="full",
+        before=before,
+        after=after,
+    )
     return dest
 
 
@@ -560,6 +578,9 @@ def save_workspace_project_sqlite(
     include_library_nodes: bool = False,
     delete_project_ids=None,
     include_meta: bool = False,
+    *,
+    operation: str = "save_workspace_project_sqlite",
+    reason: str = "scoped_project_replace",
 ) -> str:
     """Atomically replace stored rows for the given projects only.
 
@@ -583,6 +604,11 @@ def save_workspace_project_sqlite(
     dest = sqlite_path_from_workspace_path(path)
     if not os.path.isfile(dest):
         raise FileNotFoundError(dest)
+    from modules.workspace_save_audit import append_workspace_save_audit, data_dir_from_workspace_path
+    from modules.workspace_save_guard import _load_disk_totals
+    from modules.workspace_content_stats import totals_from_workspace
+
+    before = _load_disk_totals(path)
     payload = workspace.to_dict()
     strip_asset_content_from_dict(payload)
     projects = payload.get("projects") if isinstance(payload.get("projects"), dict) else {}
@@ -641,6 +667,17 @@ def save_workspace_project_sqlite(
             raise
     finally:
         conn.close()
+    after = totals_from_workspace(workspace)
+    append_workspace_save_audit(
+        event="scoped_persist",
+        operation=operation,
+        reason=reason,
+        data_dir=data_dir_from_workspace_path(path),
+        mode="scoped",
+        project_ids=list(ids) + list(delete_ids),
+        before=before,
+        after=after,
+    )
     return dest
 
 

@@ -1660,7 +1660,6 @@ def _post_workspace_sync(
                     )
         # Capture before repair_workspace_dict(fallback=…): repair rehydrates every
         # library-referenced page from disk, which would make siblings look complete.
-        save_project_ids = sorted(str(pid) for pid in _complete_project_ids(data))
         data = repair_workspace_dict(data, fallback=previous_dict, assets_dir=ASSETS_DIR)
         if previous_dict is not None:
             # Saves without a base revision cannot prove freshness: keep stored
@@ -1670,6 +1669,7 @@ def _post_workspace_sync(
                 cleared_project_ids=cleared,
             )
             data = repair_workspace_dict(data, fallback=previous_dict, assets_dir=ASSETS_DIR)
+        save_project_ids = sorted(str(pid) for pid in _complete_project_ids(data))
         ws = Workspace.from_dict(data)
 
         data_dir = data_dir_from_workspace_path(WORKSPACE_PATH) or os.path.join(PROJECT_ROOT, "data")

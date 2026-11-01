@@ -521,7 +521,14 @@ strip_markdown_content_from_dict = strip_asset_content_from_dict
 payload_has_inline_markdown = payload_has_inline_assets
 
 
-def save_workspace(workspace: Workspace, path: str) -> None:
+def save_workspace(
+    workspace: Workspace,
+    path: str,
+    *,
+    operation: str = "save_workspace",
+    reason: str = "full_sqlite_rewrite",
+    skip_mass_wipe_guard: bool = False,
+) -> None:
     """Persist the workspace to the sqlite store (the only backend).
 
     One-time bootstrap: when no sqlite store exists yet but a legacy
@@ -548,10 +555,29 @@ def save_workspace(workspace: Workspace, path: str) -> None:
                 from modules.load_workspace import load_workspace
 
                 legacy = load_workspace(json_path, hydrate=False)
-                save_workspace_sqlite(legacy, path)
+                save_workspace_sqlite(
+                    legacy,
+                    path,
+                    operation=operation,
+                    reason="bootstrap_legacy_json",
+                )
             except Exception:
                 # A corrupt or unreadable legacy store must not block saving:
                 # start a fresh sqlite store instead (the incoming save was
                 # merged over whatever the load path could read anyway).
                 pass
-    save_workspace_sqlite(workspace, path)
+    if not skip_mass_wipe_guard and os.path.isfile(dest):
+        from modules.workspace_save_guard import refuse_unsafe_full_workspace_persist
+
+        refuse_unsafe_full_workspace_persist(
+            workspace,
+            path,
+            operation=operation,
+            reason=reason,
+        )
+    save_workspace_sqlite(
+        workspace,
+        path,
+        operation=operation,
+        reason=reason,
+    )

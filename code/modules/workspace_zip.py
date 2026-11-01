@@ -12,7 +12,14 @@ from modules.asset_cleanup import (
 from modules.load_workspace import load_workspace, parse_workspace_json_text
 from modules.save_workspace import hydrate_assets, save_workspace, strip_asset_content_from_dict
 from modules.workspace import Workspace, repair_workspace_dict
-from modules.workspace_lazy import incoming_would_wipe_page_bodies, is_project_stub
+from modules.workspace_lazy import (
+    apply_collection_restore,
+    incoming_would_drop_stored_collections,
+    incoming_would_mass_drop_spaces,
+    incoming_would_wipe_page_bodies,
+    is_project_stub,
+    plan_collection_restore,
+)
 from modules.workspace_working_undo import reset_working_period_to_live
 
 _SNAPSHOT_DIR = "snapshots"
@@ -192,6 +199,15 @@ def apply_imported_workspace(
             disk, _extra = parse_workspace_json_text(handle.read())
     if disk is not None and incoming_would_wipe_page_bodies(imported, disk):
         raise ValueError(_WIPE_MESSAGE)
+    if disk is not None:
+        mass_dropped = incoming_would_mass_drop_spaces(imported, disk)
+        if len(mass_dropped) >= 3:
+            raise ValueError(_WIPE_MESSAGE)
+        flagged = incoming_would_drop_stored_collections(imported, disk)
+        if flagged:
+            restore_plan = plan_collection_restore(imported, disk)
+            if restore_plan:
+                imported = apply_collection_restore(imported, disk, restore_plan)
 
     previous = None
     if workspace_path:
@@ -219,7 +235,13 @@ def apply_imported_workspace(
     pruned_asset_ids = None
     if previous is not None:
         pruned_asset_ids = prune_unused_assets_for_save(previous, ws)
-    save_workspace(ws, workspace_path)
+    save_workspace(
+        ws,
+        workspace_path,
+        operation="apply_imported_workspace",
+        reason="zip_import",
+        skip_mass_wipe_guard=True,
+    )
     data_dir = data_dir_from_workspace_path(workspace_path)
     if data_dir and previous is not None:
         cleanup_removed_assets(
