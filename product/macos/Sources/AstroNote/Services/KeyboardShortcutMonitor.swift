@@ -1,4 +1,5 @@
 import AppKit
+import WebKit
 
 enum KeyboardShortcutMonitor {
     private static var monitor: Any?
@@ -35,5 +36,9 @@ enum KeyboardShortcutMonitor {
 
 enum EditableKeyboardTarget {
     static var textEditingActive = false
-    static func isActive() -> Bool { textEditingActive || NSApp.keyWindow?.firstResponder is NSTextView }
+    static func isActive() -> Bool {
+        textEditingActive
+            || NSApp.keyWindow?.firstResponder is NSTextView
+            || NSApp.keyWindow?.firstResponder is WKWebView
+    }
 }

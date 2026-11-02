@@ -108,6 +108,37 @@ enum CanvasStrokeGeometry {
         ) <= radius
     }
 
+    static func eraseObject(
+        project: inout Project,
+        spaceId: String,
+        localX: Double,
+        localY: Double,
+        radius: Double = 12
+    ) -> Bool {
+        guard var space = project.spaces[spaceId] else { return false }
+        var changed = false
+        var nextObjectIds: [String] = []
+
+        for objectId in space.object_ids {
+            guard let object = project.objects[objectId], object.kind == "stroke" else {
+                if project.objects[objectId] != nil { nextObjectIds.append(objectId) }
+                continue
+            }
+            if isHit(object: object, localX: localX, localY: localY, radius: radius) {
+                project.objects.removeValue(forKey: objectId)
+                changed = true
+            } else {
+                nextObjectIds.append(objectId)
+            }
+        }
+
+        if changed {
+            space.object_ids = nextObjectIds
+            project.spaces[spaceId] = space
+        }
+        return changed
+    }
+
     static func eraseAtPoint(
         project: inout Project,
         spaceId: String,

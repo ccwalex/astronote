@@ -224,8 +224,70 @@ extension AppModel {
 
     func eraseStroke(at spaceId: String, localX: Double, localY: Double) {
         guard var project = hydratedProject else { return }
-        guard CanvasStrokeGeometry.eraseAtPoint(project: &project, spaceId: spaceId, localX: localX, localY: localY) else { return }
+        let changed: Bool
+        switch eraserMode {
+        case .object:
+            changed = CanvasStrokeGeometry.eraseObject(project: &project, spaceId: spaceId, localX: localX, localY: localY)
+        case .partial:
+            changed = CanvasStrokeGeometry.eraseAtPoint(project: &project, spaceId: spaceId, localX: localX, localY: localY)
+        }
+        guard changed else { return }
         commitProjectMutation(project, coalesceKey: "erase-stroke:\(spaceId)")
+    }
+
+    func handleCanvasToolTap(atX x: Double, y: Double, onSpaceId: String?) {
+        switch selectedTool {
+        case .createGeneric:
+            createSpace(kind: .createGeneric, atX: x, y: y, parentId: onSpaceId)
+        case .createText:
+            createSpace(kind: .createText, atX: x, y: y, parentId: onSpaceId)
+        case .createImage:
+            createSpace(kind: .createImage, atX: x, y: y, parentId: onSpaceId)
+        case .createPDF:
+            createSpace(kind: .createPDF, atX: x, y: y, parentId: onSpaceId)
+        case .createGroup:
+            createSpace(kind: .createGroup, atX: x, y: y, parentId: onSpaceId)
+        default:
+            break
+        }
+    }
+
+    func createSpace(kind: CanvasTool, atX x: Double, y: Double, parentId: String? = nil) {
+        guard canWritePage, var project = hydratedProject else { return }
+        let createKind: WorkspaceActionsSpaces.CreateSpaceKind
+        switch kind {
+        case .createGeneric: createKind = .generic
+        case .createText: createKind = .text
+        case .createImage: createKind = .image
+        case .createPDF: createKind = .pdf
+        case .createGroup: createKind = .group
+        default: return
+        }
+        let parent = parentId.flatMap { project.spaces[$0]?.kind == "GroupSpace" ? $0 : nil }
+        guard let newSpaceId = WorkspaceActionsSpaces.createSpace(
+            project: &project,
+            kind: createKind,
+            x: x,
+            y: y,
+            parentId: parent
+        ) else { return }
+        commitProjectMutation(project, editedSpaceIds: [newSpaceId], coalesceKey: "create-space:\(newSpaceId)")
+        selectSpace(newSpaceId)
+        if createKind == .text {
+            EditableKeyboardTarget.textEditingActive = true
+        }
+        statusMessage = "Created space"
+    }
+
+    func applySpaceBackgroundColor(_ color: String) {
+        guard canWritePage, var project = hydratedProject else { return }
+        let targetId = selectedSpaceId
+            ?? project.root_space_id
+            ?? WorkspaceActionsSpaces.findObjectContainerSpace(project: project)?.id
+        guard let targetId else { return }
+        guard WorkspaceActionsSpaces.updateSpaceBackgroundColor(project: &project, spaceId: targetId, color: color) else { return }
+        spaceBackgroundColor = color
+        commitProjectMutation(project, editedSpaceIds: [targetId], coalesceKey: "space-bg:\(targetId)")
     }
 
     private func commitProjectMutation(

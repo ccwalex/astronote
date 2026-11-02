@@ -428,7 +428,7 @@ extension APIClient {
         var buffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
         let err = getnameinfo(
             result.pointee.ai_addr,
-            result.pointee.ai_addlen,
+            socklen_t(result.pointee.ai_addrlen),
             &buffer,
             socklen_t(buffer.count),
             nil,

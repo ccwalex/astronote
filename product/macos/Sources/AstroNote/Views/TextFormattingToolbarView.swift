@@ -31,7 +31,7 @@ struct TextFormattingToolbarView: View {
             formatButton("•", active: activeFormats.bullet) { onAction(.bullet) }
             formatButton("1.", active: activeFormats.number) { onAction(.number) }
             formatButton("❝", active: activeFormats.blockquote) { onAction(.quote) }
-            formatButton("</>", active: false) { onAction(.code) }
+            formatButton("</>", active: activeFormats.codeBlock) { onAction(.code) }
         }
         .font(.caption.weight(.semibold))
         .padding(.horizontal, 8)
@@ -71,12 +71,16 @@ struct TextSpaceArea: View {
                 FormattedTextView(
                     markdown: text,
                     isEditable: isEditing,
+                    documentDark: appModel.appearance == .dark,
                     onMarkdownChange: { newValue in
                         guard loaded, newValue != text else { return }
                         text = newValue
                         guard let assetId = space.reference_asset_id ?? space.asset_ids.first else { return }
                         appModel.updateTextAsset(assetId: assetId, markdown: newValue)
-                        appModel.updateSelectedTextHeight(measuredHeight(in: geo.size))
+                        textEditor.measureContentHeight { height in
+                            let padded = max(Double(geo.size.height), height + 16)
+                            appModel.updateSelectedTextHeight(padded)
+                        }
                     },
                     controller: textEditor
                 )
@@ -93,10 +97,24 @@ struct TextSpaceArea: View {
         }
         .task(id: space.id) {
             loaded = false
+            EditableKeyboardTarget.textEditingActive = false
             guard let assetId = space.reference_asset_id ?? space.asset_ids.first else { return }
             text = await appModel.assetText(for: assetId)
             loaded = true
         }
+        .onChange(of: isEditing) { _, editing in
+            if editing {
+                beginEditing(at: nil)
+            } else if appModel.selectedSpaceId != space.id {
+                EditableKeyboardTarget.textEditingActive = false
+            }
+        }
+    }
+
+    func beginEditing(at point: CGPoint?) {
+        appModel.selectSpace(space.id)
+        EditableKeyboardTarget.textEditingActive = true
+        textEditor.focusEditor(at: point)
     }
 
     private func floatingBarOffset(in size: CGSize) -> CGSize {
@@ -104,9 +122,5 @@ struct TextSpaceArea: View {
         let barY = min(rect.maxY + 6, max(0, size.height - 44))
         let barX = min(max(0, rect.minX), max(0, size.width - 320))
         return CGSize(width: barX, height: barY)
-    }
-
-    private func measuredHeight(in size: CGSize) -> Double {
-        max(Double(size.height), Double(textEditor.caretRect.maxY + 48))
     }
 }

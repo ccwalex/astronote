@@ -43,6 +43,7 @@ struct RootView: View {
                 ConnectionView()
             }
         }
+        .preferredColorScheme(appModel.appearance.colorScheme)
         .task {
             await appModel.bootstrap(auto: true)
         }

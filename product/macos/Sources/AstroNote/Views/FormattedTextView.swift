@@ -26,11 +26,61 @@ final class FormattedTextEditorController: ObservableObject {
         let escaped = action.rawValue.replacingOccurrences(of: "'", with: "\\'")
         webView.evaluateJavaScript("window.astroFormat && window.astroFormat('\(escaped)')")
     }
+
+    func focusEditor(at point: CGPoint?) {
+        guard let webView else { return }
+        webView.window?.makeFirstResponder(webView)
+        if let point {
+            let js = """
+            (function(){
+              var el=document.getElementById('content');
+              if(!el)return;
+              el.contentEditable='true';
+              el.focus();
+              if(typeof document.caretRangeFromPoint==='function'){
+                var range=document.caretRangeFromPoint(\(point.x),\(point.y));
+                if(range){var sel=window.getSelection();sel.removeAllRanges();sel.addRange(range);}
+              }
+            })();
+            """
+            webView.evaluateJavaScript(js)
+        } else {
+            webView.evaluateJavaScript("""
+            (function(){
+              var el=document.getElementById('content');
+              if(!el)return;
+              el.contentEditable='true';
+              el.focus();
+            })();
+            """)
+        }
+    }
+
+    func measureContentHeight(completion: @escaping (Double) -> Void) {
+        guard let webView else {
+            completion(120)
+            return
+        }
+        webView.evaluateJavaScript("document.getElementById('content') && document.getElementById('content').scrollHeight") { result, _ in
+            if let height = result as? Double {
+                completion(height)
+            } else if let height = result as? Int {
+                completion(Double(height))
+            } else {
+                completion(120)
+            }
+        }
+    }
+}
+
+final class EditorWebView: WKWebView {
+    override var acceptsFirstResponder: Bool { true }
 }
 
 struct FormattedTextView: NSViewRepresentable {
     let markdown: String
     var isEditable: Bool
+    var documentDark: Bool
     var onMarkdownChange: (String) -> Void
     @ObservedObject var controller: FormattedTextEditorController
 
@@ -47,7 +97,7 @@ struct FormattedTextView: NSViewRepresentable {
         config.suppressesIncrementalRendering = true
         config.websiteDataStore = .nonPersistent()
 
-        let webView = WKWebView(frame: .zero, configuration: config)
+        let webView = EditorWebView(frame: .zero, configuration: config)
         webView.underPageBackgroundColor = .clear
         webView.navigationDelegate = context.coordinator
         webView.allowsMagnification = false
@@ -55,6 +105,9 @@ struct FormattedTextView: NSViewRepresentable {
         if #available(macOS 13.3, *) {
             webView.isInspectable = false
         }
+        context.coordinator.documentDark = documentDark
+        context.coordinator.loadedDark = documentDark
+        context.coordinator.pendingEditable = isEditable
         context.coordinator.attach(webView: webView)
         context.coordinator.load(markdown: markdown, editable: isEditable, in: webView)
         return webView
@@ -62,10 +115,22 @@ struct FormattedTextView: NSViewRepresentable {
 
     func updateNSView(_ webView: WKWebView, context: Context) {
         context.coordinator.onMarkdownChange = onMarkdownChange
+        context.coordinator.documentDark = documentDark
+        context.coordinator.pendingEditable = isEditable
         context.coordinator.attach(webView: webView)
         let interaction = isEditable
         webView.isHidden = false
         context.coordinator.setEditable(interaction, in: webView)
+        if markdown == context.coordinator.lastEmittedMarkdown {
+            context.coordinator.displayedMarkdown = markdown
+            return
+        }
+        let darkChanged = context.coordinator.loadedDark != documentDark
+        if darkChanged {
+            context.coordinator.loadedDark = documentDark
+            context.coordinator.load(markdown: markdown, editable: isEditable, in: webView)
+            return
+        }
         if markdown != context.coordinator.displayedMarkdown {
             context.coordinator.load(markdown: markdown, editable: isEditable, in: webView)
         }
@@ -82,7 +147,10 @@ struct FormattedTextView: NSViewRepresentable {
         var onMarkdownChange: (String) -> Void
         let controller: FormattedTextEditorController
         var displayedMarkdown: String = "\u{0}"
-        private var lastEmittedMarkdown: String?
+        var lastEmittedMarkdown: String?
+        var documentDark = false
+        var loadedDark = false
+        var pendingEditable = false
 
         init(onMarkdownChange: @escaping (String) -> Void, controller: FormattedTextEditorController) {
             self.onMarkdownChange = onMarkdownChange
@@ -103,15 +171,22 @@ struct FormattedTextView: NSViewRepresentable {
         func load(markdown: String, editable: Bool, in webView: WKWebView) {
             displayedMarkdown = markdown
             lastEmittedMarkdown = markdown
-            let appearanceIsDark = webView.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
             let body = TextFormat.markdownToHTML(markdown)
-            let html = TextFormat.documentHTML(body: body, editable: editable, dark: appearanceIsDark)
+            let html = TextFormat.documentHTML(body: body, editable: editable, dark: documentDark)
             webView.loadHTMLString(html, baseURL: nil)
         }
 
         func setEditable(_ editable: Bool, in webView: WKWebView) {
             let flag = editable ? "true" : "false"
             webView.evaluateJavaScript("document.getElementById('content') && (document.getElementById('content').contentEditable = '\(flag)')")
+        }
+
+        @MainActor
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            setEditable(pendingEditable, in: webView)
+            if pendingEditable {
+                controller.focusEditor(at: nil)
+            }
         }
 
         @MainActor

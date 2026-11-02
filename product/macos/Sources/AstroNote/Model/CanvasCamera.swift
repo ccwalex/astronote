@@ -1,5 +1,6 @@
 import Foundation
 import CoreGraphics
+import WebKit
 
 struct CanvasCamera: Equatable {
     var scale: Double = 1
@@ -21,8 +22,17 @@ struct CanvasCamera: Equatable {
         offsetY = point.y - factor * (point.y - offsetY)
     }
 
+    mutating func pan(by deltaX: Double, deltaY: Double) {
+        offsetX += deltaX
+        offsetY += deltaY
+    }
+
     static func scaleFromWheelDelta(_ delta: Double) -> Double {
         pow(1.0015, delta)
+    }
+
+    static func shouldIgnoreCameraGesture(firstResponder: NSResponder?) -> Bool {
+        firstResponder is WKWebView
     }
 }
 

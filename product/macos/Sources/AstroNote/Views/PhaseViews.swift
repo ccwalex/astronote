@@ -160,25 +160,36 @@ struct StrokeCanvasOverlay: View {
 
 struct CanvasGestureOverlay: NSViewRepresentable {
     let onScroll: (Double) -> Void
+    let onPan: (Double, Double) -> Void
 
     func makeNSView(context: Context) -> NSView {
         let view = ScrollCaptureView()
         view.onScroll = onScroll
+        view.onPan = onPan
         return view
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
-        (nsView as? ScrollCaptureView)?.onScroll = onScroll
+        guard let view = nsView as? ScrollCaptureView else { return }
+        view.onScroll = onScroll
+        view.onPan = onPan
     }
 
     final class ScrollCaptureView: NSView {
         var onScroll: ((Double) -> Void)?
+        var onPan: ((Double, Double) -> Void)?
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
         override func scrollWheel(with event: NSEvent) {
+            if CanvasCamera.shouldIgnoreCameraGesture(firstResponder: window?.firstResponder) {
+                super.scrollWheel(with: event)
+                return
+            }
             if event.modifierFlags.contains(.command) {
                 onScroll?(event.deltaY)
             } else {
-                super.scrollWheel(with: event)
+                onPan?(event.scrollingDeltaX, event.scrollingDeltaY)
             }
         }
     }

@@ -9,7 +9,7 @@ struct CanvasView: View {
     var body: some View {
         GeometryReader { geo in
             ZStack(alignment: .topLeading) {
-                Color(nsColor: .textBackgroundColor)
+                canvasBackdropColor
                 ZStack(alignment: .topLeading) {
                     ForEach(project.visibleSpaces()) { space in
                         SpaceCardView(project: project, space: space)
@@ -24,15 +24,41 @@ struct CanvasView: View {
                 }
                 .frame(width: canvasSize.width, height: canvasSize.height)
                 .contentShape(Rectangle())
-                .gesture(probeCanvasGesture(in: geo.size))
-                CanvasGestureOverlay { delta in
-                    var camera = appModel.canvasCamera
-                    camera.zoomAround(point: CGPoint(x: geo.size.width / 2, y: geo.size.height / 2), deltaScale: CanvasCamera.scaleFromWheelDelta(delta))
-                    appModel.canvasCamera = camera
-                }
+                .gesture(canvasToolGesture(in: geo.size))
+                .simultaneousGesture(probeCanvasGesture(in: geo.size))
+                CanvasGestureOverlay(
+                    onScroll: { delta in handleCanvasScroll(deltaY: delta, viewport: geo.size, commandZoom: true) },
+                    onPan: { dx, dy in handleCanvasScroll(deltaX: dx, deltaY: dy, viewport: geo.size, commandZoom: false) }
+                )
                 ProbeResultsPanel()
             }
         }
+    }
+
+    private var canvasBackdropColor: Color {
+        appModel.appearance == .dark ? Color(red: 0.12, green: 0.12, blue: 0.12) : Color.white
+    }
+
+    private func handleCanvasScroll(deltaX: Double = 0, deltaY: Double = 0, viewport: CGSize, commandZoom: Bool) {
+        if CanvasCamera.shouldIgnoreCameraGesture(firstResponder: NSApp.keyWindow?.firstResponder) { return }
+        var camera = appModel.canvasCamera
+        if commandZoom {
+            camera.zoomAround(
+                point: CGPoint(x: viewport.width / 2, y: viewport.height / 2),
+                deltaScale: CanvasCamera.scaleFromWheelDelta(deltaY)
+            )
+        } else {
+            camera.pan(by: deltaX, deltaY: -deltaY)
+        }
+        appModel.canvasCamera = camera
+    }
+
+    private func canvasToolGesture(in viewport: CGSize) -> some Gesture {
+        SpatialTapGesture()
+            .onEnded { value in
+                let world = canvasWorldPoint(from: value.location, viewport: viewport)
+                appModel.handleCanvasToolTap(atX: world.x, y: world.y, onSpaceId: nil)
+            }
     }
 
     private func probeCanvasGesture(in viewport: CGSize) -> some Gesture {
@@ -64,26 +90,35 @@ struct SpaceCardView: View {
     let space: Space
     @State private var dragAnchor: (x: Double, y: Double)?
 
+    private var selected: Bool { appModel.selectedSpaceIds.contains(space.id) }
+    private var headerBackground: Color {
+        appModel.appearance == .dark ? Color(red: 0.18, green: 0.18, blue: 0.18) : Color(red: 0.94, green: 0.94, blue: 0.94)
+    }
+
     var body: some View {
-        let selected = appModel.selectedSpaceIds.contains(space.id)
         VStack(alignment: .leading, spacing: 0) {
             Text(space.kind)
                 .font(.caption.weight(.semibold))
                 .padding(6)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color(nsColor: .controlBackgroundColor))
+                .background(headerBackground)
+                .contentShape(Rectangle())
+                .gesture(dragGesture(for: space))
+                .simultaneousGesture(spaceTapGesture(for: space, onHeader: true))
             ZStack {
                 spaceBody
                 SpaceStrokeInteractionLayer(project: project, space: space)
             }
+            .modifier(SpaceBodyTapModifier(
+                enabled: space.kind != "TextSpace",
+                gesture: spaceTapGesture(for: space, onHeader: false)
+            ))
         }
         .frame(width: space.width, height: space.height)
         .background(Color(hex: space.background_color) ?? Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay(SpaceChromeView(space: space, selected: selected))
         .shadow(radius: selected ? 4 : 1)
-        .gesture(dragGesture(for: space))
-        .simultaneousGesture(spaceTapGesture(for: space))
     }
 
     private func dragGesture(for space: Space) -> some Gesture {
@@ -106,23 +141,32 @@ struct SpaceCardView: View {
             }
     }
 
-    private func spaceTapGesture(for space: Space) -> some Gesture {
+    private func spaceTapGesture(for space: Space, onHeader: Bool) -> some Gesture {
         SpatialTapGesture()
             .onEnded { value in
+                let localX = value.location.x
+                let localY = value.location.y
+                let headerHeight: Double = 28
+                let worldX = space.x + localX
+                let worldY = space.y + (onHeader ? localY : headerHeight + localY)
+
                 switch appModel.selectedTool {
                 case .probe:
-                    let worldX = space.x + value.location.x
-                    let worldY = space.y + value.location.y
                     appModel.runProbe(atX: worldX, y: worldY)
                 case .deleteSpace:
                     appModel.selectSpace(space.id)
                     appModel.deleteSelectedSpace()
-                case .createText:
-                    Task { await appModel.createTextSpaceAt(x: space.x + 40, y: space.y + 40) }
                 case .insertVerticalSpace:
                     appModel.insertVerticalGap(at: space.y)
-                case .pointer, .createGeneric, .createImage, .createPDF, .createGroup, .createStroke, .eraseStroke:
+                case .createGeneric, .createText, .createImage, .createPDF, .createGroup:
+                    appModel.handleCanvasToolTap(atX: worldX, y: worldY, onSpaceId: space.id)
+                case .pointer:
                     appModel.selectSpace(space.id)
+                    if space.kind == "TextSpace", onHeader {
+                        EditableKeyboardTarget.textEditingActive = false
+                    }
+                case .createStroke, .eraseStroke:
+                    if onHeader { appModel.selectSpace(space.id) }
                 }
             }
     }
@@ -303,12 +347,17 @@ struct PDFKitRepresentable: NSViewRepresentable {
 }
 
 struct GroupSpaceView: View {
+    @EnvironmentObject private var appModel: AppModel
     let project: Project
     let space: Space
 
+    private var fillColor: Color {
+        appModel.appearance == .dark ? Color(red: 0.18, green: 0.18, blue: 0.18) : Color(red: 0.94, green: 0.94, blue: 0.94)
+    }
+
     var body: some View {
         ZStack(alignment: .topLeading) {
-            Color(nsColor: .controlBackgroundColor).opacity(0.2)
+            fillColor.opacity(0.2)
             ForEach(space.child_space_ids, id: \.self) { childId in
                 if let child = project.spaces[childId], !LayerSpaceKinds.hidden.contains(child.kind) {
                     SpaceCardView(project: project, space: child)
@@ -320,11 +369,16 @@ struct GroupSpaceView: View {
 }
 
 struct GenericSpaceView: View {
+    @EnvironmentObject private var appModel: AppModel
     let space: Space
+
+    private var fillColor: Color {
+        appModel.appearance == .dark ? Color(red: 0.18, green: 0.18, blue: 0.18) : Color(red: 0.94, green: 0.94, blue: 0.94)
+    }
 
     var body: some View {
         ZStack {
-            Color(nsColor: .controlBackgroundColor).opacity(0.15)
+            fillColor.opacity(0.15)
             Text(space.kind).foregroundStyle(.secondary)
         }
     }
@@ -338,5 +392,18 @@ private extension Color {
         let g = Int(hex[hex.index(start, offsetBy: 2)..<hex.index(start, offsetBy: 4)], radix: 16) ?? 0
         let b = Int(hex[hex.index(start, offsetBy: 4)..<hex.index(start, offsetBy: 6)], radix: 16) ?? 0
         self.init(red: Double(r) / 255, green: Double(g) / 255, blue: Double(b) / 255)
+    }
+}
+
+private struct SpaceBodyTapModifier<G: Gesture>: ViewModifier {
+    let enabled: Bool
+    let gesture: G
+
+    func body(content: Content) -> some View {
+        if enabled {
+            content.simultaneousGesture(gesture)
+        } else {
+            content
+        }
     }
 }

@@ -19,6 +19,24 @@ struct Asset: Codable, Identifiable, Hashable {
         mime_type = try c.decodeIfPresent(String.self, forKey: .mime_type)
         metadata = try c.decodeIfPresent([String: JSONValue].self, forKey: .metadata) ?? [:]
     }
+
+    init(
+        id: String,
+        kind: String,
+        path: String = "",
+        filename: String? = nil,
+        content: String? = nil,
+        mime_type: String? = nil,
+        metadata: [String: JSONValue] = [:]
+    ) {
+        self.id = id
+        self.kind = kind
+        self.path = path.isEmpty ? "\(id).md" : path
+        self.filename = filename ?? id
+        self.content = content
+        self.mime_type = mime_type
+        self.metadata = metadata
+    }
 }
 
 struct CanvasObject: Codable, Identifiable, Hashable {
@@ -72,6 +90,44 @@ struct Space: Codable, Identifiable, Hashable {
         reference_mode = try c.decodeIfPresent(String.self, forKey: .reference_mode) ?? ""
         transform_matrix = try c.decodeIfPresent([Double].self, forKey: .transform_matrix)
         background_color = try c.decodeIfPresent(String.self, forKey: .background_color)
+    }
+
+    init(
+        id: String,
+        kind: String,
+        x: Double,
+        y: Double,
+        z: Double = 1,
+        width: Double,
+        height: Double,
+        parent_space_id: String? = nil,
+        child_space_ids: [String] = [],
+        object_ids: [String] = [],
+        asset_ids: [String] = [],
+        scale_x: Double = 1,
+        scale_y: Double = 1,
+        reference_asset_id: String? = nil,
+        reference_mode: String = "",
+        transform_matrix: [Double]? = [1, 0, 0, 1, 0, 0],
+        background_color: String? = nil
+    ) {
+        self.id = id
+        self.kind = kind
+        self.x = x
+        self.y = y
+        self.z = z
+        self.width = width
+        self.height = height
+        self.parent_space_id = parent_space_id
+        self.child_space_ids = child_space_ids
+        self.object_ids = object_ids
+        self.asset_ids = asset_ids
+        self.scale_x = scale_x
+        self.scale_y = scale_y
+        self.reference_asset_id = reference_asset_id
+        self.reference_mode = reference_mode
+        self.transform_matrix = transform_matrix
+        self.background_color = background_color
     }
 }
 

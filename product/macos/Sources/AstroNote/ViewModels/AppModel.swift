@@ -1,5 +1,27 @@
 import Foundation
 import Combine
+import SwiftUI
+
+enum AppAppearance: String, CaseIterable, Identifiable {
+    case light
+    case dark
+
+    var id: String { rawValue }
+
+    var colorScheme: ColorScheme? {
+        switch self {
+        case .light: return .light
+        case .dark: return .dark
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .light: return "Light"
+        case .dark: return "Dark"
+        }
+    }
+}
 
 @MainActor
 final class AppModel: ObservableObject {
@@ -84,6 +106,19 @@ final class AppModel: ObservableObject {
     @Published var undoState: WorkspaceUndoState?
     @Published var localHistoryCanUndo = false
     @Published var localHistoryCanRedo = false
+    @Published var eraserMode: StrokeEraserMode = .partial
+    @Published var spaceBackgroundColor: String = "#ffffff"
+
+    @AppStorage("astronote.appearance") var appearanceStorage: String = AppAppearance.light.rawValue
+
+    var appearance: AppAppearance {
+        get { AppAppearance(rawValue: appearanceStorage) ?? .light }
+        set { appearanceStorage = newValue.rawValue }
+    }
+
+    func setAppearance(_ value: AppAppearance) {
+        appearance = value
+    }
 
     var client: APIClient?
     var baseRevision: Int?
@@ -264,6 +299,20 @@ final class AppModel: ObservableObject {
     func selectSpace(_ spaceId: String?) {
         selectedSpaceId = spaceId
         selectedSpaceIds = spaceId.map { [$0] } ?? []
+        syncSpaceBackgroundColorFromSelection()
+        if spaceId == nil {
+            EditableKeyboardTarget.textEditingActive = false
+        }
+    }
+
+    private func syncSpaceBackgroundColorFromSelection() {
+        if let spaceId = selectedSpaceId, let space = hydratedProject?.spaces[spaceId], let color = space.background_color {
+            spaceBackgroundColor = color
+        } else if let rootId = hydratedProject?.root_space_id,
+                  let root = hydratedProject?.spaces[rootId],
+                  let color = root.background_color {
+            spaceBackgroundColor = color
+        }
     }
 
     func toggleSpaceSelection(_ spaceId: String, extend: Bool) {
@@ -515,16 +564,7 @@ final class AppModel: ObservableObject {
     }
 
     func createTextSpaceAt(x: Double, y: Double) async {
-        guard let client, let projectId = selectedProjectId, let pagePath = pagePathForSelectedProject() else { return }
-        do {
-            _ = x
-            _ = y
-            try await client.createTextSpace(pagePath: pagePath, markdown: "# New note\n")
-            await openProject(projectId)
-            statusMessage = "Text space created"
-        } catch {
-            errorMessage = error.localizedDescription
-        }
+        createSpace(kind: .createText, atX: x, y: y)
     }
 
     func convertSelectedGroupToPhoto() async {
