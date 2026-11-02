@@ -1136,13 +1136,36 @@ def _patch_asgi_call_for_mcp(asgi_obj, mcp_app):
     original = cls.__call__
 
     async def patched(self, scope, receive, send):
+        from modules import api_tokens as _api_tokens
+
+        async def send_without_auth_challenge(message):
+            if message.get("type") == "http.response.start":
+                message = {
+                    **message,
+                    "headers": _api_tokens.strip_www_authenticate_headers(
+                        list(message.get("headers") or [])
+                    ),
+                }
+            await send(message)
+
         mcp = getattr(type(self), "_mcp_root_dispatch_app", None)
         if mcp is not None and isinstance(scope, dict) and _dict_get(scope, "type") in ("http", "websocket"):
             path = _dict_get(scope, "path") or ""
-            if path == "/mcp" or path.startswith("/mcp/"):
-                await mcp(_rewrite_mcp_scope(scope, mounted=True), receive, send)
+            if _api_tokens.is_oauth_discovery_path(path):
+                denied = _api_tokens.oauth_discovery_not_found_message()
+                await send_without_auth_challenge(
+                    {
+                        "type": "http.response.start",
+                        "status": denied["status"],
+                        "headers": denied["headers"],
+                    }
+                )
+                await send_without_auth_challenge({"type": "http.response.body", "body": denied["body"]})
                 return
-        result = original(self, scope, receive, send)
+            if (path == "/mcp" or path.startswith("/mcp/")) and "/.well-known/" not in path:
+                await mcp(_rewrite_mcp_scope(scope, mounted=True), receive, send_without_auth_challenge)
+                return
+        result = original(self, scope, receive, send_without_auth_challenge)
         if inspect.isawaitable(result):
             await result
 

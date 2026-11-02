@@ -163,14 +163,7 @@ export function SearchBar({ workspace, onOpenProject, onSelectSpace }: SearchBar
   useEffect(() => {
     async function load() {
       await initializeRagConfig();
-      if (!hasAzureRAGConfig()) {
-        const configured = await promptForAzureRAGConfig('init');
-        if (configured) {
-          setRagConfigVersion((v) => v + 1);
-        }
-      } else {
-        setRagConfigVersion((v) => v + 1);
-      }
+      setRagConfigVersion((v) => v + 1);
     }
     void load();
   }, []);

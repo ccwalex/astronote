@@ -215,6 +215,39 @@ def is_loopback_scope(scope: dict) -> bool:
     return is_loopback_host(client_host_from_scope(scope))
 
 
+def is_oauth_discovery_path(path: str) -> bool:
+    """Cursor probes these and loops on credentials if the SPA HTML is returned."""
+    p = str(path or "")
+    return "/.well-known/oauth-" in p or "/.well-known/openid-configuration" in p
+
+
+def is_browser_ui_scope(scope: dict) -> bool:
+    """Same-origin fetch/navigation from the Vite web UI (not MCP / native clients)."""
+    try:
+        header_map = {k.lower(): v for k, v in (scope.get("headers") or [])}
+        site = header_map.get(b"sec-fetch-site", b"").decode("latin-1").strip().lower()
+    except Exception:
+        return False
+    return site == "same-origin"
+
+
+def oauth_discovery_not_found_message() -> dict:
+    body = b'{"error":"not_found"}'
+    return {
+        "status": 404,
+        "headers": [
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(body)).encode("ascii")),
+            (b"cache-control", b"no-store"),
+        ],
+        "body": body,
+    }
+
+
+def strip_www_authenticate_headers(headers: list) -> list:
+    return [(name, value) for name, value in (headers or []) if name.lower() != b"www-authenticate"]
+
+
 def is_local_admin_scope(scope: dict) -> bool:
     return is_loopback_scope(scope)
 

@@ -99,6 +99,24 @@ class ApiTokenHttpTests(unittest.TestCase):
             )
             self.assertIn(allowed.status_code, (200, 500))
 
+            browser_ui = self.client.get(
+                "/api/workspace/revision",
+                headers={"Sec-Fetch-Site": "same-origin"},
+            )
+            self.assertNotEqual(browser_ui.status_code, 401)
+
+    def test_oauth_discovery_is_json_404_without_challenge(self):
+        for path in (
+            "/.well-known/oauth-protected-resource",
+            "/.well-known/oauth-protected-resource/mcp",
+            "/.well-known/oauth-authorization-server",
+        ):
+            resp = self.client.get(path)
+            self.assertEqual(resp.status_code, 404, path)
+            self.assertIn("application/json", (resp.headers.get("content-type") or "").lower())
+            self.assertNotIn("www-authenticate", {k.lower() for k in resp.headers.keys()})
+            self.assertNotIn("<html", (resp.text or "").lower())
+
 
 if __name__ == "__main__":
     unittest.main()

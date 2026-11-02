@@ -594,6 +594,8 @@ def test_vite_proxies_mcp_streaming():
     assert "text/event-stream" in text
     assert "proxyTimeout" in text
     assert "'/api'" in text or '"/api"' in text
+    assert "well-known/oauth-" in text
+    assert "www-authenticate" in text
 
 
 def test_mcp_client_config_uses_published_5173():

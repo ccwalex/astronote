@@ -130,6 +130,31 @@ class FastAPIApp:
     def __init__(self, inner):
         self.inner = inner
 
+    async def _call_inner(self, scope, receive, send):
+        async def send_without_auth_challenge(message):
+            if message.get("type") == "http.response.start":
+                message = {
+                    **message,
+                    "headers": api_tokens.strip_www_authenticate_headers(
+                        list(message.get("headers") or [])
+                    ),
+                }
+            await send(message)
+
+        path = scope.get("path") or "" if isinstance(scope, dict) else ""
+        if isinstance(scope, dict) and scope.get("type") == "http" and api_tokens.is_oauth_discovery_path(path):
+            denied = api_tokens.oauth_discovery_not_found_message()
+            await send_without_auth_challenge(
+                {
+                    "type": "http.response.start",
+                    "status": denied["status"],
+                    "headers": denied["headers"],
+                }
+            )
+            await send_without_auth_challenge({"type": "http.response.body", "body": denied["body"]})
+            return
+        await self.inner(scope, receive, send_without_auth_challenge)
+
     def add_middleware(self, middleware_class, **kwargs):
         return self.inner.add_middleware(middleware_class, **kwargs)
 
@@ -143,7 +168,7 @@ class FastAPIApp:
         return getattr(self.inner, name)
 
     async def __call__(self, scope, receive, send):
-        await self.inner(scope, receive, send)
+        await self._call_inner(scope, receive, send)
 
 
 _fastapi_inner = FastAPI()
@@ -266,6 +291,10 @@ class BearerAuthMiddleware:
         if api_tokens.is_loopback_scope(scope):
             await self.app(scope, receive, send)
             return
+        # Web UI fetch is same-origin through Vite; never pop HTTP password dialogs.
+        if path.startswith("/api/") and api_tokens.is_browser_ui_scope(scope):
+            await self.app(scope, receive, send)
+            return
         try:
             header_map = {k.lower(): v for k, v in (scope.get("headers") or [])}
             auth = header_map.get(b"authorization", b"").decode("latin-1")
@@ -281,10 +310,12 @@ class BearerAuthMiddleware:
                 {
                     "type": "http.response.start",
                     "status": 401,
-                    "headers": [
-                        (b"content-type", b"application/json"),
-                        (b"content-length", str(len(body)).encode("ascii")),
-                    ],
+                    "headers": api_tokens.strip_www_authenticate_headers(
+                        [
+                            (b"content-type", b"application/json"),
+                            (b"content-length", str(len(body)).encode("ascii")),
+                        ]
+                    ),
                 }
             )
             await send({"type": "http.response.body", "body": body})

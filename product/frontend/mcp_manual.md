@@ -19,7 +19,7 @@ Transport: Streamable HTTP (stateless). Vite keeps SSE (`text/event-stream`) unb
 | MCP URL | `http(s)://<tailscale-host>:5173/mcp` |
 | Docker | Publishes `5173:5173`. FastAPI `:8000` is **not** published. |
 | Proxy | Vite `/mcp` → `http://127.0.0.1:8000/mcp` (WebSocket + SSE preserved) |
-| Auth | **Optional device tokens.** With zero tokens minted, trust is Tailscale membership only (no app token). After `POST /api/auth/tokens` on localhost, non-loopback clients must send `Authorization: Bearer an_<prefix>_<secret>`. Loopback (`127.0.0.1`) and the web UI on the server stay open without Bearer. Mint: `python code/astronote_token_cli.py mint --label "Cursor"`. |
+| Auth | **Optional device tokens.** With zero tokens minted, trust is Tailscale membership only (no app token). After `POST /api/auth/tokens` on localhost, non-loopback MCP / Mac clients must send `Authorization: Bearer an_<prefix>_<secret>` in headers (not OAuth). 401s never include `WWW-Authenticate`. Vite answers `/.well-known/oauth-*` with JSON 404 so Cursor does not loop on a password / API-token prompt. The web UI (same-origin `/api`) stays open without Bearer. Mint: `python code/astronote_token_cli.py mint --label "Cursor"`. |
 
 Configure the MCP client with that URL (Streamable HTTP). After connect, list tools and resources before calling anything.
 
