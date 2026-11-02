@@ -2,6 +2,10 @@ import SwiftUI
 
 struct LibrarySidebar: View {
     @EnvironmentObject private var appModel: AppModel
+    @AppStorage("astronote.library.expanded") private var expandedStorage = ""
+    @State private var showCreateFolder = false
+    @State private var showCreatePage = false
+    @State private var newName = ""
 
     var body: some View {
         List(selection: Binding(get: { appModel.selectedLibraryNodeId }, set: { appModel.selectedLibraryNodeId = $0 })) {
@@ -12,25 +16,34 @@ struct LibrarySidebar: View {
             } else {
                 Text("No library loaded")
             }
+            if appModel.maintenanceEnabled {
+                Section("Maintenance") {
+                    if let embed = appModel.embedStatusMessage {
+                        Text(embed).font(.caption)
+                    }
+                    Button("Embed all assets") { Task { await appModel.embedAllAssets() } }
+                }
+            }
         }
         .navigationTitle("Library")
         .toolbar {
             ToolbarItemGroup {
-                Button {
-                    appModel.createFolder()
-                } label: {
-                    Label("Folder", systemImage: "folder.badge.plus")
-                }
-                Button {
-                    appModel.createPage()
-                } label: {
-                    Label("Page", systemImage: "doc.badge.plus")
-                }
-                Button {
-                    appModel.disconnect()
-                } label: {
-                    Label("Disconnect", systemImage: "link.badge.plus")
-                }
+                Button { showCreateFolder = true } label: { Label("Folder", systemImage: "folder.badge.plus") }
+                Button { showCreatePage = true } label: { Label("Page", systemImage: "doc.badge.plus") }
+                Button { appModel.disconnect(clearCredentials: false) } label: { Label("Disconnect", systemImage: "link.badge.plus") }
+                Button { appModel.disconnect(clearCredentials: true) } label: { Label("Clear keychain", systemImage: "key.slash") }
+            }
+        }
+        .sheet(isPresented: $showCreateFolder) {
+            LibraryCreateSheet(name: $newName, kind: "folder") {
+                appModel.createFolder(name: newName.isEmpty ? "New Folder" : newName, parentId: appModel.selectedLibraryNodeId)
+                newName = ""
+            }
+        }
+        .sheet(isPresented: $showCreatePage) {
+            LibraryCreateSheet(name: $newName, kind: "page") {
+                appModel.createPage(name: newName.isEmpty ? "New Page" : newName, parentId: appModel.selectedLibraryNodeId)
+                newName = ""
             }
         }
     }
@@ -50,16 +63,10 @@ private struct LibraryNodeRow: View {
                     }
                 }
             } label: {
-                Label(node.name, systemImage: "folder")
+                LibraryNodeRowView(node: node, depth: depth)
             }
         } else {
-            Button {
-                Task { await appModel.openLibraryNode(node) }
-            } label: {
-                Label(node.name, systemImage: "doc.text")
-                    .padding(.leading, CGFloat(depth) * 12)
-            }
-            .buttonStyle(.plain)
+            LibraryNodeRowView(node: node, depth: depth)
         }
     }
 }

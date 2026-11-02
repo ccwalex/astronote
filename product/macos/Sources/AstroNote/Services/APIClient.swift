@@ -4,7 +4,7 @@ enum APIClientError: LocalizedError {
     case invalidURL
     case httpStatus(Int, String)
     case decodeFailed
-    case staleSave(String)
+    case staleSave(detail: StaleSaveDetail, raw: String)
     case timedOut
     case insecureConnection
 
@@ -13,7 +13,7 @@ enum APIClientError: LocalizedError {
         case .invalidURL: return "Invalid server URL."
         case .httpStatus(let code, let body): return "HTTP \(code): \(body)"
         case .decodeFailed: return "Could not decode server response."
-        case .staleSave(let detail): return "Stale save: \(detail)"
+        case .staleSave(_, let raw): return "Stale save: \(raw)"
         case .timedOut: return "Connection timed out. Check the origin and Tailscale route."
         case .insecureConnection:
             return "HTTP is blocked by App Transport Security. Rebuild the Mac app so Info.plist is at Contents/Info.plist, or use https://."
@@ -69,7 +69,7 @@ final class APIClient {
         return headers
     }
 
-    private func request(
+    func request(
         path: String,
         method: String = "GET",
         query: [URLQueryItem] = [],
@@ -108,7 +108,10 @@ final class APIClient {
         }
         if http.statusCode == 401 || http.statusCode >= 400 {
             let snippet = String(data: data, encoding: .utf8) ?? ""
-            if http.statusCode == 409 { throw APIClientError.staleSave(snippet) }
+            if http.statusCode == 409 {
+                let detail = StaleSaveRecovery.parseDetail(from: snippet)
+                throw APIClientError.staleSave(detail: detail, raw: snippet)
+            }
             throw APIClientError.httpStatus(http.statusCode, snippet)
         }
         return (data, http)
@@ -183,18 +186,76 @@ final class APIClient {
         )
     }
 
-    func saveWorkspace(_ workspace: Workspace, baseRevision: Int?, pageWriteSession: String?) async throws -> Workspace {
-        var data = try JSONEncoder().encode(workspace)
-        if var object = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            if let baseRevision { object["base_revision"] = baseRevision }
-            data = try JSONSerialization.data(withJSONObject: object)
-        }
+    func heartbeatSession() async throws {
+        _ = try await request(path: "/session/heartbeat", method: "POST", body: Data("{}".utf8), contentType: "application/json")
+    }
+
+    func fetchWorkspaceRevision() async throws -> Int? {
+        let (data, _) = try await request(path: "/workspace/revision")
+        let decoded = try JSONDecoder().decode(WorkspaceRevisionResponse.self, from: data)
+        return decoded.workspace_revision
+    }
+
+    func fetchWorkspace() async throws -> Workspace {
+        let (data, _) = try await request(path: "/workspace")
+        return try JSONDecoder().decode(Workspace.self, from: data)
+    }
+
+    func fetchUndoState() async throws -> WorkspaceUndoState {
+        let (data, _) = try await request(path: "/workspace/undo-state")
+        return try JSONDecoder().decode(WorkspaceUndoState.self, from: data)
+    }
+
+    func postCommit() async throws -> WorkspaceUndoState {
+        let (data, _) = try await request(path: "/workspace/commit", method: "POST", body: Data("{}".utf8), contentType: "application/json")
+        return try JSONDecoder().decode(WorkspaceUndoState.self, from: data)
+    }
+
+    func postRevertToBaseline() async throws -> WorkspaceUndoState {
+        let (data, _) = try await request(path: "/workspace/revert-to-baseline", method: "POST", body: Data("{}".utf8), contentType: "application/json")
+        return try JSONDecoder().decode(WorkspaceUndoState.self, from: data)
+    }
+
+    func forcePageWriteUnlock(projectId: String, sessionId: String) async throws {
+        let body = try JSONEncoder().encode(["session_id": sessionId])
+        _ = try await request(
+            path: "/pages/\(projectId)/write-lock/force",
+            method: "POST",
+            body: body,
+            contentType: "application/json",
+            pageWriteSession: sessionId
+        )
+    }
+
+    struct SaveOptions {
+        var coalesceKey: String?
+        var baseRevisions: [String: Int]?
+        var clearedProjectIds: [String]?
+        var mutationSignals: WorkspaceMutationSignals?
+    }
+
+    func saveWorkspace(
+        _ workspace: Workspace,
+        baseRevision: Int?,
+        pageWriteSession: String?,
+        options: SaveOptions = SaveOptions()
+    ) async throws -> Workspace {
+        let payload = try WorkspaceSaveBuilder.buildSavePayload(
+            workspace: workspace,
+            options: SavePayloadOptions(
+                coalesceKey: options.coalesceKey,
+                baseRevision: baseRevision,
+                baseRevisions: options.baseRevisions,
+                clearedProjectIds: options.clearedProjectIds,
+                mutationSignals: options.mutationSignals
+            )
+        )
         var extra: [String: String] = [:]
         if let baseRevision { extra["If-Match"] = String(baseRevision) }
         let (responseData, _) = try await request(
             path: "/workspace",
             method: "POST",
-            body: data,
+            body: payload,
             contentType: "application/json",
             extraHeaders: extra,
             pageWriteSession: pageWriteSession

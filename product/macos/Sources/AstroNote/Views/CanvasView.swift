@@ -6,34 +6,59 @@ struct CanvasView: View {
     @EnvironmentObject private var appModel: AppModel
     let project: Project
 
-    @State private var pan: CGSize = .zero
-
     var body: some View {
         GeometryReader { geo in
-            ScrollView([.horizontal, .vertical]) {
+            ZStack(alignment: .topLeading) {
+                Color(nsColor: .textBackgroundColor)
                 ZStack(alignment: .topLeading) {
-                    Color(nsColor: .textBackgroundColor)
-                        .frame(width: canvasSize.width, height: canvasSize.height)
                     ForEach(project.visibleSpaces()) { space in
                         SpaceCardView(project: project, space: space)
-                            .scaleEffect(appModel.canvasZoom)
-                            .offset(x: pan.width + space.x * appModel.canvasZoom, y: pan.height + space.y * appModel.canvasZoom)
-                            .onTapGesture {
-                                appModel.selectSpace(space.id)
-                                if appModel.selectedTool == .text {
-                                    Task { await appModel.createTextSpaceAt(x: space.x + 40, y: space.y + 40) }
-                                }
-                            }
+                            .scaleEffect(appModel.canvasCamera.scale)
+                            .offset(
+                                x: appModel.canvasCamera.offsetX + space.x * appModel.canvasCamera.scale,
+                                y: appModel.canvasCamera.offsetY + space.y * appModel.canvasCamera.scale
+                            )
+                            .gesture(dragGesture(for: space))
+                            .onTapGesture { handleTap(on: space) }
                     }
+                    SnapGuidesOverlay()
+                    StrokeCanvasOverlay()
                 }
                 .frame(width: canvasSize.width, height: canvasSize.height)
+                CanvasGestureOverlay { delta in
+                    var camera = appModel.canvasCamera
+                    camera.zoomAround(point: CGPoint(x: geo.size.width / 2, y: geo.size.height / 2), deltaScale: CanvasCamera.scaleFromWheelDelta(delta))
+                    appModel.canvasCamera = camera
+                }
+                ProbeResultsPanel()
             }
-            .gesture(
-                DragGesture()
-                    .onChanged { value in
-                        pan = CGSize(width: value.translation.width, height: value.translation.height)
-                    }
-            )
+        }
+    }
+
+    private func dragGesture(for space: Space) -> some Gesture {
+        DragGesture()
+            .onChanged { value in
+                guard appModel.selectedTool == .pointer, appModel.selectedSpaceId == space.id else { return }
+                appModel.updateSelectedSpacePosition(
+                    dx: value.translation.width / appModel.canvasCamera.scale,
+                    dy: value.translation.height / appModel.canvasCamera.scale
+                )
+            }
+    }
+
+    private func handleTap(on space: Space) {
+        switch appModel.selectedTool {
+        case .pointer:
+            appModel.selectSpace(space.id)
+        case .deleteSpace:
+            appModel.selectSpace(space.id)
+            appModel.deleteSelectedSpace()
+        case .createText:
+            Task { await appModel.createTextSpaceAt(x: space.x + 40, y: space.y + 40) }
+        case .insertVerticalSpace:
+            appModel.insertVerticalGap(at: space.y)
+        default:
+            appModel.selectSpace(space.id)
         }
     }
 
@@ -51,7 +76,7 @@ struct SpaceCardView: View {
     let space: Space
 
     var body: some View {
-        let selected = appModel.selectedSpaceId == space.id
+        let selected = appModel.selectedSpaceIds.contains(space.id)
         VStack(alignment: .leading, spacing: 0) {
             Text(space.kind)
                 .font(.caption.weight(.semibold))
@@ -61,11 +86,9 @@ struct SpaceCardView: View {
             spaceBody
         }
         .frame(width: space.width, height: space.height)
+        .background(Color(hex: space.background_color) ?? Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 8))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(selected ? Color.accentColor : Color.secondary.opacity(0.4), lineWidth: selected ? 2 : 1)
-        )
+        .overlay(SpaceChromeView(space: space, selected: selected))
         .shadow(radius: selected ? 4 : 1)
     }
 
@@ -73,58 +96,16 @@ struct SpaceCardView: View {
     private var spaceBody: some View {
         switch space.kind {
         case "TextSpace":
-            TextSpaceView(project: project, space: space)
+            TextSpaceArea(project: project, space: space)
         case "ImageSpace", "PhotoSpace", "GroupPhotoSpace":
-            ImageSpaceView(project: project, space: space)
+            RemoteAssetImage(project: project, space: space)
         case "PDFSpace":
-            PDFSpaceView(project: project, space: space)
+            RemotePDFView(project: project, space: space)
         case "GroupSpace":
             GroupSpaceView(project: project, space: space)
         default:
             GenericSpaceView(space: space)
         }
-    }
-}
-
-struct TextSpaceView: View {
-    @EnvironmentObject private var appModel: AppModel
-    let project: Project
-    let space: Space
-    @State private var text: String = ""
-    @State private var loaded = false
-
-    var body: some View {
-        Group {
-            if appModel.canWritePage {
-                TextEditor(text: $text)
-                    .font(.body)
-                    .onChange(of: text) { _, newValue in
-                        guard let assetId = space.reference_asset_id ?? space.asset_ids.first else { return }
-                        appModel.updateTextAsset(assetId: assetId, markdown: newValue)
-                    }
-            } else {
-                ScrollView {
-                    Text(text).frame(maxWidth: .infinity, alignment: .leading)
-                }
-            }
-        }
-        .padding(8)
-        .task(id: space.id) {
-            guard let assetId = space.reference_asset_id ?? space.asset_ids.first else { return }
-            text = await appModel.assetText(for: assetId)
-            loaded = true
-        }
-    }
-}
-
-struct ImageSpaceView: View {
-    @EnvironmentObject private var appModel: AppModel
-    let project: Project
-    let space: Space
-
-    var body: some View {
-        RemoteAssetImage(project: project, space: space)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -144,27 +125,14 @@ struct RemoteAssetImage: View {
                 ProgressView()
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task(id: space.id) {
-            guard let assetId = space.reference_asset_id ?? space.asset_ids.first,
-                  let asset = project.assets[assetId] else { return }
-            let path = asset.path.isEmpty ? "/api/assets/\(assetId)" : asset.path
-            guard let url = URL(string: path, relativeTo: URL(string: appModel.connection.origin + "/"))?.absoluteURL else { return }
-            var request = URLRequest(url: url)
-            request.setValue("Bearer \(appModel.connection.token)", forHTTPHeaderField: "Authorization")
-            if let data = try? await URLSession.shared.data(for: request).0 {
+            guard let client = appModel.client,
+                  let assetId = space.reference_asset_id ?? space.asset_ids.first else { return }
+            if let data = try? await client.fetchAssetData(assetId: assetId) {
                 image = NSImage(data: data)
             }
         }
-    }
-}
-
-struct PDFSpaceView: View {
-    @EnvironmentObject private var appModel: AppModel
-    let project: Project
-    let space: Space
-
-    var body: some View {
-        RemotePDFView(project: project, space: space)
     }
 }
 
@@ -173,30 +141,39 @@ struct RemotePDFView: View {
     let project: Project
     let space: Space
     @State private var document: PDFDocument?
+    @State private var pageIndex = 0
 
     var body: some View {
-        Group {
+        VStack(spacing: 0) {
+            HStack {
+                Button("<") { pageIndex = max(0, pageIndex - 1) }
+                Text("Page \(pageIndex + 1) / \(max(document?.pageCount ?? 1, 1))")
+                    .font(.caption)
+                Button(">") { pageIndex = min((document?.pageCount ?? 1) - 1, pageIndex + 1) }
+            }
             if let document {
-                PDFKitRepresentable(document: document)
+                PDFKitRepresentable(document: document, pageIndex: pageIndex)
             } else {
                 ProgressView()
             }
         }
         .task(id: space.id) {
-            guard let assetId = space.reference_asset_id ?? space.asset_ids.first else { return }
-            let path = "/api/assets/\(assetId)"
-            guard let url = URL(string: appModel.connection.origin + path) else { return }
-            var request = URLRequest(url: url)
-            request.setValue("Bearer \(appModel.connection.token)", forHTTPHeaderField: "Authorization")
-            if let data = try? await URLSession.shared.data(for: request).0 {
+            guard let client = appModel.client,
+                  let assetId = space.reference_asset_id ?? space.asset_ids.first else { return }
+            if let data = try? await client.fetchAssetData(assetId: assetId) {
                 document = PDFDocument(data: data)
             }
         }
+    }
+
+    func goToPage(_ index: Int) {
+        pageIndex = index
     }
 }
 
 struct PDFKitRepresentable: NSViewRepresentable {
     let document: PDFDocument
+    var pageIndex: Int = 0
 
     func makeNSView(context: Context) -> PDFView {
         let view = PDFView()
@@ -207,6 +184,9 @@ struct PDFKitRepresentable: NSViewRepresentable {
 
     func updateNSView(_ pdfView: PDFView, context: Context) {
         pdfView.document = document
+        if let page = document.page(at: pageIndex) {
+            pdfView.go(to: page)
+        }
     }
 }
 
@@ -235,5 +215,16 @@ struct GenericSpaceView: View {
             Color(nsColor: .controlBackgroundColor).opacity(0.15)
             Text(space.kind).foregroundStyle(.secondary)
         }
+    }
+}
+
+private extension Color {
+    init?(hex: String?) {
+        guard let hex, hex.hasPrefix("#"), hex.count >= 7 else { return nil }
+        let start = hex.index(hex.startIndex, offsetBy: 1)
+        let r = Int(hex[start..<hex.index(start, offsetBy: 2)], radix: 16) ?? 0
+        let g = Int(hex[hex.index(start, offsetBy: 2)..<hex.index(start, offsetBy: 4)], radix: 16) ?? 0
+        let b = Int(hex[hex.index(start, offsetBy: 4)..<hex.index(start, offsetBy: 6)], radix: 16) ?? 0
+        self.init(red: Double(r) / 255, green: Double(g) / 255, blue: Double(b) / 255)
     }
 }

@@ -10,12 +10,43 @@ final class AppModel: ObservableObject {
         var errorMessage: String?
     }
 
-    enum CanvasTool: String, CaseIterable {
+    enum CanvasTool: String, CaseIterable, Identifiable {
         case pointer
-        case text
-        case image
-        case pdf
-        case generic
+        case probe
+        case createGeneric
+        case createText
+        case createImage
+        case createPDF
+        case createGroup
+        case createStroke
+        case eraseStroke
+        case deleteSpace
+        case insertVerticalSpace
+
+        var id: String { rawValue }
+
+        var label: String {
+            switch self {
+            case .pointer: return "Select"
+            case .probe: return "Probe"
+            case .createGeneric: return "Box"
+            case .createText: return "Text"
+            case .createImage: return "Image"
+            case .createPDF: return "PDF"
+            case .createGroup: return "Group"
+            case .createStroke: return "Stroke"
+            case .eraseStroke: return "Eraser"
+            case .deleteSpace: return "Delete"
+            case .insertVerticalSpace: return "Gap"
+            }
+        }
+
+        var enabledInCurrentPhase: Bool {
+            switch self {
+            case .probe, .createStroke, .eraseStroke: return true
+            default: return true
+            }
+        }
     }
 
     @Published var connection = ConnectionState()
@@ -31,15 +62,40 @@ final class AppModel: ObservableObject {
     @Published var searchResults: [SearchHit] = []
     @Published var ragMasterNodes: [RagMasterNode] = []
     @Published var canvasZoom: Double = 1.0
+    @Published var canvasCamera = CanvasCamera()
     @Published var selectedTool: CanvasTool = .pointer
+    @Published var selectedSpaceIds: Set<String> = []
+    @Published var serverAheadNotice: String?
+    @Published var persistStatus: WorkspacePersistStatus = .idle
+    @Published var ragMode: String = "mixed"
+    @Published var ragAnswer: String?
+    @Published var ragLLMEnabled = false
+    @Published var searchFolderScope: String?
+    @Published var maintenanceEnabled = true
+    @Published var embedStatusMessage: String?
+    @Published var showAssetMigrationPrompt = false
+    @Published var showStorageMigrationPrompt = false
     @Published var canWritePage = true
     @Published var isDirty = false
+    @Published var undoState: WorkspaceUndoState?
+    @Published var localHistoryCanUndo = false
+    @Published var localHistoryCanRedo = false
 
-    private var client: APIClient?
-    private var baseRevision: Int?
-    private var presenceTask: Task<Void, Never>?
-    private var saveTask: Task<Void, Never>?
-    private var assetTextCache: [String: String] = [:]
+    var client: APIClient?
+    var baseRevision: Int?
+    var projectRevisions: [String: Int] = [:]
+    var dirtyGate = WorkspaceDirtyGate()
+    var mutationSignals = WorkspaceMutationSignals()
+    var saveCoalesceKey: String?
+    var staleRecoveryUsed = false
+    var staleRecoveryInFlight = false
+    var presenceTask: Task<Void, Never>?
+    var saveTask: Task<Void, Never>?
+    var revisionPollTask: Task<Void, Never>?
+    var embedPollTask: Task<Void, Never>?
+    var heartbeatTask: Task<Void, Never>?
+    var localHistory = LocalHistory()
+    var assetTextCache: [String: String] = [:]
 
     func bootstrap() async {
         connection.errorMessage = nil
@@ -75,6 +131,8 @@ final class AppModel: ObservableObject {
             let nav = try await api.fetchWorkspaceNav()
             workspace = nav
             baseRevision = nav.workspace_revision
+            startRevisionPollLoop()
+            startSessionHeartbeat()
             statusMessage = "Connected to \(profile.origin)"
         } catch {
             connection.isConnected = false
@@ -95,15 +153,36 @@ final class AppModel: ObservableObject {
         }.value
     }
 
-    func disconnect() {
+    func disconnect(clearCredentials: Bool = false) {
+        stopRevisionPollLoop()
+        stopEmbedPoll()
         Task {
             await client?.endSession()
         }
         stopPresenceLoop()
+        saveTask?.cancel()
+        saveTask = nil
         client = nil
         connection.isConnected = false
         workspace = nil
         hydratedProject = nil
+        if clearCredentials {
+            Task.detached(priority: .userInitiated) {
+                try? KeychainStore.clearProfile()
+            }
+        }
+    }
+
+    func prepareForTermination() async {
+        stopRevisionPollLoop()
+        stopEmbedPoll()
+        saveTask?.cancel()
+        saveTask = nil
+        if isDirty {
+            await saveNow()
+        }
+        stopPresenceLoop()
+        await client?.endSession()
     }
 
     func openLibraryNode(_ node: LibraryNode) async {
@@ -139,6 +218,17 @@ final class AppModel: ObservableObject {
 
     func selectSpace(_ spaceId: String?) {
         selectedSpaceId = spaceId
+        selectedSpaceIds = spaceId.map { [$0] } ?? []
+    }
+
+    func toggleSpaceSelection(_ spaceId: String, extend: Bool) {
+        if extend {
+            if selectedSpaceIds.contains(spaceId) { selectedSpaceIds.remove(spaceId) }
+            else { selectedSpaceIds.insert(spaceId) }
+        } else {
+            selectedSpaceIds = [spaceId]
+        }
+        selectedSpaceId = selectedSpaceIds.first
     }
 
     func assetText(for assetId: String) async -> String {
@@ -168,11 +258,25 @@ final class AppModel: ObservableObject {
             self.workspace = workspace
         }
         assetTextCache[assetId] = markdown
-        isDirty = true
+        mutationSignals.editedAssetIds = Array(Set(mutationSignals.editedAssetIds + [assetId]))
+        markDirty(coalesceKey: UndoCoalesce.textKey(assetId: assetId))
         scheduleSave()
     }
 
+    func markDirty(coalesceKey: String? = nil) {
+        dirtyGate.markUserMutation()
+        isDirty = true
+        if let coalesceKey { saveCoalesceKey = coalesceKey }
+        persistStatus = .unsaved
+        pushLocalHistoryIfNeeded()
+    }
+
     func scheduleSave() {
+        guard WorkspaceDirtyGateLogic.shouldScheduleSave(
+            hasUserMutation: dirtyGate.isDirty,
+            suppressPersist: false,
+            canWrite: canWritePage
+        ) else { return }
         saveTask?.cancel()
         saveTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 900_000_000)
@@ -181,7 +285,8 @@ final class AppModel: ObservableObject {
     }
 
     func saveNow() async {
-        guard let client, var workspace, isDirty else { return }
+        guard let client, var workspace, dirtyGate.isDirty || isDirty else { return }
+        persistStatus = .saving
         if let projectId = selectedProjectId, let project = hydratedProject {
             workspace.projects[projectId] = project
             for (_, asset) in project.assets {
@@ -190,15 +295,104 @@ final class AppModel: ObservableObject {
             }
         }
         let session = client.userId
+        var baseRevs: [String: Int] = [:]
+        if let selectedProjectId, let rev = projectRevisions[selectedProjectId] ?? hydratedProject?.project_revision {
+            baseRevs[selectedProjectId] = rev
+        }
         do {
-            let saved = try await client.saveWorkspace(workspace, baseRevision: baseRevision, pageWriteSession: session)
+            let saved = try await client.saveWorkspace(
+                workspace,
+                baseRevision: baseRevision,
+                pageWriteSession: session,
+                options: APIClient.SaveOptions(
+                    coalesceKey: saveCoalesceKey,
+                    baseRevisions: baseRevs.isEmpty ? nil : baseRevs,
+                    clearedProjectIds: nil,
+                    mutationSignals: mutationSignals
+                )
+            )
             self.workspace = saved
             baseRevision = saved.workspace_revision
+            dirtyGate.clear()
             isDirty = false
+            mutationSignals = WorkspaceMutationSignals()
+            saveCoalesceKey = nil
+            staleRecoveryUsed = false
+            persistStatus = .saved
             statusMessage = "Saved"
-        } catch APIClientError.staleSave(let detail) {
-            errorMessage = detail
-            statusMessage = "Save conflict — reload the page"
+        } catch APIClientError.staleSave(let detail, _) {
+            await handleStaleSave(detail: detail)
+        } catch {
+            persistStatus = .unsaved
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func handleStaleSave(detail: StaleSaveDetail) async {
+        let decision = StaleSaveRecovery.decide(recoveryAlreadyUsed: staleRecoveryUsed, recoveryInFlight: staleRecoveryInFlight)
+        switch decision {
+        case .join:
+            return
+        case .surfaceError:
+            persistStatus = .unsaved
+            errorMessage = "Save conflict — reload the page"
+            serverAheadNotice = "Server revision \(detail.serverRevision.map(String.init) ?? "?")"
+        case .recover:
+            staleRecoveryInFlight = true
+            staleRecoveryUsed = true
+            defer { staleRecoveryInFlight = false }
+            do {
+                guard let client else { return }
+                let (refreshed, project) = try await WorkspaceServerSync.refreshWorkspaceFromServer(
+                    client: client,
+                    current: workspace,
+                    projectId: selectedProjectId
+                )
+                workspace = refreshed
+                baseRevision = refreshed.workspace_revision
+                if let project { hydratedProject = project }
+                localHistory = presentOnlyHistory(refreshed)
+                localHistoryCanUndo = false
+                localHistoryCanRedo = false
+                await saveNow()
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    func forceUnlockSelectedPage() async {
+        guard let client, let projectId = selectedProjectId, let session = client.userId else { return }
+        do {
+            try await client.forcePageWriteUnlock(projectId: projectId, sessionId: session)
+            canWritePage = true
+            persistStatus = dirtyGate.isDirty ? .unsaved : .idle
+            statusMessage = "Write lock reclaimed"
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func reloadFromServer() async {
+        guard let client else { return }
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            let (refreshed, project) = try await WorkspaceServerSync.refreshWorkspaceFromServer(
+                client: client,
+                current: workspace,
+                projectId: selectedProjectId
+            )
+            workspace = refreshed
+            baseRevision = refreshed.workspace_revision
+            if let project { hydratedProject = project }
+            dirtyGate.clear()
+            isDirty = false
+            serverAheadNotice = nil
+            persistStatus = .synced
+            localHistory = presentOnlyHistory(refreshed)
+            localHistoryCanUndo = false
+            localHistoryCanRedo = false
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -215,9 +409,18 @@ final class AppModel: ObservableObject {
                 searchResults = response.search_results ?? []
                 ragMasterNodes = []
             case .rag:
-                let response = try await client.ragSearch(query: query, libraryNodeId: selectedLibraryNodeId)
+                let response = try await client.searchBackendRAG(
+                    query: query,
+                    mode: ragMode,
+                    libraryNodeId: searchFolderScope ?? selectedLibraryNodeId
+                )
                 searchResults = response.search_results ?? []
                 ragMasterNodes = response.master_nodes ?? []
+                if ragLLMEnabled {
+                    ragAnswer = try await client.callBackendRAGLLM(query: query, libraryNodeId: searchFolderScope ?? selectedLibraryNodeId)
+                } else {
+                    ragAnswer = nil
+                }
             }
         } catch {
             errorMessage = error.localizedDescription
@@ -244,26 +447,14 @@ final class AppModel: ObservableObject {
     }
 
     private func createLibraryItem(kind: String) async {
-        guard let client else { return }
-        let name = kind == "folder" ? "New Folder" : "New Page"
-        let path = name
-        do {
-            if kind == "folder" {
-                try await client.createFolder(path: path)
-            } else {
-                try await client.createPage(path: path)
-            }
-            workspace = try await client.fetchWorkspaceNav()
-            baseRevision = workspace?.workspace_revision
-            statusMessage = "Created \(name)"
-        } catch {
-            errorMessage = error.localizedDescription
-        }
+        await createLibraryItem(kind: kind, name: kind == "folder" ? "New Folder" : "New Page", parentId: selectedLibraryNodeId)
     }
 
     func createTextSpaceAt(x: Double, y: Double) async {
         guard let client, let projectId = selectedProjectId, let pagePath = pagePathForSelectedProject() else { return }
         do {
+            _ = x
+            _ = y
             try await client.createTextSpace(pagePath: pagePath, markdown: "# New note\n")
             await openProject(projectId)
             statusMessage = "Text space created"

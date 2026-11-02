@@ -14,6 +14,7 @@ let package = Package(
             name: "AstroNote",
             path: "Sources/AstroNote",
             linkerSettings: [
+                .linkedFramework("WebKit"),
                 // Embed Info.plist so `swift run` (no .app bundle) still honors ATS exceptions for HTTP.
                 .unsafeFlags([
                     "-Xlinker", "-sectcreate",
@@ -22,6 +23,11 @@ let package = Package(
                     "-Xlinker", infoPlistPath,
                 ]),
             ]
+        ),
+        .testTarget(
+            name: "AstroNoteTests",
+            dependencies: ["AstroNote"],
+            path: "Tests/AstroNoteTests"
         ),
     ]
 )

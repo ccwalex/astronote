@@ -17,11 +17,18 @@ struct MainSplitView: View {
             InspectorPanel()
                 .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 320)
         }
+        .sheet(isPresented: $appModel.showAssetMigrationPrompt) {
+            AssetTrackingMigrationPrompt()
+        }
+        .sheet(isPresented: $appModel.showStorageMigrationPrompt) {
+            WorkspaceStorageMigrationPrompt()
+        }
     }
 }
 
 struct StatusBannerView: View {
     @EnvironmentObject private var appModel: AppModel
+    @State private var confirmForceUnlock = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -31,19 +38,39 @@ struct StatusBannerView: View {
             if let error = appModel.errorMessage {
                 Text(error).font(.caption).foregroundStyle(.red)
             }
-            if !appModel.canWritePage {
-                Text("Read-only: another client holds the page write lock.")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.orange)
+            if let notice = appModel.serverAheadNotice {
+                HStack {
+                    Text(notice).font(.caption).foregroundStyle(.orange)
+                    Button("Reload") { Task { await appModel.reloadFromServer() } }
+                }
             }
-            if appModel.isDirty {
-                Text("Unsaved changes").font(.caption).foregroundStyle(.yellow)
+            if !appModel.canWritePage {
+                HStack {
+                    Text("Read-only: another client holds the page write lock.")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.orange)
+                    Button("Force unlock") { confirmForceUnlock = true }
+                }
+            }
+            HStack {
+                Text(appModel.persistStatus.label)
+                    .font(.caption.weight(.medium))
+                if appModel.isDirty {
+                    Text("• local edits pending").font(.caption).foregroundStyle(.yellow)
+                }
+            }
+            if let embed = appModel.embedStatusMessage {
+                Text(embed).font(.caption2).foregroundStyle(.secondary)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
         .background(Color(nsColor: .windowBackgroundColor))
+        .confirmationDialog("Force write unlock?", isPresented: $confirmForceUnlock) {
+            Button("Force unlock", role: .destructive) { Task { await appModel.forceUnlockSelectedPage() } }
+            Button("Cancel", role: .cancel) {}
+        }
     }
 }
 

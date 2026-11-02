@@ -43,7 +43,14 @@ enum KeychainStore {
             delete(account: userAccountPrefix + origin)
         }
         delete(account: originAccount)
+        delete(account: ragKeyAccount)
     }
+
+    static func saveRagApiKey(_ key: String) throws {
+        try write(account: ragKeyAccount, value: key)
+    }
+
+    private static let ragKeyAccount = "rag-api-key"
 
     private static func authenticationContext() -> LAContext {
         let context = LAContext()
