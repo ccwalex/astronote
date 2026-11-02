@@ -15,7 +15,10 @@ import {
   hasWorkspaceMutationSignals,
   projectIdsFromMutationSignals,
 } from './workspaceMutationSignals';
-import { hasAuthoritativeProject } from './authoritativeWorkspaceSnapshot';
+import {
+  getAuthoritativeLibrary,
+  hasAuthoritativeProject,
+} from './authoritativeWorkspaceSnapshot';
 
 export type ComputeSaveProjectIdsOptions = {
   /** @deprecated Prefer mutation signals; kept for pending-cache layout entries. */
@@ -44,6 +47,37 @@ export function listNewProjectIdsFromPending(
 }
 
 /**
+ * Page library nodes created locally (not yet in the server library snapshot) whose
+ * project body is not authoritative — first persist must include the default canvas.
+ */
+export function listNewProjectIdsFromNewLibraryPages(workspace: Workspace): string[] {
+  const libSnap = getAuthoritativeLibrary();
+  const out = new Set<string>();
+  for (const node of Object.values(workspace.library_nodes || {})) {
+    if (node?.kind !== 'page') continue;
+    const pid = String(node.target_project_id || '').trim();
+    if (!pid || hasAuthoritativeProject(pid)) continue;
+    if (node.id in libSnap) continue;
+    out.add(pid);
+  }
+  return [...out];
+}
+
+/** Union of pending-cache and new local page project ids for save/mutation signals. */
+export function listNewProjectIdsForPersist(
+  workspace: Workspace,
+  options?: { newProjectIds?: Iterable<string> }
+): string[] {
+  return [
+    ...new Set([
+      ...listNewProjectIdsFromPending(workspace),
+      ...listNewProjectIdsFromNewLibraryPages(workspace),
+      ...(options?.newProjectIds ? [...options.newProjectIds] : []),
+    ]),
+  ];
+}
+
+/**
  * Project bodies to include in POST /api/workspace: pages with mutation signals,
  * markdown-dirty pages, and newly created pages captured in the pending library snapshot.
  */
@@ -52,10 +86,7 @@ export function computeSaveProjectIds(
   dirtyMarkdown: DirtyMarkdownAsset[],
   options?: ComputeSaveProjectIdsOptions
 ): string[] {
-  const newProjectIds = new Set([
-    ...listNewProjectIdsFromPending(workspace),
-    ...(options?.newProjectIds ? options.newProjectIds : []),
-  ]);
+  const newProjectIds = new Set(listNewProjectIdsForPersist(workspace, options));
   const signals = computeWorkspaceMutationSignals(workspace, { newProjectIds });
   const ids = new Set<string>();
   for (const item of dirtyMarkdown) {
@@ -116,10 +147,7 @@ export function shouldPostWorkspaceSave(
     newProjectIds?: Iterable<string>;
   }
 ): boolean {
-  const newProjectIds = new Set([
-    ...listNewProjectIdsFromPending(workspace),
-    ...(options?.newProjectIds ? options.newProjectIds : []),
-  ]);
+  const newProjectIds = new Set(listNewProjectIdsForPersist(workspace, options));
   const signals = computeWorkspaceMutationSignals(workspace, { newProjectIds });
   if (hasWorkspaceMutationSignals(signals)) return true;
   const cleared = options?.clearedProjectIds?.filter(Boolean) ?? [];
@@ -130,7 +158,7 @@ export function buildPendingPersistWriteOptions(
   workspace: Workspace,
   dirtyMarkdown: DirtyMarkdownAsset[]
 ): WriteWorkspaceDirtyOptions {
-  const newProjectIds = listNewProjectIdsFromPending(workspace);
+  const newProjectIds = listNewProjectIdsForPersist(workspace);
   const signals = computeWorkspaceMutationSignals(workspace, { newProjectIds });
   const projectIds = computeSaveProjectIds(workspace, dirtyMarkdown, { newProjectIds });
   return { projectIds, mutationSignals: signals };

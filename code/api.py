@@ -94,6 +94,11 @@ from modules.workspace_search import (
     retrieve_rag_assets,
     search_workspace,
 )
+from modules.search_index import (
+    mtime_key_json,
+    rebuild_workspace_search_index,
+    search_index_query,
+)
 from modules.azure_llm import AzureLLMConfig, send_messages
 from modules.group_space_conversion import (
     GroupSpaceConversionError,
@@ -680,6 +685,19 @@ def _build_search_workspace() -> Workspace:
     return workspace
 
 
+def _persist_search_index(workspace: Workspace, *, pdf_ready: bool) -> None:
+    try:
+        rebuild_workspace_search_index(
+            WORKSPACE_PATH,
+            workspace,
+            generation=_search_cache_generation,
+            mtime_key=mtime_key_json(_search_corpus_mtime_key()),
+            pdf_ready=pdf_ready,
+        )
+    except Exception:
+        traceback.print_exc()
+
+
 def _build_lightweight_search_workspace() -> Workspace:
     """Fast corpus without PDF extraction, for the first-query fallback.
 
@@ -693,7 +711,6 @@ def _build_lightweight_search_workspace() -> Workspace:
 
 
 _search_corpus_build_lock = threading.Lock()
-_search_corpus_rebuilding = threading.Event()
 
 
 def _corpus_entry_is_fresh(entry: Optional[dict]) -> bool:
@@ -708,25 +725,23 @@ def _corpus_entry_is_fresh(entry: Optional[dict]) -> bool:
 def _rebuild_search_corpus_job() -> None:
     """Background corpus rebuild: PDF extraction and loads happen off the
     request path so a slow store can never hang search handlers."""
-    if _search_corpus_rebuilding.is_set():
-        return
-    _search_corpus_rebuilding.set()
+    _search_corpus_build_lock.acquire(blocking=True)
     try:
-        if not _search_corpus_build_lock.acquire(blocking=False):
-            return
-        try:
-            workspace = _build_search_workspace()
-            with _search_corpus_lock:
-                _search_corpus_cache["workspace"] = {
-                    "workspace": workspace,
-                    "generation": _search_cache_generation,
-                    "mtime_key": _search_corpus_mtime_key(),
-                    "loaded_at": time.monotonic(),
-                }
-        finally:
-            _search_corpus_build_lock.release()
+        target_generation = _search_cache_generation
+        workspace = _build_search_workspace()
+        _persist_search_index(workspace, pdf_ready=True)
+        with _search_corpus_lock:
+            if target_generation != _search_cache_generation:
+                return
+            _search_corpus_cache["workspace"] = {
+                "workspace": workspace,
+                "generation": target_generation,
+                "mtime_key": _search_corpus_mtime_key(),
+                "loaded_at": time.monotonic(),
+                "pdf_ready": True,
+            }
     finally:
-        _search_corpus_rebuilding.clear()
+        _search_corpus_build_lock.release()
 
 
 def _load_workspace_for_search() -> Workspace:
@@ -758,13 +773,75 @@ def _load_workspace_for_search() -> Workspace:
         if _corpus_entry_is_fresh(entry):
             return entry["workspace"]
         fallback = _build_lightweight_search_workspace()
+        _persist_search_index(fallback, pdf_ready=False)
         _search_corpus_cache["workspace"] = {
             "workspace": fallback,
             "generation": _search_cache_generation,
             "mtime_key": _search_corpus_mtime_key(),
             "loaded_at": time.monotonic(),
+            "pdf_ready": False,
         }
         return fallback
+
+
+def _search_corpus_pdf_index_status() -> str:
+    with _search_corpus_lock:
+        entry = _search_corpus_cache.get("workspace")
+    if entry is None:
+        return "pending"
+    if entry.get("pdf_ready") and _corpus_entry_is_fresh(entry):
+        return "ready"
+    if entry.get("pdf_ready"):
+        return "ready"
+    return "pending"
+
+
+def _coerce_library_node_ids(
+    library_node_id: Optional[str],
+    library_node_ids: Optional[list[str]],
+) -> tuple[Optional[str], Optional[list[str]]]:
+    merged: list[str] = []
+    if library_node_id:
+        text = str(library_node_id).strip()
+        if text:
+            merged.append(text)
+    if library_node_ids:
+        for raw in library_node_ids:
+            for part in str(raw or "").split(","):
+                text = part.strip()
+                if text:
+                    merged.append(text)
+    if not merged:
+        return None, None
+    if len(merged) == 1:
+        return merged[0], None
+    return None, merged
+
+
+def _plain_search_results(
+    workspace: Workspace,
+    query: str,
+    *,
+    library_node_id: Optional[str],
+    library_node_ids: Optional[list[str]],
+    limit: int,
+) -> list[dict]:
+    indexed = search_index_query(
+        WORKSPACE_PATH,
+        workspace,
+        query,
+        library_node_id=library_node_id,
+        library_node_ids=library_node_ids,
+        limit=limit,
+    )
+    if indexed is not None:
+        return indexed
+    return search_workspace(
+        workspace,
+        query,
+        library_node_id=library_node_id,
+        library_node_ids=library_node_ids,
+    )[:limit]
 
 
 def _resolve_rag_runtime_config(endpoint_override: str, api_key_override: str) -> dict[str, str]:
@@ -2587,6 +2664,7 @@ def get_last_rag_response():
 def get_search(
     q: str = Query(...),
     library_node_id: Optional[str] = Query(None),
+    library_node_ids: Optional[list[str]] = Query(None),
     max_results: Optional[int] = Query(None),
 ):
     query = str(q or "").strip()
@@ -2595,18 +2673,26 @@ def get_search(
 
     limit = _coerce_positive_int(max_results, 50)
     limit = min(limit, 200)
+    scoped_id, scoped_ids = _coerce_library_node_ids(library_node_id, library_node_ids)
 
     try:
         # Read-only search: metadata load + text-asset hydration via the cached
         # corpus, no ensure_baseline / write lock so search does not contend
         # with page-load traffic.
         workspace = _load_workspace_for_search()
-        results = search_workspace(
+        results = _plain_search_results(
             workspace,
             query,
-            library_node_id=str(library_node_id).strip() if library_node_id else None,
-        )[:limit]
-        return {"status": "ok", "query": query, "search_results": results}
+            library_node_id=scoped_id,
+            library_node_ids=scoped_ids,
+            limit=limit,
+        )
+        return {
+            "status": "ok",
+            "query": query,
+            "search_results": results,
+            "pdf_index": _search_corpus_pdf_index_status(),
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -3178,4 +3264,9 @@ register_workspace_storage_routes(app, lambda: WORKSPACE_PATH)
 if __name__ == "__main__":
     import uvicorn
 
+    threading.Thread(
+        target=_load_workspace_for_search,
+        name="search-corpus-prewarm",
+        daemon=True,
+    ).start()
     uvicorn.run(app, host=API_HOST, port=API_PORT)

@@ -537,17 +537,27 @@ export type BackendSearchResponse = {
   status: string;
   query: string;
   search_results: BackendSearchResultRow[];
+  pdf_index?: 'ready' | 'pending';
 };
 
 export async function searchWorkspaceServer(
   q: string,
-  options?: { libraryNodeId?: string; signal?: AbortSignal }
+  options?: { libraryNodeId?: string; libraryNodeIds?: string[]; signal?: AbortSignal }
 ): Promise<BackendSearchResultRow[]> {
   const params = new URLSearchParams();
   params.set('q', q);
   const libraryNodeId = options?.libraryNodeId;
   if (typeof libraryNodeId === 'string' && libraryNodeId.trim()) {
     params.set('library_node_id', libraryNodeId.trim());
+  }
+  const libraryNodeIds = options?.libraryNodeIds;
+  if (Array.isArray(libraryNodeIds)) {
+    for (const id of libraryNodeIds) {
+      const trimmed = typeof id === 'string' ? id.trim() : '';
+      if (trimmed) {
+        params.append('library_node_ids', trimmed);
+      }
+    }
   }
   const endpoint = `${API_BASE}/search?${params.toString()}`;
   let response: Response;

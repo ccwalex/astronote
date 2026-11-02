@@ -86,8 +86,86 @@ function test_layout_edit_selected_page_not_sibling(): void {
   assert(!ids.includes('p1'), 'sibling hydrated page must not be included');
 }
 
+function test_create_page_included_in_save(): void {
+  resetAuthoritativeSnapshots();
+  captureAuthoritativeLibrary({
+    folder1: {
+      id: 'folder1',
+      kind: 'folder',
+      name: 'F',
+      parent_id: null,
+      child_ids: ['node_new'],
+      target_project_id: null,
+    },
+  });
+  const pid = 'proj_new';
+  const pageId = 'node_new';
+  const ws = {
+    id: 'ws',
+    name: 'W',
+    library_nodes: {
+      folder1: {
+        id: 'folder1',
+        kind: 'folder',
+        name: 'F',
+        parent_id: null,
+        child_ids: [pageId],
+        target_project_id: null,
+      },
+      [pageId]: {
+        id: pageId,
+        kind: 'page',
+        name: 'New Page',
+        parent_id: 'folder1',
+        child_ids: [],
+        target_project_id: pid,
+      },
+    },
+    projects: { [pid]: hydratedProject(pid) },
+  } as Workspace;
+  const ids = computeSaveProjectIds(ws, []);
+  assert(ids.length === 1 && ids[0] === pid, 'locally created page project must be saved');
+}
+
+function test_cache_only_hydrated_page_still_omitted(): void {
+  resetAuthoritativeSnapshots();
+  const pageId = 'node_existing';
+  captureAuthoritativeLibrary({
+    [pageId]: {
+      id: pageId,
+      kind: 'page',
+      name: 'Cached',
+      parent_id: null,
+      child_ids: [],
+      target_project_id: 'p_cache',
+    },
+  });
+  const ws = {
+    id: 'ws',
+    name: 'W',
+    library_nodes: {
+      [pageId]: {
+        id: pageId,
+        kind: 'page',
+        name: 'Cached',
+        parent_id: null,
+        child_ids: [],
+        target_project_id: 'p_cache',
+      },
+    },
+    projects: { p_cache: hydratedProject('p_cache') },
+  } as Workspace;
+  const ids = computeSaveProjectIds(ws, []);
+  assert(ids.length === 0, 'cache-only hydrated server page must not POST body');
+}
+
 function main(): void {
-  const tests = [test_dirty_markdown_selects_project, test_layout_edit_selected_page_not_sibling];
+  const tests = [
+    test_dirty_markdown_selects_project,
+    test_layout_edit_selected_page_not_sibling,
+    test_create_page_included_in_save,
+    test_cache_only_hydrated_page_still_omitted,
+  ];
   for (const test of tests) {
     test();
     console.log('PASS', test.name);

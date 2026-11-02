@@ -17,6 +17,7 @@ from modules.workspace_lazy import (
     is_project_stub,
     merge_incoming_workspace_dict,
     stub_project_dict,
+    workspace_mutation_signals_from_lists,
     workspace_nav_dict,
 )
 from modules.workspace_sqlite import sqlite_path_from_workspace_path
@@ -147,6 +148,33 @@ def test_merge_restores_referenced_omitted_project():
     assert merged["projects"][proj_id]["assets"]["asset_big"]["content"].startswith("data:image/png")
 
 
+def test_merge_signal_gated_new_library_page_synthesizes_missing_project():
+    ws, _proj_id, _extra_id = _workspace_with_asset()
+    disk = ws.to_dict()
+    new_pid = "proj_brand_new"
+    new_node_id = "node_brand_new"
+    incoming = dict(disk)
+    incoming["library_nodes"] = dict(disk.get("library_nodes") or {})
+    incoming["library_nodes"][new_node_id] = {
+        "id": new_node_id,
+        "kind": "page",
+        "name": "New Page",
+        "parent_id": None,
+        "child_ids": [],
+        "target_project_id": new_pid,
+    }
+    incoming["projects"] = dict(disk.get("projects") or {})
+    signals = workspace_mutation_signals_from_lists(
+        edited_library_node_ids=[new_node_id],
+        fields_present=True,
+    )
+    merged = merge_incoming_workspace_dict(
+        incoming, disk, mutation_signals=signals
+    )
+    assert new_pid in merged["projects"]
+    assert merged["projects"][new_pid].get("root_space_id")
+
+
 def test_merge_does_not_reinline_disk_data_url_content():
     ws, proj_id, _extra_id = _workspace_with_asset()
     disk = ws.to_dict()
@@ -244,6 +272,7 @@ def main():
         test_merge_does_not_restore_deleted_unreferenced_project,
         test_merge_drops_unreferenced_stub_instead_of_disk_body,
         test_merge_restores_referenced_omitted_project,
+        test_merge_signal_gated_new_library_page_synthesizes_missing_project,
         test_merge_does_not_reinline_disk_data_url_content,
         test_stub_when_root_missing_or_spaces_empty,
         test_wipe_true_only_when_incoming_has_zero_complete,

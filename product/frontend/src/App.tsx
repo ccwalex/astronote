@@ -69,7 +69,7 @@ import {
 import { readLastView, validateLastView, writeLastView } from './model/lastViewCache';
 import { consumePendingSpaceSelection, resolveSpaceSelection } from './model/deferredSpaceSelection';
 import { collectDirtyMarkdownAssets, isProjectHydrated, loadProjectIntoWorkspace, markMarkdownAssetsPersisted, noteHydratedMarkdownAssets, parseWorkspaceJson, shouldPersistWorkspace, type DirtyMarkdownAsset } from './model/workspaceLoad';
-import { computeSaveProjectIds, preparePartialWorkspaceForSave, buildPendingPersistWriteOptions, listNewProjectIdsFromPending, shouldPostWorkspaceSave } from './model/workspaceSave';
+import { computeSaveProjectIds, preparePartialWorkspaceForSave, buildPendingPersistWriteOptions, listNewProjectIdsForPersist, shouldPostWorkspaceSave } from './model/workspaceSave';
 import {
   captureAuthoritativeFromWorkspace,
   captureAuthoritativeLibrary,
@@ -897,7 +897,7 @@ export default function App() {
     if (!workspace) return;
     const dirty = collectDirtyMarkdownForPersist(workspace);
     const clearedProjectIds = [...pendingLibraryDeletionsRef.current.projectIds];
-    const newProjectIds = listNewProjectIdsFromPending(workspace);
+    const newProjectIds = listNewProjectIdsForPersist(workspace);
     const mutationSignals = computeWorkspaceMutationSignals(workspace, { newProjectIds });
     const libraryDeletePending = pendingLibraryDeletionsRef.current.nodeIds.size > 0;
     const shouldPost =
@@ -1573,7 +1573,7 @@ export default function App() {
       if (!workspace) return;
       const dirtyUnload = collectDirtyMarkdownForPersist(workspace);
       const clearedProjectIds = [...pendingLibraryDeletionsRef.current.projectIds];
-      const newProjectIds = listNewProjectIdsFromPending(workspace);
+      const newProjectIds = listNewProjectIdsForPersist(workspace);
       const mutationSignals = computeWorkspaceMutationSignals(workspace, { newProjectIds });
       const libraryDeletePending = pendingLibraryDeletionsRef.current.nodeIds.size > 0;
       const shouldPost =

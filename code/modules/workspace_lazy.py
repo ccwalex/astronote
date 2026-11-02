@@ -797,6 +797,10 @@ def merge_incoming_workspace_dict(
             ", ".join(sorted(restored_disk_only)[:10]),
         )
     result["projects"] = merged_projects
+    if signals.provided:
+        ensured = ensure_library_referenced_project_bodies(result)
+        if ensured is not result:
+            result = ensured
     return result
 
 

@@ -13,6 +13,7 @@ import {
   filterSaveProjectIds,
   hasWorkspaceMutationSignals,
 } from './workspaceMutationSignals.ts';
+import { listNewProjectIdsFromNewLibraryPages } from './workspaceSave.ts';
 import { shouldSkipProjectHydrateFetch } from './projectHydrateGate.ts';
 
 function assert(cond: unknown, msg: string): void {
@@ -71,6 +72,66 @@ function test_cache_only_page_omitted_from_save(): void {
   assert(filtered.length === 0, 'cache-only hydrated page must not be saved');
 }
 
+function test_new_library_page_counts_as_new_project(): void {
+  resetAuthoritativeSnapshots();
+  captureAuthoritativeLibrary({});
+  const pid = 'proj_local';
+  const ws = {
+    id: 'ws',
+    name: 'W',
+    library_nodes: {
+      page1: {
+        id: 'page1',
+        kind: 'page',
+        name: 'New Page',
+        parent_id: null,
+        child_ids: [],
+        target_project_id: pid,
+      },
+    },
+    projects: { [pid]: hydratedProject(pid, true) },
+  } as Workspace;
+  const newIds = listNewProjectIdsFromNewLibraryPages(ws);
+  assert(newIds.includes(pid), 'new local page project id detected');
+  const signals = computeWorkspaceMutationSignals(ws, { newProjectIds: newIds });
+  assert(
+    signals.edited_space_ids?.includes(`${pid}_root`),
+    'new project default spaces marked edited'
+  );
+}
+
+function test_server_library_page_without_authoritative_project_not_new(): void {
+  resetAuthoritativeSnapshots();
+  const pageId = 'page_srv';
+  captureAuthoritativeLibrary({
+    [pageId]: {
+      id: pageId,
+      kind: 'page',
+      name: 'Server',
+      parent_id: null,
+      child_ids: [],
+      target_project_id: 'p_cache',
+    },
+  });
+  const ws = {
+    id: 'ws',
+    name: 'W',
+    library_nodes: {
+      [pageId]: {
+        id: pageId,
+        kind: 'page',
+        name: 'Server',
+        parent_id: null,
+        child_ids: [],
+        target_project_id: 'p_cache',
+      },
+    },
+    projects: { p_cache: hydratedProject('p_cache', true) },
+  } as Workspace;
+  const newIds = listNewProjectIdsFromNewLibraryPages(ws);
+  assert(newIds.length === 0, 'cache-hydrated server page must not count as new project');
+}
+
 function test_explicit_delete_signal_via_diff(): void {
   resetAuthoritativeSnapshots();
   captureAuthoritativeLibrary({});
@@ -122,6 +183,8 @@ function test_has_signals(): void {
 function main(): void {
   const tests = [
     test_cache_only_page_omitted_from_save,
+    test_new_library_page_counts_as_new_project,
+    test_server_library_page_without_authoritative_project_not_new,
     test_explicit_delete_signal_via_diff,
     test_edited_space_position,
     test_hydrate_gate_cache_vs_authoritative,

@@ -231,6 +231,62 @@ def _resolve_allowed_library_node_ids(workspace: Workspace, library_node_id: Opt
         return set()
 
 
+def _resolve_search_scope(
+    workspace: Workspace,
+    *,
+    library_node_id: Optional[str] = None,
+    library_node_ids: Optional[list[str]] = None,
+) -> tuple[Optional[set[str]], Optional[set[str]]]:
+    node_ids: list[str] = []
+    if library_node_id:
+        node_ids.append(str(library_node_id).strip())
+    if library_node_ids:
+        for raw in library_node_ids:
+            text = str(raw or "").strip()
+            if text:
+                node_ids.append(text)
+    if not node_ids:
+        return None, None
+    if len(node_ids) == 1:
+        return (
+            _resolve_allowed_project_ids(workspace, node_ids[0]),
+            _resolve_allowed_library_node_ids(workspace, node_ids[0]),
+        )
+    project_ids: set[str] = set()
+    library_ids: set[str] = set()
+    for node_id in node_ids:
+        try:
+            project_ids |= workspace.project_ids_for_library_subtree(node_id)
+            library_ids |= workspace.collect_library_subtree_node_ids(node_id)
+        except ValueError:
+            continue
+    return project_ids, library_ids
+
+
+def _search_kind_rank(kind: str) -> int:
+    return {
+        "library_node": 0,
+        "project": 1,
+        "space": 2,
+        "asset": 3,
+        "markdown_content": 4,
+        "pdf_content": 5,
+        "canvas_object": 6,
+    }.get(kind, 99)
+
+
+def _finalize_search_hits(hits: list[dict[str, Any]]) -> list[dict]:
+    hits.sort(
+        key=lambda item: (
+            -float(item.get("_score", 0.0)),
+            item.get("_kind_rank", 99),
+            item.get("project_id") or "",
+            item.get("id") or "",
+        )
+    )
+    return [{k: v for k, v in item.items() if not k.startswith("_")} for item in hits]
+
+
 def word_search_assets(
     workspace: Workspace,
     query: str,
@@ -775,6 +831,7 @@ def search_workspace(
     workspace: Workspace,
     query: str,
     library_node_id: Optional[str] = None,
+    library_node_ids: Optional[list[str]] = None,
     mode: str = "mixed",
     max_entries: int = 20,
     space_edge_cost: float = 1,
@@ -788,72 +845,83 @@ def search_workspace(
         return []
 
     fold_query = _fold(query)
-    allowed_project_ids = _resolve_allowed_project_ids(workspace, library_node_id)
-    allowed_library_node_ids = _resolve_allowed_library_node_ids(workspace, library_node_id)
+    allowed_project_ids, allowed_library_node_ids = _resolve_search_scope(
+        workspace,
+        library_node_id=library_node_id,
+        library_node_ids=library_node_ids,
+    )
+    if allowed_project_ids is not None and len(allowed_project_ids) == 0:
+        return []
+    if allowed_library_node_ids is not None and len(allowed_library_node_ids) == 0:
+        return []
 
-    library_results = []
-    project_results = []
-    space_results = []
-    asset_results = []
-    markdown_results = []
-    pdf_results = []
-    object_results = []
+    hits: list[dict[str, Any]] = []
 
     for node_id, node in workspace.library_nodes.items():
         if allowed_library_node_ids is not None and node_id not in allowed_library_node_ids:
             continue
         if _contains_fold(node.name, fold_query):
             detail = "Library page" if node.kind == "page" else "Library folder"
-            library_results.append({
+            hits.append({
                 "id": f"node_{node_id}",
                 "kind": "library_node",
                 "label": node.name,
                 "detail": detail,
-                "library_node_id": node_id
+                "library_node_id": node_id,
+                "_score": 90.0,
+                "_kind_rank": _search_kind_rank("library_node"),
             })
 
     for project_id, project in workspace.projects.items():
         if allowed_project_ids is not None and project_id not in allowed_project_ids:
             continue
         if _contains_fold(project.name, fold_query):
-            project_results.append({
+            hits.append({
                 "id": f"proj_{project_id}",
                 "kind": "project",
                 "label": project.name,
                 "detail": "Project",
-                "project_id": project_id
+                "project_id": project_id,
+                "_score": 85.0,
+                "_kind_rank": _search_kind_rank("project"),
             })
 
         for space_id, space in project.spaces.items():
             if _contains_fold(space.id, fold_query) or _contains_fold(space.kind, fold_query):
                 label = space.id if _contains_fold(space.id, fold_query) else space.kind
-                space_results.append({
+                hits.append({
                     "id": f"space_{space_id}",
                     "kind": "space",
                     "label": label,
                     "detail": f"{project.name} / {space.id}",
                     "project_id": project_id,
-                    "space_id": space_id
+                    "space_id": space_id,
+                    "_score": 65.0 if _contains_fold(space.id, fold_query) else 64.0,
+                    "_kind_rank": _search_kind_rank("space"),
                 })
 
         for asset_id, asset in project.assets.items():
             if asset.filename and _contains_fold(asset.filename, fold_query):
-                asset_results.append({
+                hits.append({
                     "id": f"asset_{asset_id}",
                     "kind": "asset",
                     "label": asset.filename,
                     "detail": f"{project.name} / {asset.kind} asset",
                     "project_id": project_id,
-                    "asset_id": asset_id
+                    "asset_id": asset_id,
+                    "_score": 80.0,
+                    "_kind_rank": _search_kind_rank("asset"),
                 })
             elif asset.kind and _contains_fold(asset.kind, fold_query):
-                asset_results.append({
+                hits.append({
                     "id": f"asset_{asset_id}",
                     "kind": "asset",
                     "label": asset.kind,
                     "detail": f"{project.name} / {asset.kind} asset",
                     "project_id": project_id,
-                    "asset_id": asset_id
+                    "asset_id": asset_id,
+                    "_score": 70.0,
+                    "_kind_rank": _search_kind_rank("asset"),
                 })
 
             if asset.kind == "markdown" and isinstance(asset.content, str):
@@ -862,13 +930,15 @@ def search_workspace(
                     snippet = _snippet_from_match(
                         plain_content, folded_content, fold_query, query, 10
                     )
-                    markdown_results.append({
+                    hits.append({
                         "id": f"md_{asset_id}",
                         "kind": "markdown_content",
                         "label": f"...{snippet}...",
                         "detail": "Markdown content match",
                         "project_id": project_id,
-                        "asset_id": asset_id
+                        "asset_id": asset_id,
+                        "_score": 50.0,
+                        "_kind_rank": _search_kind_rank("markdown_content"),
                     })
 
             if asset.kind == "pdf":
@@ -878,35 +948,31 @@ def search_workspace(
                     snippet = _snippet_from_match(
                         extracted_text, folded_pdf, fold_query, query, 20
                     )
-                    pdf_results.append({
+                    hits.append({
                         "id": f"pdf_{asset_id}",
                         "kind": "pdf_content",
                         "label": f"...{snippet}...",
                         "detail": "PDF content match",
                         "project_id": project_id,
-                        "asset_id": asset_id
+                        "asset_id": asset_id,
+                        "_score": 45.0,
+                        "_kind_rank": _search_kind_rank("pdf_content"),
                     })
 
         for obj_id, obj in project.objects.items():
             if _contains_fold(obj.kind, fold_query):
-                object_results.append({
+                hits.append({
                     "id": f"obj_{obj_id}",
                     "kind": "canvas_object",
                     "label": obj.kind,
                     "detail": f"{project.name} / {obj.id}",
                     "project_id": project_id,
-                    "object_id": obj_id
+                    "object_id": obj_id,
+                    "_score": 40.0,
+                    "_kind_rank": _search_kind_rank("canvas_object"),
                 })
 
-    return (
-        library_results
-        + project_results
-        + space_results
-        + asset_results
-        + markdown_results
-        + pdf_results
-        + object_results
-    )
+    return _finalize_search_hits(hits)
 
 
 def select_master_nodes_for_rag(

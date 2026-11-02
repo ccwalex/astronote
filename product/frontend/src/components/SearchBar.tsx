@@ -137,6 +137,14 @@ export function SearchBar({ workspace, onOpenProject, onSelectSpace }: SearchBar
   const [isPlainSearching, setIsPlainSearching] = useState(false);
   const plainSearchSeqRef = useRef(0);
   const plainSearchAbortRef = useRef<AbortController | null>(null);
+  const [plainSearchTimedOut, setPlainSearchTimedOut] = useState(false);
+
+  const serverSearchScope = (folderIds: string[]) => {
+    if (folderIds.length === 1) {
+      return { libraryNodeId: folderIds[0] };
+    }
+    return { libraryNodeIds: folderIds };
+  };
 
   const abortPlainSearch = () => {
     const controller = plainSearchAbortRef.current;
@@ -182,11 +190,13 @@ export function SearchBar({ workspace, onOpenProject, onSelectSpace }: SearchBar
       base = serverResults;
     } else if (serverResults === null && !plainSearchFailed) {
       base = [];
+    } else if (plainSearchTimedOut) {
+      base = [];
     } else {
       base = localResults;
     }
     return filterResultsByFolders(workspace, base, submittedFolderIds);
-  }, [workspace, submittedQuery, submittedFolderIds, serverResults, plainSearchFailed, localResults]);
+  }, [workspace, submittedQuery, submittedFolderIds, serverResults, plainSearchFailed, plainSearchTimedOut, localResults]);
 
   const ragResponse = useMemo<RAGResponseViewModel | null>(() => {
     if (searchMode !== 'rag' || !submittedQuery.trim()) {
@@ -275,23 +285,24 @@ export function SearchBar({ workspace, onOpenProject, onSelectSpace }: SearchBar
       setIsPlainSearching(true);
       setPlainSearchFailed(false);
       setPlainSearchError('');
-      // One retry before falling back: the fallback only scans pages already
-      // loaded in memory, so a transient server failure would silently miss
-      // pages that were never opened.
-      const attempt = (): Promise<BackendSearchResultRow[]> => {
-        const retry = new Promise<BackendSearchResultRow[]>((resolve, reject) => {
-          window.setTimeout(() => {
-            searchWorkspaceServer(normalized, { signal: controller.signal }).then(resolve, reject);
-          }, PLAIN_SEARCH_RETRY_DELAY_MS);
+      setPlainSearchTimedOut(false);
+      const scope = serverSearchScope(folderIds);
+      const runServerSearch = () =>
+        searchWorkspaceServer(normalized, { ...scope, signal: controller.signal });
+      const sleep = (ms: number) =>
+        new Promise<void>((resolve) => {
+          window.setTimeout(resolve, ms);
         });
-        return searchWorkspaceServer(normalized, { signal: controller.signal })
-          .catch((firstErr: unknown) => {
-            if (controller.signal.aborted) throw firstErr;
-            return retry;
-          });
-      };
       try {
-        const rows = await attempt();
+        let rows: BackendSearchResultRow[];
+        try {
+          rows = await runServerSearch();
+        } catch (firstErr: unknown) {
+          if (controller.signal.aborted) throw firstErr;
+          await sleep(PLAIN_SEARCH_RETRY_DELAY_MS);
+          if (controller.signal.aborted) throw firstErr;
+          rows = await runServerSearch();
+        }
         if (plainSearchSeqRef.current !== seq) return;
         setServerResults(convertBackendSearchResults(rows, workspace));
       } catch (err: any) {
@@ -299,8 +310,11 @@ export function SearchBar({ workspace, onOpenProject, onSelectSpace }: SearchBar
         if (err?.name === 'AbortError' && !timedOut) return;
         setServerResults(null);
         setPlainSearchFailed(true);
+        setPlainSearchTimedOut(timedOut);
         setPlainSearchError(
-          timedOut ? 'Search timed out.' : err?.message || 'Server search failed.'
+          timedOut
+            ? 'Search timed out.'
+            : err?.message || 'Server search failed.'
         );
       } finally {
         window.clearTimeout(timeoutId);
@@ -554,7 +568,9 @@ export function SearchBar({ workspace, onOpenProject, onSelectSpace }: SearchBar
             <>
               {plainSearchFailed && plainSearchError && (
                 <div style={{ padding: '0.4rem 0.5rem', fontSize: '0.75rem', color: '#a15d00', backgroundColor: '#fff7e6', borderBottom: '1px solid #eee' }}>
-                  Server search failed, showing cached-page results: {plainSearchError}
+                  {plainSearchTimedOut
+                    ? plainSearchError
+                    : `Server search failed, showing opened-page results only: ${plainSearchError}`}
                 </div>
               )}
               {results.length > 0 ? (
