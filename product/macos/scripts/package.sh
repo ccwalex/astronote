@@ -22,7 +22,8 @@ echo "==> AstroNote macOS package (v${MARKETING_VERSION}, build ${BUILD_VERSION}
 rm -rf "$APP_PATH"
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 
-INFO_PLIST="$RESOURCES_DIR/Info.plist"
+# Launch Services reads Contents/Info.plist (not Resources/) for ATS exceptions.
+INFO_PLIST="$CONTENTS/Info.plist"
 sed \
   -e "s/\$(MARKETING_VERSION)/${MARKETING_VERSION}/g" \
   -e "s/\$(BUILD_VERSION)/${BUILD_VERSION}/g" \
@@ -72,5 +73,5 @@ echo "  Zip:  $ZIP_PATH"
 echo "  DMG:  $DMG_PATH"
 echo ""
 echo "Install: drag AstroNote.app to Applications, open once, then connect with"
-echo "  Server: https://<your-machine>.<tailnet>:5173  (or http://100.x.x.x:5173)"
+echo "  Server: http://<your-machine>.<tailnet>:5173  (or http://100.x.x.x:5173)"
 echo "  Token:  mint on server — python3 code/astronote_token_cli.py mint --label Mac"

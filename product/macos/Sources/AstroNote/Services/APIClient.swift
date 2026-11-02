@@ -6,6 +6,7 @@ enum APIClientError: LocalizedError {
     case decodeFailed
     case staleSave(String)
     case timedOut
+    case insecureConnection
 
     var errorDescription: String? {
         switch self {
@@ -14,6 +15,8 @@ enum APIClientError: LocalizedError {
         case .decodeFailed: return "Could not decode server response."
         case .staleSave(let detail): return "Stale save: \(detail)"
         case .timedOut: return "Connection timed out. Check the origin and Tailscale route."
+        case .insecureConnection:
+            return "HTTP is blocked by App Transport Security. Rebuild the Mac app so Info.plist is at Contents/Info.plist, or use https://."
         }
     }
 }
@@ -96,6 +99,8 @@ final class APIClient {
             (data, response) = try await session.data(for: request)
         } catch let urlError as URLError where urlError.code == .timedOut {
             throw APIClientError.timedOut
+        } catch let urlError as URLError where urlError.code == .appTransportSecurityRequiresSecureConnection {
+            throw APIClientError.insecureConnection
         }
         guard let http = response as? HTTPURLResponse else { throw APIClientError.decodeFailed }
         if let issued = http.value(forHTTPHeaderField: "x-user-id"), !issued.isEmpty {

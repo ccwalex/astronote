@@ -15,7 +15,7 @@ struct ConnectionView: View {
             Text("Use your Tailscale server origin (port 5173) and a device token minted on the server.")
                 .foregroundStyle(.secondary)
 
-            TextField("Server origin (https://host:5173)", text: $origin)
+            TextField("Server origin (http://host:5173)", text: $origin)
                 .textFieldStyle(.roundedBorder)
                 .disabled(busy)
 
