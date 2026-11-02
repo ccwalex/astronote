@@ -33,7 +33,8 @@ printf 'APPL????' > "$CONTENTS/PkgInfo"
 
 build_arch() {
   local triple="$1"
-  swift build -c release --triple "$triple" 1>&2
+  # Avoid Mach-O __info_plist; packaged apps use Contents/Info.plist for ATS.
+  ASTRONOTE_EMBED_PLIST=0 swift build -c release --triple "$triple" 1>&2
   echo "$ROOT/.build/${triple}/release/${APP_NAME}"
 }
 
@@ -49,7 +50,9 @@ chmod +x "$MACOS_DIR/${APP_NAME}"
 
 xattr -cr "$APP_PATH" 2>/dev/null || true
 
-if codesign --force --deep --sign - "$APP_PATH" 2>/dev/null; then
+ENTITLEMENTS="$ROOT/Resources/AstroNote.entitlements"
+
+if codesign --force --deep --sign - --entitlements "$ENTITLEMENTS" "$APP_PATH" 2>/dev/null; then
   echo "==> Ad-hoc signed ${APP_NAME}.app"
 else
   echo "==> Warning: codesign failed; app may be blocked by Gatekeeper until signed."

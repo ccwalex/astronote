@@ -31,7 +31,7 @@ struct LibrarySidebar: View {
                 Button { showCreateFolder = true } label: { Label("Folder", systemImage: "folder.badge.plus") }
                 Button { showCreatePage = true } label: { Label("Page", systemImage: "doc.badge.plus") }
                 Button { appModel.disconnect(clearCredentials: false) } label: { Label("Disconnect", systemImage: "link.badge.plus") }
-                Button { appModel.disconnect(clearCredentials: true) } label: { Label("Clear keychain", systemImage: "key.slash") }
+                Button { appModel.disconnect(clearCredentials: true) } label: { Label("Clear saved login", systemImage: "key.slash") }
             }
         }
         .sheet(isPresented: $showCreateFolder) {

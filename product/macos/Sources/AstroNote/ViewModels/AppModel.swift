@@ -100,13 +100,21 @@ final class AppModel: ObservableObject {
     var heartbeatTask: Task<Void, Never>?
     var localHistory = LocalHistory()
     var assetTextCache: [String: String] = [:]
+    private var cachedStoredProfile: ConnectionProfile?
+    private var didAutoBootstrap = false
 
-    func bootstrap() async {
+    func bootstrap(auto: Bool = false) async {
+        if auto {
+            guard !didAutoBootstrap else { return }
+            didAutoBootstrap = true
+        }
         connection.errorMessage = nil
-        let profile = await Self.loadKeychainProfile()
+        let profile = await Self.loadStoredProfile()
+        cachedStoredProfile = profile
         guard let profile else { return }
-        connection.origin = profile.origin
+        connection.origin = APIClient.normalizeOrigin(profile.origin)
         connection.token = profile.apiToken
+        await LocalNetworkAccess.warmUpBeforeConnect(origin: connection.origin)
         await connectUsingStoredProfile()
     }
 
@@ -114,7 +122,18 @@ final class AppModel: ObservableObject {
         connection.origin = APIClient.normalizeOrigin(origin)
         connection.token = token.trimmingCharacters(in: .whitespacesAndNewlines)
         connection.errorMessage = nil
+        await LocalNetworkAccess.warmUpBeforeConnect(origin: connection.origin)
         await connectUsingStoredProfile()
+    }
+
+    func prepareLocalNetworkAccess(for origin: String) async -> String {
+        let normalized = APIClient.normalizeOrigin(origin)
+        guard !normalized.isEmpty else {
+            return "Enter a server URL first."
+        }
+        let message = await LocalNetworkAccess.prepare(origin: normalized)
+        statusMessage = message
+        return message
     }
 
     private func connectUsingStoredProfile() async {
@@ -122,13 +141,17 @@ final class AppModel: ObservableObject {
         isLoading = true
         defer { isLoading = false }
         do {
-            let storedUserId = await Self.loadKeychainProfile()?.userId
-            var profile = ConnectionProfile(origin: connection.origin, apiToken: connection.token, userId: storedUserId)
+            var profile = ConnectionProfile(
+                origin: connection.origin,
+                apiToken: connection.token,
+                userId: cachedStoredProfile?.userId
+            )
+            let normalized = APIClient.normalizeOrigin(profile.origin)
             let api = APIClient(origin: profile.origin, apiToken: profile.apiToken, userId: profile.userId)
             _ = try await api.createSession(label: "macos")
             try await api.testConnection()
             profile.userId = api.userId
-            try await Self.saveKeychainProfile(profile)
+            profile.origin = normalized
             client = api
             connection.isConnected = true
             connection.errorMessage = nil
@@ -137,23 +160,40 @@ final class AppModel: ObservableObject {
             baseRevision = nav.workspace_revision
             startRevisionPollLoop()
             startSessionHeartbeat()
-            statusMessage = "Connected to \(profile.origin)"
+            if api.origin == normalized {
+                statusMessage = "Connected to \(normalized)"
+            } else {
+                statusMessage = "Connected to \(normalized) via \(api.origin)"
+            }
+            cachedStoredProfile = profile
+            do {
+                try await Self.saveStoredProfile(profile)
+            } catch {
+                statusMessage = "Connected to \(profile.origin). Could not save credentials: \(error.localizedDescription)"
+            }
         } catch {
             connection.isConnected = false
             client = nil
-            connection.errorMessage = error.localizedDescription
+            let normalized = APIClient.normalizeOrigin(connection.origin)
+            let resolved = APIClient.resolveForNetworking(normalized)
+            var message = error.localizedDescription
+            if resolved != normalized {
+                message += " Resolved server URL: \(resolved)."
+            }
+            message += " App \(AppVersion.short) — server API from Terminal: curl -s -o /dev/null -w '%{http_code}' \(resolved)/"
+            connection.errorMessage = message
         }
     }
 
-    private static func loadKeychainProfile() async -> ConnectionProfile? {
+    private static func loadStoredProfile() async -> ConnectionProfile? {
         await Task.detached(priority: .userInitiated) {
-            KeychainStore.loadProfile()
+            CredentialStore.loadProfile()
         }.value
     }
 
-    private static func saveKeychainProfile(_ profile: ConnectionProfile) async throws {
+    private static func saveStoredProfile(_ profile: ConnectionProfile) async throws {
         try await Task.detached(priority: .userInitiated) {
-            try KeychainStore.saveProfile(profile)
+            try CredentialStore.saveProfile(profile)
         }.value
     }
 
@@ -171,8 +211,9 @@ final class AppModel: ObservableObject {
         workspace = nil
         hydratedProject = nil
         if clearCredentials {
+            cachedStoredProfile = nil
             Task.detached(priority: .userInitiated) {
-                try? KeychainStore.clearProfile()
+                CredentialStore.clearProfile()
             }
         }
     }

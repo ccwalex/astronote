@@ -152,10 +152,10 @@ struct RagConfigSheet: View {
 
     var body: some View {
         Form {
-            SecureField("RAG API key (stored in Keychain)", text: $apiKey)
+            SecureField("RAG API key (stored locally)", text: $apiKey)
             Button("Save") {
                 Task {
-                    try? KeychainStore.saveRagApiKey(apiKey)
+                    try? CredentialStore.saveRagApiKey(apiKey)
                     dismiss()
                 }
             }

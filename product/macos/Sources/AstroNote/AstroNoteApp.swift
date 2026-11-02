@@ -44,7 +44,7 @@ struct RootView: View {
             }
         }
         .task {
-            await appModel.bootstrap()
+            await appModel.bootstrap(auto: true)
         }
         .onAppear {
             KeyboardShortcutMonitor.install(handlers: .init(

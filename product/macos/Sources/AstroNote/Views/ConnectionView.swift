@@ -5,8 +5,10 @@ struct ConnectionView: View {
     @State private var origin: String = ""
     @State private var token: String = ""
     @State private var isTesting = false
+    @State private var isPreparingNetwork = false
+    @State private var localNetworkMessage: String?
 
-    private var busy: Bool { isTesting || appModel.isLoading }
+    private var busy: Bool { isTesting || isPreparingNetwork || appModel.isLoading }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -34,9 +36,46 @@ struct ConnectionView: View {
                 .disabled(origin.trimmingCharacters(in: .whitespaces).isEmpty || token.isEmpty || busy)
 
                 Button("Use Saved") {
-                    Task { await appModel.bootstrap() }
+                    Task { await appModel.bootstrap(auto: false) }
                 }
                 .disabled(busy)
+            }
+
+            HStack(spacing: 12) {
+                Button(isPreparingNetwork ? "Preparing…" : "Prepare Local Network Access") {
+                    Task {
+                        isPreparingNetwork = true
+                        localNetworkMessage = nil
+                        localNetworkMessage = await appModel.prepareLocalNetworkAccess(for: origin)
+                        isPreparingNetwork = false
+                    }
+                }
+                .disabled(origin.trimmingCharacters(in: .whitespaces).isEmpty || busy)
+
+                Button("Open Local Network Settings") {
+                    LocalNetworkAccess.openPrivacySettings()
+                }
+            }
+            Text("macOS shows a system alert the first time — click Allow. AstroNote then appears under Privacy → Local Network.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if isPreparingNetwork {
+                ProgressView("Requesting Local Network access…")
+                    .controlSize(.small)
+            }
+
+            if let localNetworkMessage {
+                Text(localNetworkMessage)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+
+            if let status = appModel.statusMessage, localNetworkMessage == nil {
+                Text(status)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
             }
 
             if busy {
@@ -55,15 +94,20 @@ struct ConnectionView: View {
                     .font(.system(.body, design: .monospaced))
                     .textSelection(.enabled)
             }
+
+            Text("AstroNote \(AppVersion.short)")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
         }
         .padding(32)
         .frame(maxWidth: 520)
-        .task {
-            if origin.isEmpty, let profile = await Task.detached(priority: .userInitiated, operation: {
-                KeychainStore.loadProfile()
-            }).value {
-                origin = profile.origin
-            }
+        .onAppear { syncOriginField() }
+        .onChange(of: appModel.connection.origin) { _, _ in syncOriginField() }
+    }
+
+    private func syncOriginField() {
+        if origin.isEmpty, !appModel.connection.origin.isEmpty {
+            origin = appModel.connection.origin
         }
     }
 }

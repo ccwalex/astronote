@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 enum APIClientError: LocalizedError {
     case invalidURL
@@ -7,6 +8,7 @@ enum APIClientError: LocalizedError {
     case staleSave(detail: StaleSaveDetail, raw: String)
     case timedOut
     case insecureConnection
+    case network(code: URLError.Code, detail: String)
 
     var errorDescription: String? {
         switch self {
@@ -14,9 +16,11 @@ enum APIClientError: LocalizedError {
         case .httpStatus(let code, let body): return "HTTP \(code): \(body)"
         case .decodeFailed: return "Could not decode server response."
         case .staleSave(_, let raw): return "Stale save: \(raw)"
-        case .timedOut: return "Connection timed out. Check the origin and Tailscale route."
+        case .timedOut: return "Connection timed out. Check Tailscale is connected and the server is reachable."
         case .insecureConnection:
-            return "HTTP is blocked by App Transport Security. \(AppTransportPolicy.connectionHelp)"
+            return "HTTP is blocked by App Transport Security. \(AppTransportPolicy.connectionHelp) \(AppTransportPolicy.bundleDiagnostic)"
+        case .network(let code, let detail):
+            return "Could not reach the server (\(code.rawValue) \(code)). \(detail)"
         }
     }
 }
@@ -28,7 +32,8 @@ final class APIClient {
     private let session: URLSession
 
     init(origin: String, apiToken: String, userId: String? = nil, session: URLSession? = nil) {
-        self.origin = origin.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "/$", with: "", options: .regularExpression)
+        let normalized = Self.normalizeOrigin(origin)
+        self.origin = Self.resolveForNetworking(normalized)
         self.apiToken = apiToken.trimmingCharacters(in: .whitespacesAndNewlines)
         self.userId = userId
         if let session {
@@ -97,10 +102,26 @@ final class APIClient {
         let response: URLResponse
         do {
             (data, response) = try await session.data(for: request)
-        } catch let urlError as URLError where urlError.code == .timedOut {
-            throw APIClientError.timedOut
-        } catch let urlError as URLError where urlError.code == .appTransportSecurityRequiresSecureConnection {
-            throw APIClientError.insecureConnection
+        } catch let urlError as URLError {
+            switch urlError.code {
+            case .timedOut:
+                throw APIClientError.timedOut
+            case .appTransportSecurityRequiresSecureConnection:
+                if AppTransportPolicy.allowsArbitraryLoads {
+                    throw APIClientError.network(
+                        code: urlError.code,
+                        detail: Self.localNetworkReachabilityHelp(origin: origin)
+                    )
+                }
+                throw APIClientError.insecureConnection
+            case .notConnectedToInternet, .networkConnectionLost, .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed:
+                throw APIClientError.network(code: urlError.code, detail: Self.localNetworkReachabilityHelp(origin: origin))
+            default:
+                throw APIClientError.network(
+                    code: urlError.code,
+                    detail: urlError.localizedDescription + " " + Self.localNetworkReachabilityHelp(origin: origin)
+                )
+            }
         }
         guard let http = response as? HTTPURLResponse else { throw APIClientError.decodeFailed }
         if let issued = http.value(forHTTPHeaderField: "x-user-id"), !issued.isEmpty {
@@ -359,7 +380,74 @@ extension APIClient {
         if value.hasPrefix("https://"), value.contains(":5173") {
             value = "http://" + value.dropFirst("https://".count)
         }
+        if value.hasPrefix("https://"), value.contains(".ts.net") {
+            value = "http://" + value.dropFirst("https://".count)
+        }
         while value.hasSuffix("/") { value.removeLast() }
         return value
+    }
+
+    /// URLSession to MagicDNS hostnames often fails on macOS even when `curl` works; use resolved IPv4.
+    static func resolveForNetworking(_ normalizedOrigin: String) -> String {
+        guard var components = URLComponents(string: normalizedOrigin),
+              let host = components.host,
+              !host.isEmpty
+        else { return normalizedOrigin }
+
+        if host.range(of: #"^\d+\.\d+\.\d+\.\d+$"#, options: .regularExpression) != nil {
+            return normalizedOrigin
+        }
+
+        let port = components.port ?? 5173
+        guard let ipv4 = resolveIPv4Host(host) else { return normalizedOrigin }
+        components.scheme = "http"
+        components.host = ipv4
+        components.port = port
+        return components.string ?? normalizedOrigin
+    }
+
+    static func resolveIPv4Host(_ host: String) -> String? {
+        var hints = addrinfo(
+            ai_flags: AI_ADDRCONFIG,
+            ai_family: AF_INET,
+            ai_socktype: SOCK_STREAM,
+            ai_protocol: 0,
+            ai_addrlen: 0,
+            ai_canonname: nil,
+            ai_addr: nil,
+            ai_next: nil
+        )
+        var result: UnsafeMutablePointer<addrinfo>?
+        let status = getaddrinfo(host, nil, &hints, &result)
+        defer {
+            if result != nil {
+                freeaddrinfo(result)
+            }
+        }
+        guard status == 0, let result else { return nil }
+        var buffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+        let err = getnameinfo(
+            result.pointee.ai_addr,
+            result.pointee.ai_addlen,
+            &buffer,
+            socklen_t(buffer.count),
+            nil,
+            0,
+            NI_NUMERICHOST
+        )
+        guard err == 0 else { return nil }
+        return String(cString: buffer)
+    }
+
+    fileprivate static func localNetworkReachabilityHelp(origin: String) -> String {
+        var hints = [
+            "Ensure Tailscale is connected on this Mac.",
+            "Click “Prepare Local Network Access” on the connection screen, approve the prompt, then connect again.",
+            "If the hostname fails, try the server’s Tailscale IP, e.g. http://100.125.87.90:5173",
+        ]
+        if origin.contains(".ts.net") {
+            hints.insert("MagicDNS can require Local Network permission even when ATS allows HTTP.", at: 0)
+        }
+        return hints.joined(separator: " ")
     }
 }
