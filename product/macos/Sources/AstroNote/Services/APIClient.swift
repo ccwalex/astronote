@@ -16,7 +16,7 @@ enum APIClientError: LocalizedError {
         case .staleSave(_, let raw): return "Stale save: \(raw)"
         case .timedOut: return "Connection timed out. Check the origin and Tailscale route."
         case .insecureConnection:
-            return "HTTP is blocked by App Transport Security. Rebuild the Mac app so Info.plist is at Contents/Info.plist, or use https://."
+            return "HTTP is blocked by App Transport Security. \(AppTransportPolicy.connectionHelp)"
         }
     }
 }
@@ -34,7 +34,7 @@ final class APIClient {
         if let session {
             self.session = session
         } else {
-            let config = URLSessionConfiguration.ephemeral
+            let config = URLSessionConfiguration.default
             config.timeoutIntervalForRequest = 20
             config.timeoutIntervalForResource = 30
             config.waitsForConnectivity = false
@@ -355,6 +355,10 @@ extension APIClient {
         var value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if value.isEmpty { return value }
         if !value.hasPrefix("http") { value = "http://" + value }
+        // Vite dev proxy on :5173 is plain HTTP; https:// often comes from docs typos.
+        if value.hasPrefix("https://"), value.contains(":5173") {
+            value = "http://" + value.dropFirst("https://".count)
+        }
         while value.hasSuffix("/") { value.removeLast() }
         return value
     }

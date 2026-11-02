@@ -12,7 +12,7 @@ struct ConnectionView: View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Connect to AstroNote")
                 .font(.largeTitle.bold())
-            Text("Use your Tailscale server origin (port 5173) and a device token minted on the server.")
+            Text("Use http:// (not https://) — e.g. http://alexws.tailfd28ba.ts.net:5173 — and a device token minted on the server.")
                 .foregroundStyle(.secondary)
 
             TextField("Server origin (http://host:5173)", text: $origin)

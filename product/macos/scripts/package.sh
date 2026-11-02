@@ -28,6 +28,8 @@ sed \
   -e "s/\$(MARKETING_VERSION)/${MARKETING_VERSION}/g" \
   -e "s/\$(BUILD_VERSION)/${BUILD_VERSION}/g" \
   "$ROOT/Resources/Info.plist" > "$INFO_PLIST"
+cp "$INFO_PLIST" "$RESOURCES_DIR/Info.plist"
+printf 'APPL????' > "$CONTENTS/PkgInfo"
 
 build_arch() {
   local triple="$1"
@@ -45,7 +47,9 @@ echo "==> Universal binary: $(lipo -info "$UNIVERSAL")"
 cp "$UNIVERSAL" "$MACOS_DIR/${APP_NAME}"
 chmod +x "$MACOS_DIR/${APP_NAME}"
 
-if codesign --force --sign - "$APP_PATH" 2>/dev/null; then
+xattr -cr "$APP_PATH" 2>/dev/null || true
+
+if codesign --force --deep --sign - "$APP_PATH" 2>/dev/null; then
   echo "==> Ad-hoc signed ${APP_NAME}.app"
 else
   echo "==> Warning: codesign failed; app may be blocked by Gatekeeper until signed."

@@ -6,7 +6,7 @@ Native SwiftUI client for the AstroNote workspace API.
 
 - macOS 14+
 - Swift 5.9+
-- AstroNote backend reachable at `https://<tailscale-host>:5173` (Vite proxy)
+- AstroNote backend reachable at `http://<tailscale-host>:5173` (Vite proxy)
 
 ## Mint a device token (on the server machine)
 
