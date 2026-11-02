@@ -42,7 +42,9 @@ final class AppModel: ObservableObject {
     private var assetTextCache: [String: String] = [:]
 
     func bootstrap() async {
-        guard let profile = KeychainStore.loadProfile() else { return }
+        connection.errorMessage = nil
+        let profile = await Self.loadKeychainProfile()
+        guard let profile else { return }
         connection.origin = profile.origin
         connection.token = profile.apiToken
         await connectUsingStoredProfile()
@@ -60,12 +62,13 @@ final class AppModel: ObservableObject {
         isLoading = true
         defer { isLoading = false }
         do {
-            var profile = ConnectionProfile(origin: connection.origin, apiToken: connection.token, userId: KeychainStore.loadProfile()?.userId)
+            let storedUserId = await Self.loadKeychainProfile()?.userId
+            var profile = ConnectionProfile(origin: connection.origin, apiToken: connection.token, userId: storedUserId)
             let api = APIClient(origin: profile.origin, apiToken: profile.apiToken, userId: profile.userId)
             _ = try await api.createSession(label: "macos")
             try await api.testConnection()
             profile.userId = api.userId
-            try KeychainStore.saveProfile(profile)
+            try await Self.saveKeychainProfile(profile)
             client = api
             connection.isConnected = true
             connection.errorMessage = nil
@@ -78,6 +81,18 @@ final class AppModel: ObservableObject {
             client = nil
             connection.errorMessage = error.localizedDescription
         }
+    }
+
+    private static func loadKeychainProfile() async -> ConnectionProfile? {
+        await Task.detached(priority: .userInitiated) {
+            KeychainStore.loadProfile()
+        }.value
+    }
+
+    private static func saveKeychainProfile(_ profile: ConnectionProfile) async throws {
+        try await Task.detached(priority: .userInitiated) {
+            try KeychainStore.saveProfile(profile)
+        }.value
     }
 
     func disconnect() {

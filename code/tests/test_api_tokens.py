@@ -7,6 +7,7 @@ import os
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from starlette.testclient import TestClient
@@ -22,7 +23,7 @@ from modules import api_tokens
 class ApiTokenModuleTests(unittest.TestCase):
     def setUp(self):
         self._tmpdir = tempfile.mkdtemp()
-        self._token_path = os.path.join(self._tmpdir, "auth_tokens.json")
+        self._token_path = Path(self._tmpdir) / "auth_tokens.json"
         api_tokens.set_store_path_for_tests(self._token_path)
         api_tokens.reset_store_for_tests()
 
@@ -51,7 +52,7 @@ class ApiTokenModuleTests(unittest.TestCase):
 class ApiTokenHttpTests(unittest.TestCase):
     def setUp(self):
         self._tmpdir = tempfile.mkdtemp()
-        self._token_path = os.path.join(self._tmpdir, "auth_tokens.json")
+        self._token_path = Path(self._tmpdir) / "auth_tokens.json"
         self._token_patch = patch.object(api_tokens, "AUTH_TOKENS_PATH", self._token_path)
         self._token_patch.start()
         api_tokens.reset_store_for_tests()
@@ -89,6 +90,9 @@ class ApiTokenHttpTests(unittest.TestCase):
         with patch.object(api_tokens, "is_loopback_scope", return_value=False):
             denied = self.client.get("/api/workspace/revision")
             self.assertEqual(denied.status_code, 401)
+            # Bearer WWW-Authenticate would send Cursor's Mac client into an
+            # OAuth "Loading API token" hang; device tokens are not OAuth.
+            self.assertNotIn("www-authenticate", {k.lower() for k in denied.headers.keys()})
             allowed = self.client.get(
                 "/api/workspace/revision",
                 headers={"Authorization": f"Bearer {token}"},

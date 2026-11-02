@@ -6,6 +6,8 @@ struct ConnectionView: View {
     @State private var token: String = ""
     @State private var isTesting = false
 
+    private var busy: Bool { isTesting || appModel.isLoading }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Connect to AstroNote")
@@ -15,23 +17,31 @@ struct ConnectionView: View {
 
             TextField("Server origin (https://host:5173)", text: $origin)
                 .textFieldStyle(.roundedBorder)
+                .disabled(busy)
 
             SecureField("API token (an_…)", text: $token)
                 .textFieldStyle(.roundedBorder)
+                .disabled(busy)
 
             HStack {
-                Button(isTesting ? "Connecting…" : "Connect") {
+                Button(busy ? "Connecting…" : "Connect") {
                     Task {
                         isTesting = true
                         await appModel.connect(origin: origin, token: token)
                         isTesting = false
                     }
                 }
-                .disabled(origin.trimmingCharacters(in: .whitespaces).isEmpty || token.isEmpty || isTesting)
+                .disabled(origin.trimmingCharacters(in: .whitespaces).isEmpty || token.isEmpty || busy)
 
                 Button("Use Saved") {
                     Task { await appModel.bootstrap() }
                 }
+                .disabled(busy)
+            }
+
+            if busy {
+                ProgressView("Connecting…")
+                    .controlSize(.small)
             }
 
             if let error = appModel.connection.errorMessage {
@@ -48,8 +58,10 @@ struct ConnectionView: View {
         }
         .padding(32)
         .frame(maxWidth: 520)
-        .onAppear {
-            if origin.isEmpty, let profile = KeychainStore.loadProfile() {
+        .task {
+            if origin.isEmpty, let profile = await Task.detached(priority: .userInitiated, operation: {
+                KeychainStore.loadProfile()
+            }).value {
                 origin = profile.origin
             }
         }

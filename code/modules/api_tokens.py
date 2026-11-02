@@ -229,4 +229,4 @@ def reset_store_for_tests() -> None:
 
 def set_store_path_for_tests(path: Path) -> None:
     global AUTH_TOKENS_PATH
-    AUTH_TOKENS_PATH = path
+    AUTH_TOKENS_PATH = Path(path)

@@ -274,6 +274,9 @@ class BearerAuthMiddleware:
         ok, _token_id = api_tokens.verify_bearer(auth)
         if not ok:
             body = json.dumps({"detail": "Authorization Bearer token required"}).encode("utf-8")
+            # Do not send WWW-Authenticate: Bearer. Cursor's macOS MCP client
+            # treats that as OAuth discovery and hangs on "Loading API token"
+            # because this server issues device tokens, not OAuth metadata.
             await send(
                 {
                     "type": "http.response.start",
@@ -281,7 +284,6 @@ class BearerAuthMiddleware:
                     "headers": [
                         (b"content-type", b"application/json"),
                         (b"content-length", str(len(body)).encode("ascii")),
-                        (b"www-authenticate", b'Bearer realm="astronote"'),
                     ],
                 }
             )

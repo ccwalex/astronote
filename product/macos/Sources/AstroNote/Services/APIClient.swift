@@ -5,6 +5,7 @@ enum APIClientError: LocalizedError {
     case httpStatus(Int, String)
     case decodeFailed
     case staleSave(String)
+    case timedOut
 
     var errorDescription: String? {
         switch self {
@@ -12,6 +13,7 @@ enum APIClientError: LocalizedError {
         case .httpStatus(let code, let body): return "HTTP \(code): \(body)"
         case .decodeFailed: return "Could not decode server response."
         case .staleSave(let detail): return "Stale save: \(detail)"
+        case .timedOut: return "Connection timed out. Check the origin and Tailscale route."
         }
     }
 }
@@ -20,11 +22,22 @@ final class APIClient {
     var origin: String
     var apiToken: String
     var userId: String?
+    private let session: URLSession
 
-    init(origin: String, apiToken: String, userId: String? = nil) {
+    init(origin: String, apiToken: String, userId: String? = nil, session: URLSession? = nil) {
         self.origin = origin.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "/$", with: "", options: .regularExpression)
         self.apiToken = apiToken.trimmingCharacters(in: .whitespacesAndNewlines)
         self.userId = userId
+        if let session {
+            self.session = session
+        } else {
+            let config = URLSessionConfiguration.ephemeral
+            config.timeoutIntervalForRequest = 20
+            config.timeoutIntervalForResource = 30
+            config.waitsForConnectivity = false
+            config.requestCachePolicy = .reloadIgnoringLocalCacheData
+            self.session = URLSession(configuration: config)
+        }
     }
 
     var apiBase: String { "\(origin)/api" }
@@ -70,13 +83,20 @@ final class APIClient {
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = 20
         var headers = sessionHeaders(includePageView: includePageView, pageWriteSession: pageWriteSession)
         if let contentType { headers["Content-Type"] = contentType }
         for (key, value) in extraHeaders { headers[key] = value }
         request.allHTTPHeaderFields = headers
         request.httpBody = body
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch let urlError as URLError where urlError.code == .timedOut {
+            throw APIClientError.timedOut
+        }
         guard let http = response as? HTTPURLResponse else { throw APIClientError.decodeFailed }
         if let issued = http.value(forHTTPHeaderField: "x-user-id"), !issued.isEmpty {
             userId = issued

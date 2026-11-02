@@ -1,4 +1,5 @@
 import Foundation
+import LocalAuthentication
 import Security
 
 struct ConnectionProfile: Equatable {
@@ -7,6 +8,9 @@ struct ConnectionProfile: Equatable {
     var userId: String?
 }
 
+/// Keychain access must never wait on the login/auth UI. Calling SecItem* on the
+/// main actor without `kSecUseAuthenticationUIFail` deadlocks the SwiftUI
+/// connection screen (spinner forever while the token prompt cannot appear).
 enum KeychainStore {
     private static let service = "app.astronote.macos"
     private static let originAccount = "server-origin"
@@ -41,14 +45,26 @@ enum KeychainStore {
         delete(account: originAccount)
     }
 
-    private static func read(account: String) -> String? {
-        let query: [String: Any] = [
+    private static func authenticationContext() -> LAContext {
+        let context = LAContext()
+        context.interactionNotAllowed = true
+        return context
+    }
+
+    private static func baseQuery(account: String) -> [String: Any] {
+        [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecUseDataProtectionKeychain as String: true,
+            kSecUseAuthenticationContext as String: authenticationContext(),
         ]
+    }
+
+    private static func read(account: String) -> String? {
+        var query = baseQuery(account: account)
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
         guard status == errSecSuccess, let data = item as? Data else { return nil }
@@ -58,23 +74,15 @@ enum KeychainStore {
     private static func write(account: String, value: String) throws {
         delete(account: account)
         guard let data = value.data(using: .utf8) else { throw KeychainError.encodingFailed }
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecValueData as String: data,
-        ]
+        var query = baseQuery(account: account)
+        query[kSecValueData as String] = data
+        query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         let status = SecItemAdd(query as CFDictionary, nil)
         guard status == errSecSuccess else { throw KeychainError.writeFailed(status) }
     }
 
     private static func delete(account: String) {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-        ]
-        SecItemDelete(query as CFDictionary)
+        SecItemDelete(baseQuery(account: account) as CFDictionary)
     }
 
     enum KeychainError: LocalizedError {
@@ -86,7 +94,9 @@ enum KeychainStore {
             switch self {
             case .invalidOrigin: return "Server origin is required."
             case .encodingFailed: return "Could not encode credential."
-            case .writeFailed(let status): return "Keychain write failed (\(status))."
+            case .writeFailed(let status):
+                let detail = SecCopyErrorMessageString(status, nil) as String? ?? "status \(status)"
+                return "Keychain write failed (\(detail))."
             }
         }
     }
