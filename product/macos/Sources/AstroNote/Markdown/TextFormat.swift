@@ -53,17 +53,78 @@ enum TextFormat {
         return """
         <!doctype html><html><head><meta charset=\"utf-8\"><style>
         body{margin:8px;font:14px -apple-system,sans-serif;background:\(bg);color:\(fg);}
-        #content{outline:none;min-height:120px;}
+        #content{outline:none;min-height:120px;line-height:1.45;}
+        blockquote{border-left:3px solid #888;margin:0;padding-left:10px;color:#888;}
+        pre{background:rgba(127,127,127,0.15);padding:8px;border-radius:4px;overflow-x:auto;}
+        code{font-family:ui-monospace,monospace;}
         </style></head><body>
         <div id=\"content\" contenteditable=\"\(editableAttr)\">\(body)</div>
         <script>
         const el=document.getElementById('content');
-        el.addEventListener('input',()=>window.webkit.messageHandlers.astro.postMessage(el.innerHTML));
+        const post=(payload)=>window.webkit.messageHandlers.astro.postMessage(JSON.stringify(payload));
+        const emitChange=()=>post({type:'change',html:el.innerHTML});
+        const queryState=(cmd)=>document.queryCommandState(cmd);
+        const queryValue=(cmd)=>document.queryCommandValue(cmd);
+        const readFormats=()=>({
+          bold:queryState('bold'),
+          italic:queryState('italic'),
+          strike:queryState('strikeThrough'),
+          bullet:queryState('insertUnorderedList'),
+          number:queryState('insertOrderedList'),
+          blockquote:queryState('formatBlock') && (queryValue('formatBlock')||'').toLowerCase().includes('blockquote'),
+          codeBlock:queryState('formatBlock') && (queryValue('formatBlock')||'').toLowerCase().includes('pre'),
+          styleValue:(()=>{
+            const block=(queryValue('formatBlock')||'').toLowerCase();
+            if(block.includes('h1'))return 'h1';
+            if(block.includes('h2'))return 'h2';
+            if(block.includes('h3'))return 'h3';
+            return 'normal';
+          })()
+        });
+        const caretRect=()=>{
+          const sel=window.getSelection();
+          if(!sel||sel.rangeCount===0)return null;
+          const range=sel.getRangeAt(0);
+          if(!el.contains(range.startContainer))return null;
+          const rects=range.getClientRects();
+          const rect=rects.length?rects[0]:range.getBoundingClientRect();
+          if(!rect||rect.width===0&&rect.height===0)return null;
+          return {x:rect.left,y:rect.top,width:rect.width,height:rect.height};
+        };
+        const emitSelection=()=>{
+          const rect=caretRect();
+          if(!rect){post({type:'selection',visible:false});return;}
+          post({type:'selection',visible:true,rect,formats:readFormats()});
+        };
+        el.addEventListener('input',()=>{emitChange();emitSelection();});
+        document.addEventListener('selectionchange',()=>{if(document.activeElement===el)emitSelection();});
+        window.astroFormat=(action)=>{
+          el.focus();
+          switch(action){
+            case 'normal':document.execCommand('formatBlock',false,'P');break;
+            case 'h1':case 'h2':case 'h3':document.execCommand('formatBlock',false,action.toUpperCase());break;
+            case 'bold':document.execCommand('bold');break;
+            case 'italic':document.execCommand('italic');break;
+            case 'strike':document.execCommand('strikeThrough');break;
+            case 'bullet':document.execCommand('insertUnorderedList');break;
+            case 'number':document.execCommand('insertOrderedList');break;
+            case 'quote':
+              if(queryState('formatBlock') && (queryValue('formatBlock')||'').toLowerCase().includes('blockquote')){
+                document.execCommand('formatBlock',false,'P');
+              }else{document.execCommand('formatBlock',false,'BLOCKQUOTE');}
+              break;
+            case 'code':document.execCommand('insertHTML',false,'<code>'+(window.getSelection()?.toString()||'code')+'</code>');break;
+            default:break;
+          }
+          emitChange();
+          emitSelection();
+        };
+        emitSelection();
         </script></body></html>
         """
     }
 }
 
 enum TextFormatAction: String {
-    case h1, h2, h3, bold, italic, strike, bullet, number, quote, code
+    case normal, h1, h2, h3, bold, italic, strike, bullet, number, quote, code
 }

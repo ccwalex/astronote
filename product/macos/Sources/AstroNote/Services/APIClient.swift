@@ -263,9 +263,13 @@ final class APIClient {
         return try JSONDecoder().decode(Workspace.self, from: responseData)
     }
 
-    func search(query: String, libraryNodeId: String?) async throws -> SearchResponse {
+    func search(query: String, libraryNodeId: String?, libraryNodeIds: [String]? = nil) async throws -> SearchResponse {
         var queryItems = [URLQueryItem(name: "q", value: query)]
-        if let libraryNodeId, !libraryNodeId.isEmpty {
+        if let libraryNodeIds, libraryNodeIds.count > 1 {
+            for id in libraryNodeIds where !id.isEmpty {
+                queryItems.append(URLQueryItem(name: "library_node_ids", value: id))
+            }
+        } else if let libraryNodeId, !libraryNodeId.isEmpty {
             queryItems.append(URLQueryItem(name: "library_node_id", value: libraryNodeId))
         }
         let (data, _) = try await request(path: "/search", query: queryItems)

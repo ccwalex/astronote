@@ -7,17 +7,31 @@ struct RagConfig: Codable, Equatable {
 }
 
 extension APIClient {
-    func searchBackendRAG(query: String, mode: String, libraryNodeId: String?, maxEntries: Int = 20) async throws -> RagSearchResponse {
+    func searchBackendRAG(
+        query: String,
+        mode: String,
+        libraryNodeId: String?,
+        libraryNodeIds: [String]? = nil,
+        maxEntries: Int = 20
+    ) async throws -> RagSearchResponse {
         var body: [String: Any] = ["query": query, "mode": mode, "max_entries": maxEntries]
-        if let libraryNodeId, !libraryNodeId.isEmpty { body["library_node_id"] = libraryNodeId }
+        if let libraryNodeIds, libraryNodeIds.count > 1 {
+            body["library_node_ids"] = libraryNodeIds
+        } else if let libraryNodeId, !libraryNodeId.isEmpty {
+            body["library_node_id"] = libraryNodeId
+        }
         let encoded = try JSONSerialization.data(withJSONObject: body)
         let (data, _) = try await request(path: "/rag/search", method: "POST", body: encoded, contentType: "application/json")
         return try JSONDecoder().decode(RagSearchResponse.self, from: data)
     }
 
-    func callBackendRAGLLM(query: String, libraryNodeId: String?) async throws -> String {
+    func callBackendRAGLLM(query: String, libraryNodeId: String?, libraryNodeIds: [String]? = nil) async throws -> String {
         var body: [String: Any] = ["query": query]
-        if let libraryNodeId { body["library_node_id"] = libraryNodeId }
+        if let libraryNodeIds, libraryNodeIds.count > 1 {
+            body["library_node_ids"] = libraryNodeIds
+        } else if let libraryNodeId, !libraryNodeId.isEmpty {
+            body["library_node_id"] = libraryNodeId
+        }
         let encoded = try JSONSerialization.data(withJSONObject: body)
         let (data, _) = try await request(path: "/rag/llm", method: "POST", body: encoded, contentType: "application/json")
         if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],

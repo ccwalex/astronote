@@ -18,6 +18,16 @@ struct ToolbarView: View {
                 }
                 Text(appModel.selectedTool.label).font(.caption).foregroundStyle(.secondary)
 
+                if appModel.selectedTool == .probe {
+                    Picker("Probe", selection: $appModel.probeMode) {
+                        ForEach(ProbeMode.allCases) { mode in
+                            Text(mode.label).tag(mode)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(maxWidth: 160)
+                }
+
                 Button("Undo") { appModel.undo() }.disabled(!appModel.localHistoryCanUndo)
                 Button("Redo") { appModel.redo() }.disabled(!appModel.localHistoryCanRedo)
                 Button("Commit") { Task { await appModel.commitCheckpoint() } }

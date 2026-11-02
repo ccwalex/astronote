@@ -3,6 +3,7 @@ import SwiftUI
 struct SearchBarView: View {
     @EnvironmentObject private var appModel: AppModel
     @State private var showRagConfig = false
+    @State private var showFolderScope = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -10,9 +11,15 @@ struct SearchBarView: View {
                 TextField("Search workspace…", text: $appModel.searchQuery)
                     .textFieldStyle(.roundedBorder)
                     .onSubmit { Task { await appModel.runSearch(mode: .plain) } }
+                Button("Folders") { showFolderScope = true }
                 Button("Search") { Task { await appModel.runSearch(mode: .plain) } }
                 Button("RAG") { Task { await appModel.runSearch(mode: .rag) } }
                 Button("Config") { showRagConfig = true }
+            }
+            if !appModel.searchFolderIds.isEmpty {
+                Text("Searching \(appModel.searchFolderIds.count) folder(s)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             RagSearchControlsView()
             SearchResultsPanel()
@@ -20,6 +27,70 @@ struct SearchBarView: View {
         .padding(12)
         .sheet(isPresented: $showRagConfig) {
             RagConfigSheet()
+        }
+        .sheet(isPresented: $showFolderScope) {
+            SearchFolderScopeSheet()
+        }
+    }
+}
+
+struct SearchFolderScopeSheet: View {
+    @EnvironmentObject private var appModel: AppModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var selected = Set<String>()
+
+    private var folders: [LibraryNode] {
+        guard let workspace = appModel.workspace else { return [] }
+        return workspace.library_nodes.values
+            .filter { $0.kind == "folder" }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Search folders").font(.headline)
+            if folders.isEmpty {
+                Text("No library folders available.").foregroundStyle(.secondary)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(folders) { folder in
+                            Toggle(isOn: Binding(
+                                get: { selected.contains(folder.id) },
+                                set: { isOn in
+                                    if isOn { selected.insert(folder.id) } else { selected.remove(folder.id) }
+                                }
+                            )) {
+                                VStack(alignment: .leading) {
+                                    Text(folder.name).fontWeight(.semibold)
+                                }
+                            }
+                        }
+                    }
+                }
+                .frame(maxHeight: 280)
+            }
+            HStack {
+                Button("All folders") {
+                    selected = Set(folders.map(\.id))
+                }
+                Spacer()
+                Button("Cancel", role: .cancel) { dismiss() }
+                Button("Apply") {
+                    appModel.searchFolderIds = folders.filter { selected.contains($0.id) }.map(\.id)
+                    dismiss()
+                }
+                .disabled(selected.isEmpty)
+            }
+        }
+        .padding()
+        .frame(width: 420)
+        .onAppear {
+            if appModel.searchFolderIds.isEmpty {
+                selected = Set(appModel.libraryFolderIds())
+            } else {
+                selected = Set(appModel.searchFolderIds)
+            }
         }
     }
 }

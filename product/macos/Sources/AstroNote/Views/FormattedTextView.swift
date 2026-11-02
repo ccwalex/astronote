@@ -1,14 +1,41 @@
 import SwiftUI
 import WebKit
 import AppKit
+import Combine
+
+struct ActiveTextFormats: Equatable {
+    var styleValue: String = "normal"
+    var bold = false
+    var italic = false
+    var strike = false
+    var bullet = false
+    var number = false
+    var blockquote = false
+    var codeBlock = false
+}
+
+@MainActor
+final class FormattedTextEditorController: ObservableObject {
+    weak var webView: WKWebView?
+    @Published var caretRect: CGRect = .zero
+    @Published var showsFloatingBar = false
+    @Published var activeFormats = ActiveTextFormats()
+
+    func apply(_ action: TextFormatAction) {
+        guard let webView else { return }
+        let escaped = action.rawValue.replacingOccurrences(of: "'", with: "\\'")
+        webView.evaluateJavaScript("window.astroFormat && window.astroFormat('\(escaped)')")
+    }
+}
 
 struct FormattedTextView: NSViewRepresentable {
     let markdown: String
     var isEditable: Bool
     var onMarkdownChange: (String) -> Void
+    @ObservedObject var controller: FormattedTextEditorController
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onMarkdownChange: onMarkdownChange)
+        Coordinator(onMarkdownChange: onMarkdownChange, controller: controller)
     }
 
     func makeNSView(context: Context) -> WKWebView {
@@ -28,12 +55,14 @@ struct FormattedTextView: NSViewRepresentable {
         if #available(macOS 13.3, *) {
             webView.isInspectable = false
         }
+        context.coordinator.attach(webView: webView)
         context.coordinator.load(markdown: markdown, editable: isEditable, in: webView)
         return webView
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
         context.coordinator.onMarkdownChange = onMarkdownChange
+        context.coordinator.attach(webView: webView)
         let interaction = isEditable
         webView.isHidden = false
         context.coordinator.setEditable(interaction, in: webView)
@@ -44,17 +73,31 @@ struct FormattedTextView: NSViewRepresentable {
 
     static func dismantleNSView(_ nsView: WKWebView, coordinator: Coordinator) {
         nsView.configuration.userContentController.removeScriptMessageHandler(forName: "astro")
+        coordinator.detach()
     }
 
     final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         static let processPool = WKProcessPool()
 
         var onMarkdownChange: (String) -> Void
+        let controller: FormattedTextEditorController
         var displayedMarkdown: String = "\u{0}"
         private var lastEmittedMarkdown: String?
 
-        init(onMarkdownChange: @escaping (String) -> Void) {
+        init(onMarkdownChange: @escaping (String) -> Void, controller: FormattedTextEditorController) {
             self.onMarkdownChange = onMarkdownChange
+            self.controller = controller
+        }
+
+        @MainActor
+        func attach(webView: WKWebView) {
+            controller.webView = webView
+        }
+
+        @MainActor
+        func detach() {
+            controller.webView = nil
+            controller.showsFloatingBar = false
         }
 
         func load(markdown: String, editable: Bool, in webView: WKWebView) {
@@ -71,12 +114,51 @@ struct FormattedTextView: NSViewRepresentable {
             webView.evaluateJavaScript("document.getElementById('content') && (document.getElementById('content').contentEditable = '\(flag)')")
         }
 
+        @MainActor
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-            guard message.name == "astro", let html = message.body as? String else { return }
-            let markdown = TextFormat.htmlToMarkdown(html)
-            lastEmittedMarkdown = markdown
-            displayedMarkdown = markdown
-            onMarkdownChange(markdown)
+            guard message.name == "astro" else { return }
+            if let jsonString = message.body as? String,
+               let data = jsonString.data(using: .utf8),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let type = json["type"] as? String {
+                if type == "change", let html = json["html"] as? String {
+                    let markdown = TextFormat.htmlToMarkdown(html)
+                    lastEmittedMarkdown = markdown
+                    displayedMarkdown = markdown
+                    onMarkdownChange(markdown)
+                    return
+                }
+                if type == "selection" {
+                    let visible = (json["visible"] as? Bool) ?? false
+                    controller.showsFloatingBar = visible
+                    if visible, let rect = json["rect"] as? [String: Any] {
+                        let x = rect["x"] as? Double ?? 0
+                        let y = rect["y"] as? Double ?? 0
+                        let width = rect["width"] as? Double ?? 0
+                        let height = rect["height"] as? Double ?? 0
+                        controller.caretRect = CGRect(x: x, y: y, width: width, height: height)
+                    }
+                    if let formats = json["formats"] as? [String: Any] {
+                        controller.activeFormats = ActiveTextFormats(
+                            styleValue: formats["styleValue"] as? String ?? "normal",
+                            bold: formats["bold"] as? Bool ?? false,
+                            italic: formats["italic"] as? Bool ?? false,
+                            strike: formats["strike"] as? Bool ?? false,
+                            bullet: formats["bullet"] as? Bool ?? false,
+                            number: formats["number"] as? Bool ?? false,
+                            blockquote: formats["blockquote"] as? Bool ?? false,
+                            codeBlock: formats["codeBlock"] as? Bool ?? false
+                        )
+                    }
+                    return
+                }
+            }
+            if let html = message.body as? String {
+                let markdown = TextFormat.htmlToMarkdown(html)
+                lastEmittedMarkdown = markdown
+                displayedMarkdown = markdown
+                onMarkdownChange(markdown)
+            }
         }
 
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {

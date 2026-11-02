@@ -168,10 +168,22 @@ extension AppModel {
     }
 
     func updateSelectedSpacePosition(dx: Double, dy: Double) {
-        guard var project = hydratedProject, let spaceId = selectedSpaceId else { return }
+        guard var project = hydratedProject, let spaceId = selectedSpaceId,
+              let space = project.spaces[spaceId] else { return }
+        setSpacePosition(spaceId: spaceId, x: space.x + dx, y: space.y + dy, project: &project)
+    }
+
+    func setSelectedSpacePosition(x: Double, y: Double, spaceId: String? = nil) {
+        guard var project = hydratedProject else { return }
+        let targetId = spaceId ?? selectedSpaceId
+        guard let targetId else { return }
+        setSpacePosition(spaceId: targetId, x: x, y: y, project: &project)
+    }
+
+    private func setSpacePosition(spaceId: String, x: Double, y: Double, project: inout Project) {
         guard var space = project.spaces[spaceId] else { return }
-        space.x += dx
-        space.y += dy
+        space.x = x
+        space.y = y
         project.spaces[spaceId] = space
         hydratedProject = project
         if var workspace, let projectId = selectedProjectId {
@@ -180,6 +192,56 @@ extension AppModel {
         }
         mutationSignals.editedSpaceIds.append(spaceId)
         markDirty(coalesceKey: UndoCoalesce.dragKey(spaceId: spaceId))
+        scheduleSave()
+    }
+
+    func runProbe(atX x: Double, y: Double) {
+        guard let project = hydratedProject else { return }
+        probeResults = ProbeCanvas.probe(project: project, x: x, y: y, mode: probeMode)
+        if let first = probeResults.first?.spaceId {
+            selectSpace(first)
+        }
+    }
+
+    func toggleProbeCheck(_ spaceId: String) {
+        if probeCheckedSpaceIds.contains(spaceId) {
+            probeCheckedSpaceIds.remove(spaceId)
+        } else {
+            probeCheckedSpaceIds.insert(spaceId)
+        }
+    }
+
+    func createStroke(on spaceId: String, points: [StrokePoint]) {
+        guard points.count >= 2, var project = hydratedProject, var space = project.spaces[spaceId] else { return }
+        guard !LayerSpaceKinds.hidden.contains(space.kind) else { return }
+        let objectId = CanvasStrokeFactory.makeObjectId()
+        let object = CanvasStrokeFactory.createStrokeObject(objectId: objectId, spaceId: spaceId, points: points)
+        project.objects[objectId] = object
+        space.object_ids.append(objectId)
+        project.spaces[spaceId] = space
+        commitProjectMutation(project, editedObjectIds: [objectId], editedSpaceIds: [spaceId], coalesceKey: "stroke:\(objectId)")
+    }
+
+    func eraseStroke(at spaceId: String, localX: Double, localY: Double) {
+        guard var project = hydratedProject else { return }
+        guard CanvasStrokeGeometry.eraseAtPoint(project: &project, spaceId: spaceId, localX: localX, localY: localY) else { return }
+        commitProjectMutation(project, coalesceKey: "erase-stroke:\(spaceId)")
+    }
+
+    private func commitProjectMutation(
+        _ project: Project,
+        editedObjectIds: [String] = [],
+        editedSpaceIds: [String] = [],
+        coalesceKey: String
+    ) {
+        hydratedProject = project
+        if var workspace, let projectId = selectedProjectId {
+            workspace.projects[projectId] = project
+            self.workspace = workspace
+        }
+        mutationSignals.editedObjectIds.append(contentsOf: editedObjectIds)
+        mutationSignals.editedSpaceIds.append(contentsOf: editedSpaceIds)
+        markDirty(coalesceKey: coalesceKey)
         scheduleSave()
     }
 

@@ -35,16 +35,6 @@ enum CanvasObjectFactory {
 
 enum StrokeEraserMode: String { case object, partial }
 
-enum ProbeCanvas {
-    static func probe(spaces: [Space], at point: CGPoint) -> [Space] {
-        spaces.filter { rect(for: $0).contains(point) }.sorted { $0.z > $1.z }
-    }
-
-    private static func rect(for space: Space) -> CGRect {
-        CGRect(x: space.x, y: space.y, width: space.width, height: space.height)
-    }
-}
-
 enum OverlapGrouping {
     static func getOverlapPrompt(count: Int) -> String {
         "Choose grouping for \(count) overlapping items"

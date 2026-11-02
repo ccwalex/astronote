@@ -82,10 +82,35 @@ struct ProbeResultsPanel: View {
     @EnvironmentObject private var appModel: AppModel
 
     var body: some View {
-        if appModel.selectedTool == .probe {
-            Text("Probe: tap canvas to inspect stacking order.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+        if appModel.selectedTool == .probe, !appModel.probeResults.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Probe results").font(.caption.weight(.semibold))
+                ForEach(appModel.probeResults) { result in
+                    HStack(alignment: .top, spacing: 8) {
+                        if let spaceId = result.spaceId {
+                            Toggle("", isOn: Binding(
+                                get: { appModel.probeCheckedSpaceIds.contains(spaceId) },
+                                set: { _ in appModel.toggleProbeCheck(spaceId) }
+                            ))
+                            .labelsHidden()
+                        }
+                        VStack(alignment: .leading, spacing: 2) {
+                            Button(result.label) {
+                                if let spaceId = result.spaceId {
+                                    appModel.selectSpace(spaceId)
+                                }
+                            }
+                            .buttonStyle(.link)
+                            Text(result.detail).font(.caption2).foregroundStyle(.secondary)
+                            Text(result.zPathLabel).font(.caption2.monospaced())
+                        }
+                    }
+                }
+            }
+            .padding(10)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+            .padding(12)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
         }
     }
 }

@@ -71,6 +71,10 @@ final class AppModel: ObservableObject {
     @Published var ragAnswer: String?
     @Published var ragLLMEnabled = false
     @Published var searchFolderScope: String?
+    @Published var searchFolderIds: [String] = []
+    @Published var probeResults: [ProbeResult] = []
+    @Published var probeMode: ProbeMode = .topHit
+    @Published var probeCheckedSpaceIds: Set<String> = []
     @Published var maintenanceEnabled = true
     @Published var embedStatusMessage: String?
     @Published var showAssetMigrationPrompt = false
@@ -403,21 +407,28 @@ final class AppModel: ObservableObject {
         let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return }
         do {
+            let scopeIds = resolvedSearchFolderIds()
             switch mode {
             case .plain:
-                let response = try await client.search(query: query, libraryNodeId: selectedLibraryNodeId)
+                let response = try await client.search(query: query, libraryNodeId: scopeIds.first, libraryNodeIds: scopeIds)
                 searchResults = response.search_results ?? []
                 ragMasterNodes = []
             case .rag:
+                let libraryNodeId = scopeIds.count == 1 ? scopeIds.first : nil
                 let response = try await client.searchBackendRAG(
                     query: query,
                     mode: ragMode,
-                    libraryNodeId: searchFolderScope ?? selectedLibraryNodeId
+                    libraryNodeId: libraryNodeId ?? searchFolderScope ?? selectedLibraryNodeId,
+                    libraryNodeIds: scopeIds.count > 1 ? scopeIds : nil
                 )
                 searchResults = response.search_results ?? []
                 ragMasterNodes = response.master_nodes ?? []
                 if ragLLMEnabled {
-                    ragAnswer = try await client.callBackendRAGLLM(query: query, libraryNodeId: searchFolderScope ?? selectedLibraryNodeId)
+                    ragAnswer = try await client.callBackendRAGLLM(
+                        query: query,
+                        libraryNodeId: libraryNodeId ?? searchFolderScope ?? selectedLibraryNodeId,
+                        libraryNodeIds: scopeIds.count > 1 ? scopeIds : nil
+                    )
                 } else {
                     ragAnswer = nil
                 }
@@ -428,6 +439,18 @@ final class AppModel: ObservableObject {
     }
 
     enum SearchMode { case plain, rag }
+
+    func resolvedSearchFolderIds() -> [String] {
+        if !searchFolderIds.isEmpty { return searchFolderIds }
+        if let searchFolderScope { return [searchFolderScope] }
+        if let selectedLibraryNodeId { return [selectedLibraryNodeId] }
+        return libraryFolderIds()
+    }
+
+    func libraryFolderIds() -> [String] {
+        guard let workspace else { return [] }
+        return workspace.library_nodes.values.filter { $0.kind == "folder" }.map(\.id).sorted()
+    }
 
     func openSearchHit(_ hit: SearchHit) async {
         if let projectId = hit.project_id {
