@@ -255,13 +255,23 @@ struct CanvasGestureOverlay: NSViewRepresentable {
                 guard let self, let host = self.hostView, let window = host.window else { return event }
                 let point = host.convert(event.locationInWindow, from: nil)
                 guard host.bounds.contains(point) else { return event }
-                if CanvasCamera.scrollTargetsEmbeddedSurface(at: event.locationInWindow, in: window) {
+                let commandZoom = event.modifierFlags.contains(.command)
+                if CanvasCamera.scrollShouldPassThrough(at: event.locationInWindow, in: window, commandZoom: commandZoom) {
                     return event
                 }
-                if event.modifierFlags.contains(.command) {
+                let panX: Double
+                let panY: Double
+                if event.hasPreciseScrollingDeltas {
+                    panX = event.scrollingDeltaX
+                    panY = event.scrollingDeltaY
+                } else {
+                    panX = Double(event.deltaX) * 16
+                    panY = Double(event.deltaY) * 16
+                }
+                if commandZoom {
                     self.onScroll?(event.deltaY, event.scrollingDeltaY, point)
                 } else {
-                    self.onPan?(event.scrollingDeltaX, event.scrollingDeltaY)
+                    self.onPan?(panX, panY)
                 }
                 return nil
             }

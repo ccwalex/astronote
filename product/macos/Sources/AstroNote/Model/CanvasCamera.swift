@@ -25,8 +25,17 @@ struct CanvasCamera: Equatable {
     }
 
     mutating func pan(by deltaX: Double, deltaY: Double) {
-        offsetX += deltaX
-        offsetY += deltaY
+        offsetX -= deltaX
+        offsetY -= deltaY
+    }
+
+    mutating func clampOffset(viewport: CGSize, contentSize: CGSize) {
+        let scaledW = contentSize.width * scale
+        let scaledH = contentSize.height * scale
+        let minX = min(0, viewport.width - scaledW)
+        let minY = min(0, viewport.height - scaledH)
+        offsetX = min(0, max(minX, offsetX))
+        offsetY = min(0, max(minY, offsetY))
     }
 
     static func scaleFromWheelDelta(lineDelta: Double, scrollingDelta: Double) -> Double {
@@ -34,11 +43,11 @@ struct CanvasCamera: Equatable {
         return pow(1.01, -delta)
     }
 
-    static func scrollTargetsEmbeddedSurface(at windowPoint: NSPoint, in window: NSWindow?) -> Bool {
+    static func scrollShouldPassThrough(at windowPoint: NSPoint, in window: NSWindow?, commandZoom: Bool) -> Bool {
+        _ = commandZoom
         guard let window, let hit = window.contentView?.hitTest(windowPoint) else { return false }
         var view: NSView? = hit
         while let current = view {
-            if current is WKWebView { return true }
             if current is PDFView { return true }
             view = current.superview
         }

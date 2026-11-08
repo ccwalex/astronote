@@ -33,8 +33,6 @@ struct CanvasView: View {
                     .frame(width: geo.size.width, height: geo.size.height, alignment: .bottomLeading)
                 CanvasTextFormatToolbar(project: project, viewport: geo.size)
             }
-            .compositingGroup()
-            .clipped()
         }
     }
 
@@ -50,8 +48,9 @@ struct CanvasView: View {
 
         if appModel.selectedTool != .pointer {
             base.gesture(canvasToolGesture(in: viewport))
+                .clipped()
         } else {
-            base
+            base.clipped()
         }
     }
 
@@ -94,6 +93,7 @@ struct CanvasView: View {
         commandZoom: Bool
     ) {
         var camera = appModel.canvasCamera
+        let contentSize = canvasSize
         if commandZoom {
             let anchor = zoomAnchor ?? CGPoint(x: viewport.width / 2, y: viewport.height / 2)
             camera.zoomAround(
@@ -103,6 +103,7 @@ struct CanvasView: View {
         } else {
             camera.pan(by: deltaX, deltaY: deltaY)
         }
+        camera.clampOffset(viewport: viewport, contentSize: contentSize)
         appModel.canvasCamera = camera
     }
 

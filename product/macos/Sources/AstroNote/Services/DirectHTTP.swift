@@ -207,7 +207,7 @@ enum DirectHTTP {
                     }
                     guard let chunk, !chunk.isEmpty else { break }
                     buffer.append(chunk)
-                    if buffer.count > 32 * 1024 * 1024 {
+                    if buffer.count > 128 * 1024 * 1024 {
                         throw TransportError(message: "HTTP response too large.")
                     }
                     if httpMessageComplete(buffer) { break }

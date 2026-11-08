@@ -26,6 +26,11 @@ struct LibrarySidebar: View {
             }
         }
         .navigationTitle("Library")
+        .onChange(of: appModel.selectedLibraryNodeId) { _, nodeId in
+            guard let nodeId, let workspace = appModel.workspace,
+                  let node = workspace.library_nodes[nodeId], node.kind == "page" else { return }
+            Task { await appModel.openLibraryNode(node) }
+        }
         .toolbar {
             ToolbarItemGroup {
                 Button { showCreateFolder = true } label: {

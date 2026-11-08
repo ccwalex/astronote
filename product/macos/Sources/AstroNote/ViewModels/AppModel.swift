@@ -578,7 +578,8 @@ final class AppModel: ObservableObject {
                 let (refreshed, project) = try await WorkspaceServerSync.refreshWorkspaceFromServer(
                     client: client,
                     current: workspace,
-                    projectId: selectedProjectId
+                    projectId: selectedProjectId,
+                    libraryNodeId: selectedLibraryNodeId
                 )
                 workspace = refreshed
                 baseRevision = refreshed.workspace_revision
@@ -613,7 +614,8 @@ final class AppModel: ObservableObject {
             let (refreshed, project) = try await WorkspaceServerSync.refreshWorkspaceFromServer(
                 client: client,
                 current: workspace,
-                projectId: selectedProjectId
+                projectId: selectedProjectId,
+                libraryNodeId: selectedLibraryNodeId
             )
             workspace = refreshed
             baseRevision = refreshed.workspace_revision
