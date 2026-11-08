@@ -3,6 +3,12 @@ import WebKit
 import AppKit
 import Combine
 
+struct TextFormatOverlayState: Equatable {
+    var spaceId: String
+    var caretRectInBody: CGRect
+    var activeFormats: ActiveTextFormats
+}
+
 struct ActiveTextFormats: Equatable {
     var styleValue: String = "normal"
     var bold = false
@@ -81,11 +87,13 @@ struct FormattedTextView: NSViewRepresentable {
     let markdown: String
     var isEditable: Bool
     var documentDark: Bool
+    let spaceId: String
     var onMarkdownChange: (String) -> Void
     @ObservedObject var controller: FormattedTextEditorController
+    var appModel: AppModel?
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onMarkdownChange: onMarkdownChange, controller: controller)
+        Coordinator(onMarkdownChange: onMarkdownChange, controller: controller, spaceId: spaceId, appModel: appModel)
     }
 
     func makeNSView(context: Context) -> WKWebView {
@@ -146,15 +154,19 @@ struct FormattedTextView: NSViewRepresentable {
 
         var onMarkdownChange: (String) -> Void
         let controller: FormattedTextEditorController
+        let spaceId: String
+        weak var appModel: AppModel?
         var displayedMarkdown: String = "\u{0}"
         var lastEmittedMarkdown: String?
         var documentDark = false
         var loadedDark = false
         var pendingEditable = false
 
-        init(onMarkdownChange: @escaping (String) -> Void, controller: FormattedTextEditorController) {
+        init(onMarkdownChange: @escaping (String) -> Void, controller: FormattedTextEditorController, spaceId: String, appModel: AppModel?) {
             self.onMarkdownChange = onMarkdownChange
             self.controller = controller
+            self.spaceId = spaceId
+            self.appModel = appModel
         }
 
         @MainActor
@@ -206,25 +218,30 @@ struct FormattedTextView: NSViewRepresentable {
                 if type == "selection" {
                     let visible = (json["visible"] as? Bool) ?? false
                     controller.showsFloatingBar = visible
-                    if visible, let rect = json["rect"] as? [String: Any] {
+                    var caret = CGRect.zero
+                    if let rect = json["rect"] as? [String: Any] {
                         let x = rect["x"] as? Double ?? 0
                         let y = rect["y"] as? Double ?? 0
                         let width = rect["width"] as? Double ?? 0
                         let height = rect["height"] as? Double ?? 0
-                        controller.caretRect = CGRect(x: x, y: y, width: width, height: height)
+                        caret = CGRect(x: x, y: y, width: width, height: height)
+                        controller.caretRect = caret
                     }
-                    if let formats = json["formats"] as? [String: Any] {
-                        controller.activeFormats = ActiveTextFormats(
-                            styleValue: formats["styleValue"] as? String ?? "normal",
-                            bold: formats["bold"] as? Bool ?? false,
-                            italic: formats["italic"] as? Bool ?? false,
-                            strike: formats["strike"] as? Bool ?? false,
-                            bullet: formats["bullet"] as? Bool ?? false,
-                            number: formats["number"] as? Bool ?? false,
-                            blockquote: formats["blockquote"] as? Bool ?? false,
-                            codeBlock: formats["codeBlock"] as? Bool ?? false
+                    var formats = controller.activeFormats
+                    if let payload = json["formats"] as? [String: Any] {
+                        formats = ActiveTextFormats(
+                            styleValue: payload["styleValue"] as? String ?? "normal",
+                            bold: payload["bold"] as? Bool ?? false,
+                            italic: payload["italic"] as? Bool ?? false,
+                            strike: payload["strike"] as? Bool ?? false,
+                            bullet: payload["bullet"] as? Bool ?? false,
+                            number: payload["number"] as? Bool ?? false,
+                            blockquote: payload["blockquote"] as? Bool ?? false,
+                            codeBlock: payload["codeBlock"] as? Bool ?? false
                         )
+                        controller.activeFormats = formats
                     }
+                    appModel?.updateTextFormatOverlay(spaceId: spaceId, visible: visible, caretRect: caret, formats: formats)
                     return
                 }
             }

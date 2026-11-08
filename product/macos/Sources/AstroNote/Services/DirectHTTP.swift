@@ -10,36 +10,78 @@ enum DirectHTTP {
     }
 
     static func data(for request: URLRequest, timeout: TimeInterval = 20) async throws -> (Data, HTTPURLResponse) {
-        guard let url = request.url,
-              let host = url.host,
-              !host.isEmpty
-        else { throw TransportError(message: "Invalid URL.") }
+        try await ConnectionPool.shared.data(for: request, timeout: timeout)
+    }
 
-        let port = UInt16(url.port ?? ((url.scheme == "https") ? 443 : 80))
-        let tcpHost = APIClient.resolveIPv4Host(host) ?? host
-        guard let nwPort = NWEndpoint.Port(rawValue: port) else {
-            throw TransportError(message: "Invalid port.")
-        }
+    // MARK: - Connection pool
 
-        let connection = NWConnection(
-            to: NWEndpoint.hostPort(host: NWEndpoint.Host(tcpHost), port: nwPort),
-            using: .tcp
-        )
+    private actor ConnectionPool {
+        static let shared = ConnectionPool()
 
-        do {
-            try await ready(connection, timeout: timeout)
-            let wire = try encode(request, host: host, port: port)
-            try await send(connection, data: wire)
-            let raw = try await receiveHTTP(connection, timeout: timeout)
-            connection.cancel()
-            return try parseHTTP(raw, url: url)
-        } catch {
-            connection.cancel()
-            throw error
+        private var connections: [String: NWConnection] = [:]
+
+        func data(for request: URLRequest, timeout: TimeInterval) async throws -> (Data, HTTPURLResponse) {
+            guard let url = request.url,
+                  let host = url.host,
+                  !host.isEmpty
+            else { throw TransportError(message: "Invalid URL.") }
+
+            let port = UInt16(url.port ?? ((url.scheme == "https") ? 443 : 80))
+            let tcpHost = APIClient.resolveIPv4Host(host) ?? host
+            guard let nwPort = NWEndpoint.Port(rawValue: port) else {
+                throw TransportError(message: "Invalid port.")
+            }
+
+            let key = "\(tcpHost):\(port)"
+            let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(tcpHost), port: nwPort)
+
+            var lastError: Error?
+            for attempt in 0..<2 {
+                let connection: NWConnection
+                if attempt == 0, let existing = connections[key], case .ready = existing.state {
+                    connection = existing
+                } else {
+                    if let stale = connections[key] {
+                        stale.cancel()
+                        connections[key] = nil
+                    }
+                    let fresh = NWConnection(to: endpoint, using: .tcp)
+                    do {
+                        try await DirectHTTP.ready(fresh, timeout: timeout)
+                        connections[key] = fresh
+                        connection = fresh
+                    } catch {
+                        lastError = error
+                        continue
+                    }
+                }
+
+                do {
+                    let wire = try DirectHTTP.encode(request, host: host, port: port, keepAlive: true)
+                    try await DirectHTTP.send(connection, data: wire)
+                    let raw = try await DirectHTTP.receiveHTTP(connection, timeout: timeout)
+                    let (body, response) = try DirectHTTP.parseHTTP(raw, url: url)
+                    if DirectHTTP.serverWantsClose(response) {
+                        connection.cancel()
+                        connections[key] = nil
+                    }
+                    return (body, response)
+                } catch {
+                    connection.cancel()
+                    connections[key] = nil
+                    lastError = error
+                }
+            }
+            throw lastError ?? TransportError(message: "HTTP request failed.")
         }
     }
 
-    private static func ready(_ connection: NWConnection, timeout: TimeInterval) async throws {
+    static func serverWantsClose(_ response: HTTPURLResponse) -> Bool {
+        let conn = (response.value(forHTTPHeaderField: "Connection") ?? "").lowercased()
+        return conn.contains("close")
+    }
+
+    static func ready(_ connection: NWConnection, timeout: TimeInterval) async throws {
         try await withThrowingTaskGroup(of: Void.self) { group in
             group.addTask {
                 try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
@@ -77,16 +119,16 @@ enum DirectHTTP {
         }
     }
 
-    private static func encode(_ request: URLRequest, host: String, port: UInt16) throws -> Data {
+    static func encode(_ request: URLRequest, host: String, port: UInt16, keepAlive: Bool) throws -> Data {
         let method = request.httpMethod ?? "GET"
         let path = request.url?.path.isEmpty == false ? (request.url?.path ?? "/") : "/"
         let query = request.url?.query.map { "?\($0)" } ?? ""
         var header = "\(method) \(path)\(query) HTTP/1.1\r\n"
         header += "Host: \(host):\(port)\r\n"
-        header += "Connection: close\r\n"
+        header += keepAlive ? "Connection: keep-alive\r\n" : "Connection: close\r\n"
         header += "Accept: */*\r\n"
         if let fields = request.allHTTPHeaderFields {
-            for (key, value) in fields where key.lowercased() != "host" {
+            for (key, value) in fields where key.lowercased() != "host" && key.lowercased() != "connection" {
                 header += "\(key): \(value)\r\n"
             }
         }
@@ -100,7 +142,7 @@ enum DirectHTTP {
         return data
     }
 
-    private static func send(_ connection: NWConnection, data: Data) async throws {
+    static func send(_ connection: NWConnection, data: Data) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             connection.send(content: data, completion: .contentProcessed { error in
                 if let error {
@@ -114,7 +156,6 @@ enum DirectHTTP {
 
     private static func isStreamEOF(_ error: Error) -> Bool {
         if let nw = error as? NWError, case .posix(let code) = nw {
-            // 96 = ENODATA on Darwin STREAMS; 91 = ENOMSG. Both show up as normal TCP EOF.
             return code.rawValue == 96 || code == .ENOMSG
         }
         let ns = error as NSError
@@ -142,7 +183,7 @@ enum DirectHTTP {
         return false
     }
 
-    private static func receiveHTTP(_ connection: NWConnection, timeout: TimeInterval) async throws -> Data {
+    static func receiveHTTP(_ connection: NWConnection, timeout: TimeInterval) async throws -> Data {
         try await withThrowingTaskGroup(of: Data.self) { group in
             group.addTask {
                 var buffer = Data()
@@ -186,7 +227,7 @@ enum DirectHTTP {
         }
     }
 
-    private static func parseHTTP(_ raw: Data, url: URL) throws -> (Data, HTTPURLResponse) {
+    static func parseHTTP(_ raw: Data, url: URL) throws -> (Data, HTTPURLResponse) {
         guard let headerEnd = raw.range(of: Data("\r\n\r\n".utf8)) else {
             throw TransportError(message: "Incomplete HTTP headers.")
         }

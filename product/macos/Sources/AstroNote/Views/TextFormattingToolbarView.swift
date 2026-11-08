@@ -5,7 +5,7 @@ struct TextFormattingToolbarView: View {
     let onAction: (TextFormatAction) -> Void
 
     var body: some View {
-        HStack(spacing: 6) {
+        FlowLayout(horizontalSpacing: 6, verticalSpacing: 6) {
             Picker("Style", selection: Binding(
                 get: { activeFormats.styleValue },
                 set: { value in
@@ -68,33 +68,24 @@ struct TextSpaceArea: View {
 
     var body: some View {
         GeometryReader { geo in
-            ZStack(alignment: .topLeading) {
-                FormattedTextView(
-                    markdown: text,
-                    isEditable: isEditing,
-                    documentDark: appModel.appearance == .dark,
-                    onMarkdownChange: { newValue in
-                        guard loaded, newValue != text else { return }
-                        text = newValue
-                        guard let assetId = space.reference_asset_id ?? space.asset_ids.first else { return }
-                        appModel.updateTextAsset(assetId: assetId, markdown: newValue)
-                        textEditor.measureContentHeight { height in
-                            let padded = max(Double(geo.size.height), height + 16)
-                            appModel.updateSelectedTextHeight(padded)
-                        }
-                    },
-                    controller: textEditor
-                )
-
-                if isEditing, textEditor.showsFloatingBar {
-                    TextFormattingToolbarView(activeFormats: textEditor.activeFormats) { action in
-                        textEditor.apply(action)
+            FormattedTextView(
+                markdown: text,
+                isEditable: isEditing,
+                documentDark: appModel.appearance == .dark,
+                spaceId: space.id,
+                onMarkdownChange: { newValue in
+                    guard loaded, newValue != text else { return }
+                    text = newValue
+                    guard let assetId = space.reference_asset_id ?? space.asset_ids.first else { return }
+                    appModel.updateTextAsset(assetId: assetId, markdown: newValue)
+                    textEditor.measureContentHeight { height in
+                        let padded = max(Double(geo.size.height), height + 16)
+                        appModel.updateSelectedTextHeight(padded)
                     }
-                    .fixedSize()
-                    .offset(floatingBarOffset(in: geo.size))
-                    .zIndex(2)
-                }
-            }
+                },
+                controller: textEditor,
+                appModel: appModel
+            )
         }
         .task(id: space.id) {
             loaded = false
@@ -106,9 +97,16 @@ struct TextSpaceArea: View {
         .onChange(of: isEditing) { _, editing in
             if editing {
                 beginEditing(at: nil)
-            } else if appModel.selectedSpaceId != space.id {
-                EditableKeyboardTarget.textEditingActive = false
+                appModel.setActiveTextFormatEditor(textEditor, spaceId: space.id)
+            } else {
+                appModel.setActiveTextFormatEditor(nil, spaceId: space.id)
+                if appModel.selectedSpaceId != space.id {
+                    EditableKeyboardTarget.textEditingActive = false
+                }
             }
+        }
+        .onDisappear {
+            appModel.setActiveTextFormatEditor(nil, spaceId: space.id)
         }
     }
 
@@ -116,12 +114,5 @@ struct TextSpaceArea: View {
         appModel.selectSpace(space.id)
         EditableKeyboardTarget.textEditingActive = true
         textEditor.focusEditor(at: point)
-    }
-
-    private func floatingBarOffset(in size: CGSize) -> CGSize {
-        let rect = textEditor.caretRect
-        let barY = min(rect.maxY + 6, max(0, size.height - 44))
-        let barX = min(max(0, rect.minX), max(0, size.width - 320))
-        return CGSize(width: barX, height: barY)
     }
 }

@@ -38,6 +38,7 @@ struct CanvasView: View {
                 .frame(width: geo.size.width, height: geo.size.height)
                 ProbeResultsPanel()
                     .frame(width: geo.size.width, height: geo.size.height, alignment: .bottomLeading)
+                CanvasTextFormatToolbar(project: project, viewport: geo.size)
             }
         }
     }
@@ -376,14 +377,8 @@ struct RemoteAssetImage: View {
         }
         .task(id: space.id) {
             guard hasAsset else { return }
-            guard let client = appModel.client,
-                  let assetId = space.reference_asset_id ?? space.asset_ids.first else { return }
-            if let inline = project.assets[assetId]?.content, inline.hasPrefix("data:"),
-               let data = DataURI.decode(inline) {
-                image = NSImage(data: data)
-                return
-            }
-            if let data = try? await client.fetchAssetData(assetId: assetId) {
+            guard let assetId = space.reference_asset_id ?? space.asset_ids.first else { return }
+            if let data = await appModel.assetData(for: assetId) {
                 image = NSImage(data: data)
             }
         }
@@ -462,14 +457,8 @@ struct RemotePDFView: View {
         }
         .task(id: space.id) {
             guard hasAsset else { return }
-            guard let client = appModel.client,
-                  let assetId = space.reference_asset_id ?? space.asset_ids.first else { return }
-            if let inline = project.assets[assetId]?.content, inline.hasPrefix("data:"),
-               let data = DataURI.decode(inline) {
-                document = PDFDocument(data: data)
-                return
-            }
-            if let data = try? await client.fetchAssetData(assetId: assetId) {
+            guard let assetId = space.reference_asset_id ?? space.asset_ids.first else { return }
+            if let data = await appModel.assetData(for: assetId) {
                 document = PDFDocument(data: data)
             }
         }
@@ -553,6 +542,51 @@ private extension Color {
         let g = Int(hex[hex.index(start, offsetBy: 2)..<hex.index(start, offsetBy: 4)], radix: 16) ?? 0
         let b = Int(hex[hex.index(start, offsetBy: 4)..<hex.index(start, offsetBy: 6)], radix: 16) ?? 0
         self.init(red: Double(r) / 255, green: Double(g) / 255, blue: Double(b) / 255)
+    }
+}
+
+private struct CanvasTextFormatToolbar: View {
+    @EnvironmentObject private var appModel: AppModel
+    let project: Project
+    let viewport: CGSize
+    private let textSpaceHeaderHeight: CGFloat = 28
+
+    var body: some View {
+        if let overlay = appModel.textFormatOverlay,
+           appModel.selectedSpaceId == overlay.spaceId,
+           appModel.canWritePage,
+           let space = project.spaces[overlay.spaceId] {
+            let placement = toolbarPlacement(overlay: overlay, space: space)
+            TextFormattingToolbarView(activeFormats: overlay.activeFormats) { action in
+                appModel.activeTextFormatEditor?.apply(action)
+            }
+            .frame(maxWidth: placement.maxWidth, alignment: .leading)
+            .fixedSize(horizontal: false, vertical: true)
+            .offset(x: placement.x, y: placement.y)
+            .zIndex(50)
+        }
+    }
+
+    private struct Placement {
+        var x: CGFloat
+        var y: CGFloat
+        var maxWidth: CGFloat
+    }
+
+    private func toolbarPlacement(overlay: TextFormatOverlayState, space: Space) -> Placement {
+        let scale = appModel.canvasCamera.scale
+        let caret = overlay.caretRectInBody
+        let worldX = space.x + Double(caret.minX)
+        let screenX = worldX * scale + appModel.canvasCamera.offsetX
+        let estimatedBarHeight: CGFloat = 52
+        let maxBarWidth = min(viewport.width - 16, 520)
+        var screenY = (space.y + Double(textSpaceHeaderHeight) + Double(caret.maxY) + 6) * scale + appModel.canvasCamera.offsetY
+        if screenY + estimatedBarHeight > viewport.height - 8 {
+            screenY = (space.y + Double(textSpaceHeaderHeight) + Double(caret.minY) - 6) * scale + appModel.canvasCamera.offsetY - estimatedBarHeight
+        }
+        let clampedX = min(max(8, screenX), max(8, viewport.width - maxBarWidth - 8))
+        let clampedY = max(8, screenY)
+        return Placement(x: clampedX, y: clampedY, maxWidth: maxBarWidth)
     }
 }
 

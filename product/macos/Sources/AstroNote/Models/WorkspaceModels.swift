@@ -247,11 +247,31 @@ enum LayerSpaceKinds {
 
 extension Workspace {
     func rootLibraryNodes() -> [LibraryNode] {
-        library_nodes.values.filter { $0.parent_id == nil }.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        let orphans = library_nodes.values.filter { node in
+            if let parentId = node.parent_id {
+                return library_nodes[parentId] == nil
+            }
+            return true
+        }
+        var primary: [LibraryNode] = []
+        var others: [LibraryNode] = []
+        for node in orphans {
+            if node.parent_id == nil, node.kind == "folder" {
+                primary.append(node)
+            } else {
+                others.append(node)
+            }
+        }
+        primary.sort { $0.id < $1.id }
+        others.sort { $0.id < $1.id }
+        if primary.count == 1 {
+            return primary + others
+        }
+        return (primary + others).sorted { $0.id < $1.id }
     }
 
     func children(of node: LibraryNode) -> [LibraryNode] {
-        node.child_ids.compactMap { library_nodes[$0] }.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        node.child_ids.compactMap { library_nodes[$0] }
     }
 }
 

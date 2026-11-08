@@ -152,6 +152,9 @@ final class AppModel: ObservableObject {
     var heartbeatTask: Task<Void, Never>?
     var localHistory = LocalHistory()
     var assetTextCache: [String: String] = [:]
+    var assetBinaryCache: [String: Data] = [:]
+    @Published var textFormatOverlay: TextFormatOverlayState?
+    weak var activeTextFormatEditor: FormattedTextEditorController?
     private var cachedStoredProfile: ConnectionProfile?
     private var didAutoBootstrap = false
 
@@ -203,7 +206,6 @@ final class AppModel: ObservableObject {
             let api = APIClient(origin: candidate, apiToken: token, userId: userId)
             do {
                 _ = try await api.createSession(label: "macos")
-                try await api.testConnection()
                 connectedAPI = api
                 connectedOrigin = normalized
                 break
@@ -304,6 +306,10 @@ final class AppModel: ObservableObject {
         connection.isConnected = false
         workspace = nil
         hydratedProject = nil
+        assetTextCache = [:]
+        assetBinaryCache = [:]
+        textFormatOverlay = nil
+        activeTextFormatEditor = nil
         if clearCredentials {
             cachedStoredProfile = nil
             Task.detached(priority: .userInitiated) {
@@ -334,6 +340,8 @@ final class AppModel: ObservableObject {
         guard let client else { return }
         selectedProjectId = projectId
         selectedSpaceId = nil
+        textFormatOverlay = nil
+        activeTextFormatEditor = nil
         isLoading = true
         errorMessage = nil
         defer { isLoading = false }
@@ -349,9 +357,80 @@ final class AppModel: ObservableObject {
             if let resolved = pageLoad.resolved_library_node_id {
                 selectedLibraryNodeId = resolved
             }
+            if let project = hydratedProject {
+                prefetchBinaryAssets(for: project)
+            }
             startPresenceLoop(projectId: projectId)
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    func setActiveTextFormatEditor(_ controller: FormattedTextEditorController?, spaceId: String) {
+        if let controller {
+            activeTextFormatEditor = controller
+        } else if textFormatOverlay?.spaceId == spaceId {
+            activeTextFormatEditor = nil
+            textFormatOverlay = nil
+        }
+    }
+
+    func updateTextFormatOverlay(spaceId: String, visible: Bool, caretRect: CGRect, formats: ActiveTextFormats) {
+        guard visible else {
+            if textFormatOverlay?.spaceId == spaceId {
+                textFormatOverlay = nil
+            }
+            return
+        }
+        textFormatOverlay = TextFormatOverlayState(
+            spaceId: spaceId,
+            caretRectInBody: caretRect,
+            activeFormats: formats
+        )
+    }
+
+    func assetData(for assetId: String) async -> Data? {
+        if let cached = assetBinaryCache[assetId] { return cached }
+        if let inline = hydratedProject?.assets[assetId]?.content, inline.hasPrefix("data:"),
+           let data = DataURI.decode(inline) {
+            assetBinaryCache[assetId] = data
+            return data
+        }
+        guard let client else { return nil }
+        do {
+            let data = try await client.fetchAssetData(assetId: assetId)
+            assetBinaryCache[assetId] = data
+            return data
+        } catch {
+            return nil
+        }
+    }
+
+    func prefetchBinaryAssets(for project: Project) {
+        var assetIds: [String] = []
+        for space in project.visibleSpaces() {
+            switch space.kind {
+            case "ImageSpace", "PhotoSpace", "GroupPhotoSpace", "PDFSpace":
+                if let assetId = space.reference_asset_id ?? space.asset_ids.first {
+                    assetIds.append(assetId)
+                }
+            default:
+                break
+            }
+        }
+        let unique = Array(Set(assetIds)).filter { assetBinaryCache[$0] == nil }
+        guard !unique.isEmpty else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            let concurrency = 4
+            for chunkStart in stride(from: 0, to: unique.count, by: concurrency) {
+                let chunk = unique[chunkStart..<min(chunkStart + concurrency, unique.count)]
+                await withTaskGroup(of: Void.self) { group in
+                    for assetId in chunk {
+                        group.addTask { _ = await self.assetData(for: assetId) }
+                    }
+                }
+            }
         }
     }
 

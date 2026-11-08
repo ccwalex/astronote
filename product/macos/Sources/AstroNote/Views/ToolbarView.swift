@@ -12,38 +12,36 @@ struct ToolbarView: View {
     var body: some View {
         VStack(spacing: 6) {
             strokeStyleBar()
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(AppModel.CanvasTool.allCases.filter(\.enabledInCurrentPhase)) { tool in
-                        toolButton(tool: tool)
-                        if tool == .probe {
-                            probeModePicker()
-                        }
+            FlowLayout(horizontalSpacing: 8, verticalSpacing: 8) {
+                ForEach(AppModel.CanvasTool.allCases.filter(\.enabledInCurrentPhase)) { tool in
+                    toolButton(tool: tool)
+                    if tool == .probe {
+                        probeModePicker()
                     }
-                    readOnlyBadge()
-                    conversionButtons()
-                    historyButtons()
-                    backgroundControls()
-                    appearanceToggle()
-
-                    labeledButton("Import Zip", systemImage: "square.and.arrow.down") { showZipImport = true }
-                    labeledButton("Export Zip", systemImage: "square.and.arrow.up") {
-                        Task { await appModel.exportWorkspaceZip() }
-                    }
-
-                    labeledButton("Upload…", systemImage: "arrow.up.doc") { showImporter = true }
-                    labeledButton("Paste Image", systemImage: "doc.on.clipboard") {
-                        Task { await appModel.handlePasteImage() }
-                    }
-
-                    Spacer(minLength: 12)
-                    Text(appModel.persistStatus.label)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(persistColor)
-                    zoomControls()
                 }
-                .padding(.vertical, 2)
+                readOnlyBadge()
+                conversionButtons()
+                historyButtons()
+                backgroundControls()
+                appearanceToggle()
+
+                labeledButton("Import Zip", systemImage: "square.and.arrow.down") { showZipImport = true }
+                labeledButton("Export Zip", systemImage: "square.and.arrow.up") {
+                    Task { await appModel.exportWorkspaceZip() }
+                }
+
+                labeledButton("Upload…", systemImage: "arrow.up.doc") { showImporter = true }
+                labeledButton("Paste Image", systemImage: "doc.on.clipboard") {
+                    Task { await appModel.handlePasteImage() }
+                }
+
+                Text(appModel.persistStatus.label)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(persistColor)
+                zoomControls()
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 2)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
