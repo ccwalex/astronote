@@ -1,5 +1,7 @@
 import Foundation
 import CoreGraphics
+import AppKit
+import PDFKit
 import WebKit
 
 struct CanvasCamera: Equatable {
@@ -27,12 +29,20 @@ struct CanvasCamera: Equatable {
         offsetY += deltaY
     }
 
-    static func scaleFromWheelDelta(_ delta: Double) -> Double {
-        pow(1.0015, delta)
+    static func scaleFromWheelDelta(lineDelta: Double, scrollingDelta: Double) -> Double {
+        let delta = abs(scrollingDelta) > 0.01 ? scrollingDelta : lineDelta
+        return pow(1.01, delta)
     }
 
-    static func shouldIgnoreCameraGesture(firstResponder: NSResponder?) -> Bool {
-        firstResponder is WKWebView
+    static func scrollTargetsEmbeddedSurface(at windowPoint: NSPoint, in window: NSWindow?) -> Bool {
+        guard let window, let hit = window.contentView?.hitTest(windowPoint) else { return false }
+        var view: NSView? = hit
+        while let current = view {
+            if current is WKWebView { return true }
+            if current is PDFView { return true }
+            view = current.superview
+        }
+        return false
     }
 }
 
@@ -67,6 +77,11 @@ enum SpaceTransform {
     static func safeMatrix(_ raw: [Double]?) -> [Double] {
         guard let raw, raw.count == 6 else { return [1, 0, 0, 1, 0, 0] }
         return raw
+    }
+
+    static func rotationRadians(_ raw: [Double]?) -> Double {
+        let m = safeMatrix(raw)
+        return atan2(m[1], m[0])
     }
 }
 

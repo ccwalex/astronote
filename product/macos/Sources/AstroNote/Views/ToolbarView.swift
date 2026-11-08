@@ -11,43 +11,36 @@ struct ToolbarView: View {
 
     var body: some View {
         VStack(spacing: 6) {
+            strokeStyleBar()
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
-                    toolButton("Pointer", tool: .pointer)
-                    toolButton("Probe", tool: .probe)
-                    probeModePicker()
+                    ForEach(AppModel.CanvasTool.allCases.filter(\.enabledInCurrentPhase)) { tool in
+                        toolButton(tool: tool)
+                        if tool == .probe {
+                            probeModePicker()
+                        }
+                    }
                     readOnlyBadge()
-
-                    toolButton("Create Generic", tool: .createGeneric)
-                    toolButton("Create Text", tool: .createText)
-                    toolButton("Create Image", tool: .createImage)
-                    toolButton("Create PDF", tool: .createPDF)
-                    toolButton("Create Group", tool: .createGroup)
-                    toolButton("Create Stroke", tool: .createStroke)
-                    toolButton("Eraser", tool: .eraseStroke)
-                    eraserModePicker()
-
-                    toolButton("Delete Space", tool: .deleteSpace)
-                    toolButton("Insert Vertical Space", tool: .insertVerticalSpace)
-
                     conversionButtons()
                     historyButtons()
                     backgroundControls()
                     appearanceToggle()
 
-                    Button("Import Zip") { showZipImport = true }
-                    Button("Export Zip") { Task { await appModel.exportWorkspaceZip() } }
+                    labeledButton("Import Zip", systemImage: "square.and.arrow.down") { showZipImport = true }
+                    labeledButton("Export Zip", systemImage: "square.and.arrow.up") {
+                        Task { await appModel.exportWorkspaceZip() }
+                    }
 
-                    Button("Upload…") { showImporter = true }
-                    Button("Paste Image") { Task { await appModel.handlePasteImage() } }
+                    labeledButton("Upload…", systemImage: "arrow.up.doc") { showImporter = true }
+                    labeledButton("Paste Image", systemImage: "doc.on.clipboard") {
+                        Task { await appModel.handlePasteImage() }
+                    }
 
                     Spacer(minLength: 12)
                     Text(appModel.persistStatus.label)
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(persistColor)
-                    Text("Zoom")
-                    Slider(value: $appModel.canvasCamera.scale, in: CanvasCamera.minScale...CanvasCamera.maxScale)
-                        .frame(width: 120)
+                    zoomControls()
                 }
                 .padding(.vertical, 2)
             }
@@ -87,15 +80,108 @@ struct ToolbarView: View {
         }
     }
 
-    private func toolButton(_ title: String, tool: AppModel.CanvasTool) -> some View {
-        Button(title) { appModel.selectedTool = tool }
-            .buttonStyle(ToolbarToolButtonStyle(selected: appModel.selectedTool == tool))
-            .disabled(!appModel.canWritePage && toolRequiresWrite(tool))
+    @ViewBuilder
+    private func strokeStyleBar() -> some View {
+        if appModel.selectedTool == .createStroke {
+            HStack(spacing: 10) {
+                Text("Stroke").font(.caption.weight(.semibold))
+                Picker("Mode", selection: strokeModeBinding) {
+                    Text("Line").tag("line")
+                    Text("Highlighter").tag("highlighter")
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 200)
+                ColorPicker("Color", selection: strokeColorBinding)
+                    .labelsHidden()
+                Text("Width")
+                Slider(value: strokeWidthBinding, in: 1...24)
+                    .frame(width: 100)
+                Text("Opacity")
+                Slider(value: strokeOpacityBinding, in: 0.1...1)
+                    .frame(width: 100)
+            }
+            .font(.caption)
+        }
+    }
+
+    private var strokeModeBinding: Binding<String> {
+        Binding(
+            get: { appModel.strokeDrawStyle.mode },
+            set: { newValue in
+                var style = appModel.strokeDrawStyle
+                style.mode = newValue
+                if newValue == "highlighter", style.opacity > 0.5 {
+                    style.opacity = 0.35
+                    style.width = max(style.width, 12)
+                }
+                appModel.strokeDrawStyle = style
+            }
+        )
+    }
+
+    private var strokeWidthBinding: Binding<Double> {
+        Binding(
+            get: { appModel.strokeDrawStyle.width },
+            set: { newValue in
+                var style = appModel.strokeDrawStyle
+                style.width = newValue
+                appModel.strokeDrawStyle = style
+            }
+        )
+    }
+
+    private var strokeOpacityBinding: Binding<Double> {
+        Binding(
+            get: { appModel.strokeDrawStyle.opacity },
+            set: { newValue in
+                var style = appModel.strokeDrawStyle
+                style.opacity = newValue
+                appModel.strokeDrawStyle = style
+            }
+        )
+    }
+
+    private var strokeColorBinding: Binding<Color> {
+        Binding(
+            get: { Color(hex: appModel.strokeDrawStyle.color) ?? .black },
+            set: { color in
+                if let hex = color.hexString {
+                    appModel.strokeDrawStyle.color = hex
+                }
+            }
+        )
+    }
+
+    @ViewBuilder
+    private func toolButton(tool: AppModel.CanvasTool) -> some View {
+        toolLabeledButton(tool: tool)
+        if tool == .eraseStroke {
+            eraserModePicker()
+        }
+    }
+
+    private func toolLabeledButton(tool: AppModel.CanvasTool) -> some View {
+        Button {
+            appModel.selectedTool = tool
+        } label: {
+            Label(tool.label, systemImage: tool.symbolName)
+                .labelStyle(.titleAndIcon)
+        }
+        .buttonStyle(ToolbarToolButtonStyle(selected: appModel.selectedTool == tool))
+        .disabled(!appModel.canWritePage && toolRequiresWrite(tool))
+    }
+
+    private func labeledButton(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: systemImage)
+                .labelStyle(.titleAndIcon)
+        }
+        .buttonStyle(ToolbarToolButtonStyle(selected: false))
     }
 
     private func toolRequiresWrite(_ tool: AppModel.CanvasTool) -> Bool {
         switch tool {
-        case .pointer, .probe, .deleteSpace, .insertVerticalSpace, .eraseStroke:
+        case .pointer, .probe:
             return false
         default:
             return true
@@ -105,13 +191,13 @@ struct ToolbarView: View {
     @ViewBuilder
     private func probeModePicker() -> some View {
         if appModel.selectedTool == .probe {
-            Picker("Probe", selection: $appModel.probeMode) {
+            Picker("Probe mode", selection: $appModel.probeMode) {
                 ForEach(ProbeMode.allCases) { mode in
                     Text(mode.label).tag(mode)
                 }
             }
-            .labelsHidden()
-            .frame(maxWidth: 160)
+            .pickerStyle(.menu)
+            .frame(maxWidth: 140)
         }
     }
 
@@ -119,17 +205,28 @@ struct ToolbarView: View {
     private func eraserModePicker() -> some View {
         if appModel.selectedTool == .eraseStroke {
             Text("Mode").font(.caption)
-            Button("Object") { appModel.eraserMode = .object }
-                .buttonStyle(ToolbarToolButtonStyle(selected: appModel.eraserMode == .object))
-            Button("Partial") { appModel.eraserMode = .partial }
-                .buttonStyle(ToolbarToolButtonStyle(selected: appModel.eraserMode == .partial))
+            Button {
+                appModel.eraserMode = .object
+            } label: {
+                Label("Object", systemImage: "eraser.line.dashed")
+                    .labelStyle(.titleAndIcon)
+            }
+            .buttonStyle(ToolbarToolButtonStyle(selected: appModel.eraserMode == .object))
+            Button {
+                appModel.eraserMode = .partial
+            } label: {
+                Label("Partial", systemImage: "scribble.variable")
+                    .labelStyle(.titleAndIcon)
+            }
+            .buttonStyle(ToolbarToolButtonStyle(selected: appModel.eraserMode == .partial))
         }
     }
 
     @ViewBuilder
     private func readOnlyBadge() -> some View {
         if !appModel.canWritePage {
-            Text("Read-only")
+            Label("Read-only", systemImage: "lock")
+                .labelStyle(.titleAndIcon)
                 .font(.caption)
                 .foregroundStyle(.orange)
         }
@@ -137,15 +234,15 @@ struct ToolbarView: View {
 
     private func historyButtons() -> some View {
         Group {
-            Button("Undo") { appModel.undo() }
+            labeledButton("Undo", systemImage: "arrow.uturn.backward") { appModel.undo() }
                 .disabled(!appModel.canWritePage || !appModel.localHistoryCanUndo)
-            Button("Redo") { appModel.redo() }
+            labeledButton("Redo", systemImage: "arrow.uturn.forward") { appModel.redo() }
                 .disabled(!appModel.canWritePage || !appModel.localHistoryCanRedo)
-            Button("Commit") { Task { await appModel.commitCheckpoint() } }
+            labeledButton("Commit", systemImage: "checkmark.circle") { Task { await appModel.commitCheckpoint() } }
                 .disabled(!appModel.canWritePage)
-            Button("Revert") { Task { await appModel.revertToBaseline() } }
+            labeledButton("Revert", systemImage: "arrow.counterclockwise") { Task { await appModel.revertToBaseline() } }
                 .disabled(!appModel.canWritePage)
-            Button("Save") { Task { await appModel.saveNow() } }
+            labeledButton("Save", systemImage: "square.and.arrow.down") { Task { await appModel.saveNow() } }
                 .disabled(!appModel.canWritePage || !appModel.isDirty)
         }
     }
@@ -153,10 +250,14 @@ struct ToolbarView: View {
     @ViewBuilder
     private func conversionButtons() -> some View {
         if selectedSpaceKind == "GroupSpace" {
-            Button("Group → Group Photo") { Task { await appModel.convertSelectedGroupToPhoto() } }
+            labeledButton("Group → Group Photo", systemImage: "photo.stack") {
+                Task { await appModel.convertSelectedGroupToPhoto() }
+            }
         }
         if selectedSpaceKind == "GroupPhotoSpace" || selectedSpaceKind == "ImageSpace" {
-            Button("Group Photo → Group") { Task { await appModel.restoreSelectedPhotoToGroup() } }
+            labeledButton("Group Photo → Group", systemImage: "rectangle.3.group") {
+                Task { await appModel.restoreSelectedPhotoToGroup() }
+            }
         }
     }
 
@@ -169,13 +270,15 @@ struct ToolbarView: View {
         Group {
             ColorPicker("", selection: backgroundColorBinding)
                 .labelsHidden()
-            Button("Transparent") {
+            labeledButton("Transparent", systemImage: "square.dashed") {
                 appModel.spaceBackgroundColor = "transparent"
                 pendingTransparentApply = true
             }
             .disabled(!appModel.canWritePage)
-            Button("Set Background") { appModel.applySpaceBackgroundColor(appModel.spaceBackgroundColor) }
-                .disabled(!appModel.canWritePage)
+            labeledButton("Set Background", systemImage: "paintbrush") {
+                appModel.applySpaceBackgroundColor(appModel.spaceBackgroundColor)
+            }
+            .disabled(!appModel.canWritePage)
         }
     }
 
@@ -204,6 +307,18 @@ struct ToolbarView: View {
         }
         .pickerStyle(.segmented)
         .frame(width: 140)
+    }
+
+    private func zoomControls() -> some View {
+        HStack(spacing: 6) {
+            Text("Zoom").font(.caption)
+            Button("In") { appModel.adjustCanvasZoom(multiplier: 1.05) }
+            Button("Out") { appModel.adjustCanvasZoom(multiplier: 1 / 1.05) }
+            Button("100%") { appModel.resetCanvasCamera() }
+            Slider(value: $appModel.canvasCamera.scale, in: CanvasCamera.minScale...CanvasCamera.maxScale)
+                .frame(width: 100)
+        }
+        .font(.caption)
     }
 
     private var persistColor: Color {

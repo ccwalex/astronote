@@ -25,13 +25,13 @@ struct TextFormattingToolbarView: View {
             .labelsHidden()
             .frame(width: 88)
 
-            formatButton("B", active: activeFormats.bold) { onAction(.bold) }
-            formatButton("I", active: activeFormats.italic) { onAction(.italic) }
-            formatButton("S", active: activeFormats.strike) { onAction(.strike) }
-            formatButton("•", active: activeFormats.bullet) { onAction(.bullet) }
-            formatButton("1.", active: activeFormats.number) { onAction(.number) }
-            formatButton("❝", active: activeFormats.blockquote) { onAction(.quote) }
-            formatButton("</>", active: activeFormats.codeBlock) { onAction(.code) }
+            formatButton("Bold", systemImage: "bold", active: activeFormats.bold) { onAction(.bold) }
+            formatButton("Italic", systemImage: "italic", active: activeFormats.italic) { onAction(.italic) }
+            formatButton("Strike", systemImage: "strikethrough", active: activeFormats.strike) { onAction(.strike) }
+            formatButton("List", systemImage: "list.bullet", active: activeFormats.bullet) { onAction(.bullet) }
+            formatButton("Numbered", systemImage: "list.number", active: activeFormats.number) { onAction(.number) }
+            formatButton("Quote", systemImage: "text.quote", active: activeFormats.blockquote) { onAction(.quote) }
+            formatButton("Code", systemImage: "chevron.left.forwardslash.chevron.right", active: activeFormats.codeBlock) { onAction(.code) }
         }
         .font(.caption.weight(.semibold))
         .padding(.horizontal, 8)
@@ -41,10 +41,11 @@ struct TextFormattingToolbarView: View {
         .shadow(radius: 4, y: 2)
     }
 
-    private func formatButton(_ title: String, active: Bool, action: @escaping () -> Void) -> some View {
+    private func formatButton(_ title: String, systemImage: String, active: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Text(title)
-                .frame(minWidth: 22)
+            Label(title, systemImage: systemImage)
+                .labelStyle(.titleAndIcon)
+                .font(.caption2)
                 .padding(.horizontal, 4)
                 .padding(.vertical, 2)
                 .background(active ? Color.accentColor.opacity(0.25) : Color.clear, in: RoundedRectangle(cornerRadius: 4))

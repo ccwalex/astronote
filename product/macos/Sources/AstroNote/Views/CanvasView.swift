@@ -5,33 +5,65 @@ import AppKit
 struct CanvasView: View {
     @EnvironmentObject private var appModel: AppModel
     let project: Project
+    @State private var gapDragStartY: Double?
+    @State private var gapDragEndY: Double?
 
     var body: some View {
         GeometryReader { geo in
             ZStack(alignment: .topLeading) {
                 canvasBackdropColor
-                ZStack(alignment: .topLeading) {
-                    ForEach(project.visibleSpaces()) { space in
-                        SpaceCardView(project: project, space: space)
-                            .scaleEffect(appModel.canvasCamera.scale)
-                            .offset(
-                                x: appModel.canvasCamera.offsetX + space.x * appModel.canvasCamera.scale,
-                                y: appModel.canvasCamera.offsetY + space.y * appModel.canvasCamera.scale
-                            )
-                    }
-                    SnapGuidesOverlay()
-                    StrokeCanvasOverlay()
-                }
-                .frame(width: canvasSize.width, height: canvasSize.height)
-                .contentShape(Rectangle())
-                .gesture(canvasToolGesture(in: geo.size))
-                .simultaneousGesture(probeCanvasGesture(in: geo.size))
+                worldLayer
+                    .scaleEffect(appModel.canvasCamera.scale, anchor: .topLeading)
+                    .offset(x: appModel.canvasCamera.offsetX, y: appModel.canvasCamera.offsetY)
+                    .frame(width: canvasSize.width, height: canvasSize.height, alignment: .topLeading)
+                    .contentShape(Rectangle())
+                    .gesture(canvasToolGesture(in: geo.size))
+                    .simultaneousGesture(probeCanvasGesture(in: geo.size))
+                    .simultaneousGesture(insertGapDragGesture(in: geo.size))
+                verticalGapPreview
                 CanvasGestureOverlay(
-                    onScroll: { delta in handleCanvasScroll(deltaY: delta, viewport: geo.size, commandZoom: true) },
-                    onPan: { dx, dy in handleCanvasScroll(deltaX: dx, deltaY: dy, viewport: geo.size, commandZoom: false) }
+                    onScroll: { lineDelta, scrollDelta, point in
+                        handleCanvasScroll(
+                            lineDelta: lineDelta,
+                            scrollDelta: scrollDelta,
+                            zoomAnchor: point,
+                            viewport: geo.size,
+                            commandZoom: true
+                        )
+                    },
+                    onPan: { dx, dy in
+                        handleCanvasScroll(deltaX: dx, deltaY: dy, viewport: geo.size, commandZoom: false)
+                    }
                 )
+                .frame(width: geo.size.width, height: geo.size.height)
                 ProbeResultsPanel()
+                    .frame(width: geo.size.width, height: geo.size.height, alignment: .bottomLeading)
             }
+        }
+    }
+
+    private var worldLayer: some View {
+        ZStack(alignment: .topLeading) {
+            ForEach(project.visibleSpaces()) { space in
+                SpaceCardView(project: project, space: space)
+                    .offset(x: space.x, y: space.y)
+            }
+            SnapGuidesOverlay()
+            StrokeCanvasOverlay()
+        }
+    }
+
+    @ViewBuilder
+    private var verticalGapPreview: some View {
+        if let startY = gapDragStartY, let endY = gapDragEndY, endY > startY {
+            let screenY = startY * appModel.canvasCamera.scale + appModel.canvasCamera.offsetY
+            let height = (endY - startY) * appModel.canvasCamera.scale
+            Rectangle()
+                .stroke(style: StrokeStyle(lineWidth: 1, dash: [6, 4]))
+                .foregroundStyle(Color.blue)
+                .frame(height: height)
+                .offset(x: appModel.canvasCamera.offsetX, y: screenY)
+                .allowsHitTesting(false)
         }
     }
 
@@ -39,13 +71,21 @@ struct CanvasView: View {
         appModel.appearance == .dark ? Color(red: 0.12, green: 0.12, blue: 0.12) : Color.white
     }
 
-    private func handleCanvasScroll(deltaX: Double = 0, deltaY: Double = 0, viewport: CGSize, commandZoom: Bool) {
-        if CanvasCamera.shouldIgnoreCameraGesture(firstResponder: NSApp.keyWindow?.firstResponder) { return }
+    private func handleCanvasScroll(
+        lineDelta: Double = 0,
+        scrollDelta: Double = 0,
+        deltaX: Double = 0,
+        deltaY: Double = 0,
+        zoomAnchor: CGPoint? = nil,
+        viewport: CGSize,
+        commandZoom: Bool
+    ) {
         var camera = appModel.canvasCamera
         if commandZoom {
+            let anchor = zoomAnchor ?? CGPoint(x: viewport.width / 2, y: viewport.height / 2)
             camera.zoomAround(
-                point: CGPoint(x: viewport.width / 2, y: viewport.height / 2),
-                deltaScale: CanvasCamera.scaleFromWheelDelta(deltaY)
+                point: anchor,
+                deltaScale: CanvasCamera.scaleFromWheelDelta(lineDelta: lineDelta, scrollingDelta: scrollDelta)
             )
         } else {
             camera.pan(by: deltaX, deltaY: -deltaY)
@@ -56,6 +96,7 @@ struct CanvasView: View {
     private func canvasToolGesture(in viewport: CGSize) -> some Gesture {
         SpatialTapGesture()
             .onEnded { value in
+                guard appModel.selectedTool != .insertVerticalSpace else { return }
                 let world = canvasWorldPoint(from: value.location, viewport: viewport)
                 appModel.handleCanvasToolTap(atX: world.x, y: world.y, onSpaceId: nil)
             }
@@ -70,10 +111,31 @@ struct CanvasView: View {
             }
     }
 
+    private func insertGapDragGesture(in viewport: CGSize) -> some Gesture {
+        DragGesture(minimumDistance: 6)
+            .onChanged { value in
+                guard appModel.selectedTool == .insertVerticalSpace, appModel.canWritePage else { return }
+                let start = canvasWorldPoint(from: value.startLocation, viewport: viewport)
+                let current = canvasWorldPoint(from: value.location, viewport: viewport)
+                if gapDragStartY == nil { gapDragStartY = start.y }
+                gapDragEndY = max(current.y, (gapDragStartY ?? start.y) + 8)
+            }
+            .onEnded { value in
+                defer {
+                    gapDragStartY = nil
+                    gapDragEndY = nil
+                }
+                guard appModel.selectedTool == .insertVerticalSpace, appModel.canWritePage else { return }
+                let start = canvasWorldPoint(from: value.startLocation, viewport: viewport)
+                let end = canvasWorldPoint(from: value.location, viewport: viewport)
+                let gap = max(40, end.y - start.y)
+                guard gap >= 40 else { return }
+                appModel.insertVerticalGap(at: start.y, gap: gap)
+            }
+    }
+
     private func canvasWorldPoint(from location: CGPoint, viewport: CGSize) -> CGPoint {
-        let x = (location.x - appModel.canvasCamera.offsetX) / appModel.canvasCamera.scale
-        let y = (location.y - appModel.canvasCamera.offsetY) / appModel.canvasCamera.scale
-        return CGPoint(x: x, y: y)
+        SpaceLayout.pointerToWorld(point: location, camera: appModel.canvasCamera)
     }
 
     private var canvasSize: CGSize {
@@ -117,14 +179,20 @@ struct SpaceCardView: View {
         .frame(width: space.width, height: space.height)
         .background(Color(hex: space.background_color) ?? Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 8))
-        .overlay(SpaceChromeView(space: space, selected: selected))
+        .scaleEffect(x: space.scale_x, y: space.scale_y)
+        .rotationEffect(.radians(SpaceTransform.rotationRadians(space.transform_matrix)))
+        .overlay(
+            SpaceChromeView(space: space, selected: selected) { width, height in
+                appModel.updateSelectedSpaceSize(width: Double(width), height: Double(height), spaceId: space.id)
+            }
+        )
         .shadow(radius: selected ? 4 : 1)
     }
 
     private func dragGesture(for space: Space) -> some Gesture {
         DragGesture()
             .onChanged { value in
-                guard appModel.selectedTool == .pointer, appModel.selectedSpaceId == space.id else { return }
+                guard appModel.selectedTool == .pointer, appModel.selectedSpaceId == space.id, appModel.canWritePage else { return }
                 if dragAnchor == nil {
                     dragAnchor = (space.x, space.y)
                 }
@@ -154,10 +222,11 @@ struct SpaceCardView: View {
                 case .probe:
                     appModel.runProbe(atX: worldX, y: worldY)
                 case .deleteSpace:
+                    guard appModel.canWritePage else { return }
                     appModel.selectSpace(space.id)
                     appModel.deleteSelectedSpace()
                 case .insertVerticalSpace:
-                    appModel.insertVerticalGap(at: space.y)
+                    break
                 case .createGeneric, .createText, .createImage, .createPDF, .createGroup:
                     appModel.handleCanvasToolTap(atX: worldX, y: worldY, onSpaceId: space.id)
                 case .pointer:
@@ -260,7 +329,10 @@ struct SpaceStrokeInteractionLayer: View {
         for point in points.dropFirst() {
             path.addLine(to: CGPoint(x: point.x, y: point.y))
         }
-        context.stroke(path, with: .color(.accentColor), lineWidth: 4)
+        let style = appModel.strokeDrawStyle
+        let color = Color(hex: style.color) ?? .black
+        let opacity = style.mode == "highlighter" ? min(style.opacity, 0.45) : style.opacity
+        context.stroke(path, with: .color(color.opacity(opacity)), lineWidth: style.width)
     }
 }
 
@@ -270,6 +342,12 @@ struct RemoteAssetImage: View {
     let project: Project
     let space: Space
     @State private var image: NSImage?
+    @State private var showImporter = false
+    @State private var imageURL = ""
+
+    private var hasAsset: Bool {
+        space.reference_asset_id != nil || !space.asset_ids.isEmpty
+    }
 
     var body: some View {
         Group {
@@ -277,18 +355,69 @@ struct RemoteAssetImage: View {
                 Image(nsImage: image)
                     .resizable()
                     .scaledToFit()
+            } else if !hasAsset {
+                EmptyImageSpaceView(
+                    spaceId: space.id,
+                    imageURL: $imageURL,
+                    showImporter: $showImporter
+                )
             } else {
                 ProgressView()
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .fileImporter(isPresented: $showImporter, allowedContentTypes: [.image], allowsMultipleSelection: false) { result in
+            guard case .success(let urls) = result, let url = urls.first else { return }
+            Task {
+                let data = (try? Data(contentsOf: url)) ?? Data()
+                let mime = "image/\(url.pathExtension.lowercased() == "jpg" ? "jpeg" : url.pathExtension.lowercased())"
+                await appModel.attachImageToSpace(spaceId: space.id, data: data, filename: url.lastPathComponent, mimeType: mime)
+            }
+        }
         .task(id: space.id) {
+            guard hasAsset else { return }
             guard let client = appModel.client,
                   let assetId = space.reference_asset_id ?? space.asset_ids.first else { return }
+            if let inline = project.assets[assetId]?.content, inline.hasPrefix("data:"),
+               let data = DataURI.decode(inline) {
+                image = NSImage(data: data)
+                return
+            }
             if let data = try? await client.fetchAssetData(assetId: assetId) {
                 image = NSImage(data: data)
             }
         }
+    }
+}
+
+private struct EmptyImageSpaceView: View {
+    @EnvironmentObject private var appModel: AppModel
+    let spaceId: String
+    @Binding var imageURL: String
+    @Binding var showImporter: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Choose an image for this space").font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Button("Choose Image") { showImporter = true }
+                Button("Paste Image") { Task { await appModel.attachImageToSpaceFromPaste(spaceId: spaceId) } }
+            }
+            HStack {
+                TextField("Image URL", text: $imageURL)
+                    .textFieldStyle(.roundedBorder)
+                Button("Insert") { Task { await appModel.attachImageToSpaceFromURL(spaceId: spaceId, urlString: imageURL) } }
+            }
+        }
+        .padding(8)
+    }
+}
+
+enum DataURI {
+    static func decode(_ value: String) -> Data? {
+        guard let comma = value.firstIndex(of: ",") else { return nil }
+        let b64 = String(value[value.index(after: comma)...])
+        return Data(base64Encoded: b64)
     }
 }
 
@@ -298,32 +427,52 @@ struct RemotePDFView: View {
     let space: Space
     @State private var document: PDFDocument?
     @State private var pageIndex = 0
+    @State private var showImporter = false
+
+    private var hasAsset: Bool {
+        space.reference_asset_id != nil || !space.asset_ids.isEmpty
+    }
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Button("<") { pageIndex = max(0, pageIndex - 1) }
-                Text("Page \(pageIndex + 1) / \(max(document?.pageCount ?? 1, 1))")
-                    .font(.caption)
-                Button(">") { pageIndex = min((document?.pageCount ?? 1) - 1, pageIndex + 1) }
-            }
             if let document {
+                HStack {
+                    Button("Prev") { pageIndex = max(0, pageIndex - 1) }
+                    Text("Page \(pageIndex + 1) / \(max(document.pageCount, 1))")
+                        .font(.caption)
+                    Button("Next") { pageIndex = min(document.pageCount - 1, pageIndex + 1) }
+                }
                 PDFKitRepresentable(document: document, pageIndex: pageIndex)
+            } else if !hasAsset {
+                VStack(spacing: 8) {
+                    Text("No PDF attached").font(.caption).foregroundStyle(.secondary)
+                    Button("Choose PDF") { showImporter = true }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ProgressView()
             }
         }
+        .fileImporter(isPresented: $showImporter, allowedContentTypes: [.pdf], allowsMultipleSelection: false) { result in
+            guard case .success(let urls) = result, let url = urls.first else { return }
+            Task {
+                let data = (try? Data(contentsOf: url)) ?? Data()
+                await appModel.attachPDFToSpace(spaceId: space.id, data: data, filename: url.lastPathComponent)
+            }
+        }
         .task(id: space.id) {
+            guard hasAsset else { return }
             guard let client = appModel.client,
                   let assetId = space.reference_asset_id ?? space.asset_ids.first else { return }
+            if let inline = project.assets[assetId]?.content, inline.hasPrefix("data:"),
+               let data = DataURI.decode(inline) {
+                document = PDFDocument(data: data)
+                return
+            }
             if let data = try? await client.fetchAssetData(assetId: assetId) {
                 document = PDFDocument(data: data)
             }
         }
-    }
-
-    func goToPage(_ index: Int) {
-        pageIndex = index
     }
 }
 
@@ -331,17 +480,29 @@ struct PDFKitRepresentable: NSViewRepresentable {
     let document: PDFDocument
     var pageIndex: Int = 0
 
-    func makeNSView(context: Context) -> PDFView {
-        let view = PDFView()
-        view.autoScales = true
+    func makeNSView(context: Context) -> CanvasPDFView {
+        let view = CanvasPDFView()
+        view.autoScales = false
+        view.displayMode = .singlePage
+        view.displayDirection = .vertical
         view.document = document
         return view
     }
 
-    func updateNSView(_ pdfView: PDFView, context: Context) {
+    func updateNSView(_ pdfView: CanvasPDFView, context: Context) {
         pdfView.document = document
         if let page = document.page(at: pageIndex) {
             pdfView.go(to: page)
+        }
+    }
+
+    final class CanvasPDFView: PDFView {
+        override func scrollWheel(with event: NSEvent) {
+            guard !event.modifierFlags.contains(.command) else {
+                super.scrollWheel(with: event)
+                return
+            }
+            nextResponder?.scrollWheel(with: event)
         }
     }
 }

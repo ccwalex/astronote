@@ -6,6 +6,7 @@ struct InspectorPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Inspector").font(.headline)
+            zoomSection()
             if appModel.selectedTool == .probe {
                 ProbeResultsPanel()
             }
@@ -23,13 +24,36 @@ struct InspectorPanel: View {
                     }
                 }
                 if appModel.selectedSpaceIds.count > 1 {
-                    Button("Group selection") {
-                        // Overlap grouping hook — local layout handled in future mutation pass.
+                    Button {
+                        appModel.groupCheckedSpaces()
+                    } label: {
+                        Label("Group selection", systemImage: "rectangle.3.group")
+                            .labelStyle(.titleAndIcon)
                     }
+                    .disabled(!appModel.canWritePage)
+                }
+                if appModel.probeCheckedSpaceIds.count >= 2 {
+                    Button {
+                        appModel.groupCheckedSpaces()
+                    } label: {
+                        Label("Group checked spaces", systemImage: "checkmark.rectangle.stack")
+                            .labelStyle(.titleAndIcon)
+                    }
+                    .disabled(!appModel.canWritePage)
                 }
                 if appModel.selectedSpaceId != nil {
-                    Button("Move up z") { reorderSelectedSpace(delta: 1) }
-                    Button("Move down z") { reorderSelectedSpace(delta: -1) }
+                    Button {
+                        reorderSelectedSpace(delta: 1)
+                    } label: {
+                        Label("Move up z", systemImage: "arrow.up")
+                            .labelStyle(.titleAndIcon)
+                    }
+                    Button {
+                        reorderSelectedSpace(delta: -1)
+                    } label: {
+                        Label("Move down z", systemImage: "arrow.down")
+                            .labelStyle(.titleAndIcon)
+                    }
                 }
             } else {
                 Text("No page open").foregroundStyle(.secondary)
@@ -37,6 +61,22 @@ struct InspectorPanel: View {
             Spacer()
         }
         .padding(12)
+    }
+
+    private func zoomSection() -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Zoom").font(.subheadline.weight(.semibold))
+            HStack {
+                Button("Zoom In") { appModel.adjustCanvasZoom(multiplier: 1.05) }
+                Button("Zoom Out") { appModel.adjustCanvasZoom(multiplier: 1 / 1.05) }
+                Button("Reset 100%") { appModel.resetCanvasCamera() }
+            }
+            .font(.caption)
+            Text(String(format: "%.0f%%", appModel.canvasCamera.scale * 100))
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+            Slider(value: $appModel.canvasCamera.scale, in: CanvasCamera.minScale...CanvasCamera.maxScale)
+        }
     }
 
     private func reorderSelectedSpace(delta: Double) {

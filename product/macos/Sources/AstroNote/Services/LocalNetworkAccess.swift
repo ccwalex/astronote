@@ -21,10 +21,15 @@ enum LocalNetworkAccess {
         return await probeServerTCP(host: host, port: port, timeoutSeconds: 15)
     }
 
-    /// Lightweight warm-up before Connect (no long blocking).
+    /// Optional TN3179 warm-up. Does not block Connect for long — reachability is retried in APIClient.
     static func warmUpBeforeConnect(origin: String) async {
-        guard URLComponents(string: APIClient.normalizeOrigin(origin))?.host != nil else { return }
-        await triggerBonjourBrowse(seconds: 2)
+        let normalized = APIClient.normalizeOrigin(origin)
+        guard let components = URLComponents(string: normalized),
+              let host = components.host,
+              !host.isEmpty
+        else { return }
+        let port = UInt16(components.port ?? 5173)
+        _ = await probeServerTCP(host: host, port: port, timeoutSeconds: 2)
     }
 
     static func openPrivacySettings() {

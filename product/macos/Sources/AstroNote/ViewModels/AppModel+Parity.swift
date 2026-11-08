@@ -1,4 +1,5 @@
 import Foundation
+import PDFKit
 
 extension AppModel {
     func presentOnlyHistory(_ workspace: Workspace?) -> LocalHistory {
@@ -215,7 +216,7 @@ extension AppModel {
         guard points.count >= 2, var project = hydratedProject, var space = project.spaces[spaceId] else { return }
         guard !LayerSpaceKinds.hidden.contains(space.kind) else { return }
         let objectId = CanvasStrokeFactory.makeObjectId()
-        let object = CanvasStrokeFactory.createStrokeObject(objectId: objectId, spaceId: spaceId, points: points)
+        let object = CanvasStrokeFactory.createStrokeObject(objectId: objectId, spaceId: spaceId, points: points, style: strokeDrawStyle)
         project.objects[objectId] = object
         space.object_ids.append(objectId)
         project.spaces[spaceId] = space
@@ -322,9 +323,9 @@ extension AppModel {
         scheduleSave()
     }
 
-    func insertVerticalGap(at y: Double) {
-        guard var project = hydratedProject else { return }
-        WorkspaceActionsSpaces.insertVerticalPageGap(project: &project, y: y)
+    func insertVerticalGap(at y: Double, gap: Double = 80) {
+        guard canWritePage, var project = hydratedProject else { return }
+        WorkspaceActionsSpaces.insertVerticalPageGap(project: &project, y: y, gap: gap)
         hydratedProject = project
         if var workspace, let projectId = selectedProjectId {
             workspace.projects[projectId] = project
@@ -332,6 +333,100 @@ extension AppModel {
         }
         markDirty(coalesceKey: "insert-gap")
         scheduleSave()
+    }
+
+    func groupCheckedSpaces() {
+        let ids = probeCheckedSpaceIds.isEmpty ? Set(selectedSpaceIds) : probeCheckedSpaceIds
+        guard ids.count >= 2, canWritePage, var project = hydratedProject else { return }
+        guard let newGroupId = WorkspaceActionsGroups.createGroupSpace(project: &project, spaceIds: Array(ids)) else {
+            errorMessage = "Could not group selected spaces (need same parent)."
+            return
+        }
+        commitProjectMutation(project, editedSpaceIds: [newGroupId] + Array(ids), coalesceKey: "group-spaces")
+        selectSpace(newGroupId)
+        probeCheckedSpaceIds = []
+        statusMessage = "Grouped \(ids.count) spaces"
+    }
+
+    func updateSelectedSpaceSize(width: Double, height: Double, spaceId: String? = nil) {
+        guard canWritePage, var project = hydratedProject else { return }
+        let targetId = spaceId ?? selectedSpaceId
+        guard let targetId else { return }
+        guard WorkspaceActionsSpaces.updateSpaceSize(project: &project, spaceId: targetId, width: width, height: height) else { return }
+        commitProjectMutation(project, editedSpaceIds: [targetId], coalesceKey: "resize:\(targetId)")
+    }
+
+    func flipSelectedSpace(horizontal: Bool) {
+        guard canWritePage, var project = hydratedProject, let spaceId = selectedSpaceId,
+              var space = project.spaces[spaceId] else { return }
+        if horizontal {
+            space.scale_x = space.scale_x == 0 ? -1 : -space.scale_x
+        } else {
+            space.scale_y = space.scale_y == 0 ? -1 : -space.scale_y
+        }
+        project.spaces[spaceId] = space
+        commitProjectMutation(project, editedSpaceIds: [spaceId], coalesceKey: "flip:\(spaceId)")
+    }
+
+    func resetSelectedSpaceTransform() {
+        guard canWritePage, var project = hydratedProject, let spaceId = selectedSpaceId,
+              var space = project.spaces[spaceId] else { return }
+        space.scale_x = 1
+        space.scale_y = 1
+        space.transform_matrix = [1, 0, 0, 1, 0, 0]
+        project.spaces[spaceId] = space
+        commitProjectMutation(project, editedSpaceIds: [spaceId], coalesceKey: "reset-transform:\(spaceId)")
+    }
+
+    func adjustCanvasZoom(multiplier: Double) {
+        var camera = canvasCamera
+        let anchor = CGPoint(x: 0, y: 0)
+        camera.zoomAround(point: anchor, deltaScale: multiplier)
+        canvasCamera = camera
+    }
+
+    func resetCanvasCamera() {
+        canvasCamera = CanvasCamera()
+    }
+
+    func attachImageToSpace(spaceId: String, data: Data, filename: String, mimeType: String) async {
+        guard canWritePage, var project = hydratedProject else { return }
+        guard let assetId = WorkspaceActionsMedia.fillImageSpace(
+            project: &project,
+            spaceId: spaceId,
+            filename: filename,
+            mimeType: mimeType,
+            data: data
+        ) else { return }
+        commitProjectMutation(project, editedSpaceIds: [spaceId], coalesceKey: "fill-image:\(assetId)")
+    }
+
+    func attachImageToSpaceFromPaste(spaceId: String) async {
+        guard let data = ClipboardImage.readPNGData() else { return }
+        await attachImageToSpace(spaceId: spaceId, data: data, filename: "pasted.png", mimeType: "image/png")
+    }
+
+    func attachImageToSpaceFromURL(spaceId: String, urlString: String) async {
+        let trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: trimmed), let data = try? Data(contentsOf: url) else {
+            errorMessage = "Could not download image."
+            return
+        }
+        let filename = url.lastPathComponent.isEmpty ? "image.png" : url.lastPathComponent
+        let ext = url.pathExtension.lowercased()
+        let mime = ext == "jpg" || ext == "jpeg" ? "image/jpeg" : "image/png"
+        await attachImageToSpace(spaceId: spaceId, data: data, filename: filename, mimeType: mime)
+    }
+
+    func attachPDFToSpace(spaceId: String, data: Data, filename: String) async {
+        guard canWritePage, var project = hydratedProject else { return }
+        guard let assetId = WorkspaceActionsMedia.fillPDFSpace(
+            project: &project,
+            spaceId: spaceId,
+            filename: filename,
+            data: data
+        ) else { return }
+        commitProjectMutation(project, editedSpaceIds: [spaceId], coalesceKey: "fill-pdf:\(assetId)")
     }
 
     func updateSelectedTextHeight(_ height: Double) {
@@ -349,8 +444,18 @@ extension AppModel {
     }
 
     func importPDF(data: Data, selectedPages: [Int], mode: String) async {
-        _ = selectedPages
-        _ = mode
+        if mode == "single", let doc = PDFDocument(data: data), let page = doc.page(at: selectedPages.first ?? 0) {
+            let pageData = doc.dataRepresentation() ?? data
+            _ = pageData
+            let single = PDFDocument()
+            if let copied = page.copy() as? PDFPage {
+                single.insert(copied, at: 0)
+                if let rendered = single.dataRepresentation() {
+                    await uploadMedia(data: rendered, filename: "import-page.pdf", mimeType: "application/pdf")
+                    return
+                }
+            }
+        }
         await uploadMedia(data: data, filename: "import.pdf", mimeType: "application/pdf")
     }
 

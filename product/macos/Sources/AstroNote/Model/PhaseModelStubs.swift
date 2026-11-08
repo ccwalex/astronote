@@ -41,7 +41,7 @@ enum OverlapGrouping {
     }
 }
 
-enum WorkspaceActionsGroups {
+enum WorkspaceActionsGroupsBounds {
     static func updateGroupBounds(project: inout Project, groupId: String) {}
 }
 
@@ -63,9 +63,6 @@ enum WorkspaceActionsText {
     }
 }
 
-enum WorkspaceActionsMedia {
-    static func fillImageSpace(project: inout Project, spaceId: String, assetId: String) {}
-}
 
 enum ImageCropper {
     static func crop(imageSize: CGSize, rect: CGRect) -> CGRect { rect }

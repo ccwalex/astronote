@@ -49,17 +49,33 @@ final class AppModel: ObservableObject {
 
         var label: String {
             switch self {
-            case .pointer: return "Select"
+            case .pointer: return "Pointer"
             case .probe: return "Probe"
-            case .createGeneric: return "Box"
-            case .createText: return "Text"
-            case .createImage: return "Image"
-            case .createPDF: return "PDF"
-            case .createGroup: return "Group"
-            case .createStroke: return "Stroke"
+            case .createGeneric: return "Create Generic"
+            case .createText: return "Create Text"
+            case .createImage: return "Create Image"
+            case .createPDF: return "Create PDF"
+            case .createGroup: return "Create Group"
+            case .createStroke: return "Create Stroke"
             case .eraseStroke: return "Eraser"
-            case .deleteSpace: return "Delete"
-            case .insertVerticalSpace: return "Gap"
+            case .deleteSpace: return "Delete Space"
+            case .insertVerticalSpace: return "Insert Vertical Space"
+            }
+        }
+
+        var symbolName: String {
+            switch self {
+            case .pointer: return "arrow.up.left.and.arrow.down.right"
+            case .probe: return "scope"
+            case .createGeneric: return "rectangle.dashed"
+            case .createText: return "character.textbox"
+            case .createImage: return "photo"
+            case .createPDF: return "doc.richtext"
+            case .createGroup: return "rectangle.3.group"
+            case .createStroke: return "pencil.and.scribble"
+            case .eraseStroke: return "eraser"
+            case .deleteSpace: return "trash"
+            case .insertVerticalSpace: return "arrow.up.and.down"
             }
         }
 
@@ -107,6 +123,7 @@ final class AppModel: ObservableObject {
     @Published var localHistoryCanUndo = false
     @Published var localHistoryCanRedo = false
     @Published var eraserMode: StrokeEraserMode = .partial
+    @Published var strokeDrawStyle = StrokeDrawStyle()
     @Published var spaceBackgroundColor: String = "#ffffff"
 
     @AppStorage("astronote.appearance") var appearanceStorage: String = AppAppearance.light.rawValue
@@ -149,7 +166,6 @@ final class AppModel: ObservableObject {
         guard let profile else { return }
         connection.origin = APIClient.normalizeOrigin(profile.origin)
         connection.token = profile.apiToken
-        await LocalNetworkAccess.warmUpBeforeConnect(origin: connection.origin)
         await connectUsingStoredProfile()
     }
 
@@ -157,7 +173,6 @@ final class AppModel: ObservableObject {
         connection.origin = APIClient.normalizeOrigin(origin)
         connection.token = token.trimmingCharacters(in: .whitespacesAndNewlines)
         connection.errorMessage = nil
-        await LocalNetworkAccess.warmUpBeforeConnect(origin: connection.origin)
         await connectUsingStoredProfile()
     }
 
@@ -175,32 +190,58 @@ final class AppModel: ObservableObject {
         guard !connection.origin.isEmpty, !connection.token.isEmpty else { return }
         isLoading = true
         defer { isLoading = false }
-        do {
-            var profile = ConnectionProfile(
-                origin: connection.origin,
-                apiToken: connection.token,
-                userId: cachedStoredProfile?.userId
+
+        let token = connection.token
+        let userId = cachedStoredProfile?.userId
+        let normalized = APIClient.normalizeOrigin(connection.origin)
+        let candidates = APIClient.connectionOriginCandidates(for: connection.origin)
+        var lastError: Error?
+        var connectedAPI: APIClient?
+        var connectedOrigin = normalized
+
+        for candidate in candidates.isEmpty ? [normalized] : candidates {
+            let api = APIClient(origin: candidate, apiToken: token, userId: userId)
+            do {
+                _ = try await api.createSession(label: "macos")
+                try await api.testConnection()
+                connectedAPI = api
+                connectedOrigin = normalized
+                break
+            } catch {
+                lastError = error
+                guard APIClient.isRetryableReachabilityError(error), candidate != candidates.last else { break }
+            }
+        }
+
+        guard let api = connectedAPI else {
+            connection.isConnected = false
+            client = nil
+            let error = lastError ?? APIClientError.invalidURL
+            connection.errorMessage = Self.connectionFailureMessage(
+                error: error,
+                normalizedOrigin: normalized,
+                triedOrigins: candidates
             )
-            let normalized = APIClient.normalizeOrigin(profile.origin)
-            let api = APIClient(origin: profile.origin, apiToken: profile.apiToken, userId: profile.userId)
-            _ = try await api.createSession(label: "macos")
-            try await api.testConnection()
-            profile.userId = api.userId
-            profile.origin = normalized
-            client = api
-            connection.isConnected = true
-            connection.errorMessage = nil
+            return
+        }
+
+        let profile = ConnectionProfile(origin: connectedOrigin, apiToken: token, userId: api.userId)
+        client = api
+        connection.isConnected = true
+        connection.errorMessage = nil
+        do {
             let nav = try await api.fetchWorkspaceNav()
             workspace = nav
             baseRevision = nav.workspace_revision
             startRevisionPollLoop()
             startSessionHeartbeat()
-            if api.origin == normalized {
+            if api.origin == normalized || api.origin == APIClient.resolveForNetworking(normalized) {
                 statusMessage = "Connected to \(normalized)"
             } else {
                 statusMessage = "Connected to \(normalized) via \(api.origin)"
             }
             cachedStoredProfile = profile
+            ConnectLog.write("Connected via \(api.origin)")
             do {
                 try await Self.saveStoredProfile(profile)
             } catch {
@@ -209,15 +250,33 @@ final class AppModel: ObservableObject {
         } catch {
             connection.isConnected = false
             client = nil
-            let normalized = APIClient.normalizeOrigin(connection.origin)
-            let resolved = APIClient.resolveForNetworking(normalized)
-            var message = error.localizedDescription
-            if resolved != normalized {
-                message += " Resolved server URL: \(resolved)."
-            }
-            message += " App \(AppVersion.short) — server API from Terminal: curl -s -o /dev/null -w '%{http_code}' \(resolved)/"
-            connection.errorMessage = message
+            connection.errorMessage = Self.connectionFailureMessage(
+                error: error,
+                normalizedOrigin: normalized,
+                triedOrigins: candidates
+            )
         }
+    }
+
+    private static func connectionFailureMessage(
+        error: Error,
+        normalizedOrigin: String,
+        triedOrigins: [String]
+    ) -> String {
+        var message = error.localizedDescription
+        let tried = triedOrigins.filter { !$0.isEmpty }
+        if tried.count > 1 {
+            message += " Tried: \(tried.joined(separator: ", "))."
+        } else if let resolved = tried.first, resolved != normalizedOrigin {
+            message += " Resolved server URL: \(resolved)."
+        }
+        if message.contains("Could not reach the server") || message.contains("timed out") {
+            message += " Local Network being on is not enough by itself — confirm Tailscale is connected and try http://100.x.x.x:5173 in the Server field."
+        }
+        let probe = tried.last ?? APIClient.resolveForNetworking(normalizedOrigin)
+        message += " \(AppTransportPolicy.bundleDiagnostic) App \(AppVersion.short) — test: curl -s -o /dev/null -w '%{http_code}' \(probe)/api/workspace/nav"
+        ConnectLog.write(message)
+        return message
     }
 
     private static func loadStoredProfile() async -> ConnectionProfile? {

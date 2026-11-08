@@ -87,6 +87,7 @@ struct ConnectionView: View {
                 Text(error)
                     .foregroundStyle(.red)
                     .font(.callout)
+                    .textSelection(.enabled)
             }
 
             GroupBox("Mint a token on the server") {
@@ -101,13 +102,17 @@ struct ConnectionView: View {
         }
         .padding(32)
         .frame(maxWidth: 520)
-        .onAppear { syncOriginField() }
-        .onChange(of: appModel.connection.origin) { _, _ in syncOriginField() }
+        .onAppear { syncFields() }
+        .onChange(of: appModel.connection.origin) { _, _ in syncFields() }
+        .onChange(of: appModel.connection.token) { _, _ in syncFields() }
     }
 
-    private func syncOriginField() {
+    private func syncFields() {
         if origin.isEmpty, !appModel.connection.origin.isEmpty {
             origin = appModel.connection.origin
+        }
+        if token.isEmpty, !appModel.connection.token.isEmpty {
+            token = appModel.connection.token
         }
     }
 }

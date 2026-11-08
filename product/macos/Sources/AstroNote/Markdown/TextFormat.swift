@@ -136,8 +136,9 @@ enum TextFormat {
         let editableAttr = editable ? "true" : "false"
         return """
         <!doctype html><html><head><meta charset=\"utf-8\"><style>
+        html,body{margin:0;padding:0;overflow:hidden;height:100%;}
         body{margin:8px;font:14px -apple-system,sans-serif;background:\(bg);color:\(fg);}
-        #content{outline:none;min-height:120px;line-height:1.45;caret-color:currentColor;-webkit-user-select:text;user-select:text;}
+        #content{outline:none;min-height:120px;line-height:1.45;caret-color:currentColor;-webkit-user-select:text;user-select:text;overflow:hidden;}
         blockquote{border-left:3px solid #888;margin:0;padding-left:10px;color:#888;}
         pre{background:rgba(127,127,127,0.15);padding:8px;border-radius:4px;overflow-x:auto;}
         code{font-family:ui-monospace,monospace;}

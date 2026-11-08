@@ -99,31 +99,21 @@ final class APIClient {
         request.httpBody = body
 
         let data: Data
-        let response: URLResponse
+        let http: HTTPURLResponse
         do {
-            (data, response) = try await session.data(for: request)
+            (data, http) = try await DirectHTTP.data(for: request, timeout: request.timeoutInterval)
         } catch let urlError as URLError {
-            switch urlError.code {
-            case .timedOut:
-                throw APIClientError.timedOut
-            case .appTransportSecurityRequiresSecureConnection:
-                if AppTransportPolicy.allowsArbitraryLoads {
-                    throw APIClientError.network(
-                        code: urlError.code,
-                        detail: Self.localNetworkReachabilityHelp(origin: origin)
-                    )
-                }
-                throw APIClientError.insecureConnection
-            case .notConnectedToInternet, .networkConnectionLost, .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed:
-                throw APIClientError.network(code: urlError.code, detail: Self.localNetworkReachabilityHelp(origin: origin))
-            default:
-                throw APIClientError.network(
-                    code: urlError.code,
-                    detail: urlError.localizedDescription + " " + Self.localNetworkReachabilityHelp(origin: origin)
-                )
+            throw mapURLError(urlError)
+        } catch {
+            ConnectLog.write("DirectHTTP \(method) \(url.absoluteString) failed: \(error.localizedDescription)")
+            if let urlError = error as? URLError {
+                throw mapURLError(urlError)
             }
+            throw APIClientError.network(
+                code: .cannotConnectToHost,
+                detail: error.localizedDescription + " " + Self.localNetworkReachabilityHelp(origin: origin)
+            )
         }
-        guard let http = response as? HTTPURLResponse else { throw APIClientError.decodeFailed }
         if let issued = http.value(forHTTPHeaderField: "x-user-id"), !issued.isEmpty {
             userId = issued
         }
@@ -136,6 +126,26 @@ final class APIClient {
             throw APIClientError.httpStatus(http.statusCode, snippet)
         }
         return (data, http)
+    }
+
+    private func mapURLError(_ urlError: URLError) -> APIClientError {
+        switch urlError.code {
+        case .timedOut:
+            return .timedOut
+        case .appTransportSecurityRequiresSecureConnection:
+            if AppTransportPolicy.allowsArbitraryLoads {
+                return .network(
+                    code: urlError.code,
+                    detail: "Plain HTTP was blocked unexpectedly. \(AppTransportPolicy.bundleDiagnostic)"
+                )
+            }
+            return .insecureConnection
+        default:
+            return .network(
+                code: urlError.code,
+                detail: urlError.localizedDescription + " " + Self.localNetworkReachabilityHelp(origin: origin)
+            )
+        }
     }
 
     func testConnection() async throws {
@@ -439,14 +449,45 @@ extension APIClient {
         return String(cString: buffer)
     }
 
+    /// Ordered origins to try when connecting (hostname first, then resolved Tailscale IPv4).
+    static func connectionOriginCandidates(for raw: String) -> [String] {
+        let normalized = normalizeOrigin(raw)
+        guard !normalized.isEmpty else { return [] }
+        var candidates: [String] = []
+        func append(_ value: String) {
+            guard !value.isEmpty, !candidates.contains(value) else { return }
+            candidates.append(value)
+        }
+        append(normalized)
+        append(resolveForNetworking(normalized))
+        return candidates
+    }
+
+    static func isRetryableReachabilityError(_ error: Error) -> Bool {
+        if case APIClientError.timedOut = error { return true }
+        if case APIClientError.network = error { return true }
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .timedOut, .notConnectedToInternet, .networkConnectionLost,
+                 .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed,
+                 .appTransportSecurityRequiresSecureConnection:
+                return true
+            default:
+                return false
+            }
+        }
+        return false
+    }
+
     fileprivate static func localNetworkReachabilityHelp(origin: String) -> String {
         var hints = [
             "Ensure Tailscale is connected on this Mac.",
-            "Click “Prepare Local Network Access” on the connection screen, approve the prompt, then connect again.",
-            "If the hostname fails, try the server’s Tailscale IP, e.g. http://100.125.87.90:5173",
+            "Try the server’s Tailscale IP directly, e.g. http://100.x.x.x:5173 instead of MagicDNS.",
         ]
         if origin.contains(".ts.net") {
-            hints.insert("MagicDNS can require Local Network permission even when ATS allows HTTP.", at: 0)
+            hints.append(
+                "If curl works but the app does not, Local Network may still need to be enabled for AstroNote under Privacy & Security — otherwise ignore this if it is already on."
+            )
         }
         return hints.joined(separator: " ")
     }
