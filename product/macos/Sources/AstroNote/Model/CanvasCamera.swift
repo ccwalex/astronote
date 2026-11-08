@@ -31,7 +31,7 @@ struct CanvasCamera: Equatable {
 
     static func scaleFromWheelDelta(lineDelta: Double, scrollingDelta: Double) -> Double {
         let delta = abs(scrollingDelta) > 0.01 ? scrollingDelta : lineDelta
-        return pow(1.01, delta)
+        return pow(1.01, -delta)
     }
 
     static func scrollTargetsEmbeddedSurface(at windowPoint: NSPoint, in window: NSWindow?) -> Bool {

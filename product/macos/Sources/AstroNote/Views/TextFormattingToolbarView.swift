@@ -58,9 +58,12 @@ struct TextSpaceArea: View {
     @EnvironmentObject private var appModel: AppModel
     let project: Project
     let space: Space
+    @Binding var editAtPoint: CGPoint?
     @State private var text = ""
     @State private var loaded = false
     @StateObject private var textEditor = FormattedTextEditorController()
+
+    private static let outerChromeHeight: Double = 30
 
     private var isEditing: Bool {
         appModel.canWritePage && appModel.selectedSpaceId == space.id
@@ -79,7 +82,7 @@ struct TextSpaceArea: View {
                     guard let assetId = space.reference_asset_id ?? space.asset_ids.first else { return }
                     appModel.updateTextAsset(assetId: assetId, markdown: newValue)
                     textEditor.measureContentHeight { height in
-                        let padded = max(Double(geo.size.height), height + 16)
+                        let padded = max(Double(geo.size.height), height + Self.outerChromeHeight)
                         appModel.updateSelectedTextHeight(padded)
                     }
                 },
@@ -107,6 +110,13 @@ struct TextSpaceArea: View {
         }
         .onDisappear {
             appModel.setActiveTextFormatEditor(nil, spaceId: space.id)
+        }
+        .onChange(of: editAtPoint) { _, point in
+            guard let point else { return }
+            let paddedX = point.x - 8
+            let paddedY = point.y - 12
+            beginEditing(at: CGPoint(x: max(0, paddedX), y: max(0, paddedY)))
+            editAtPoint = nil
         }
     }
 

@@ -12,14 +12,7 @@ struct CanvasView: View {
         GeometryReader { geo in
             ZStack(alignment: .topLeading) {
                 canvasBackdropColor
-                worldLayer
-                    .scaleEffect(appModel.canvasCamera.scale, anchor: .topLeading)
-                    .offset(x: appModel.canvasCamera.offsetX, y: appModel.canvasCamera.offsetY)
-                    .frame(width: canvasSize.width, height: canvasSize.height, alignment: .topLeading)
-                    .contentShape(Rectangle())
-                    .gesture(canvasToolGesture(in: geo.size))
-                    .simultaneousGesture(probeCanvasGesture(in: geo.size))
-                    .simultaneousGesture(insertGapDragGesture(in: geo.size))
+                transformedWorldLayer(in: geo.size)
                 verticalGapPreview
                 CanvasGestureOverlay(
                     onScroll: { lineDelta, scrollDelta, point in
@@ -40,6 +33,25 @@ struct CanvasView: View {
                     .frame(width: geo.size.width, height: geo.size.height, alignment: .bottomLeading)
                 CanvasTextFormatToolbar(project: project, viewport: geo.size)
             }
+            .compositingGroup()
+            .clipped()
+        }
+    }
+
+    @ViewBuilder
+    private func transformedWorldLayer(in viewport: CGSize) -> some View {
+        let base = worldLayer
+            .scaleEffect(appModel.canvasCamera.scale, anchor: .topLeading)
+            .offset(x: appModel.canvasCamera.offsetX, y: appModel.canvasCamera.offsetY)
+            .frame(width: canvasSize.width, height: canvasSize.height, alignment: .topLeading)
+            .contentShape(Rectangle())
+            .simultaneousGesture(probeCanvasGesture(in: viewport))
+            .simultaneousGesture(insertGapDragGesture(in: viewport))
+
+        if appModel.selectedTool != .pointer {
+            base.gesture(canvasToolGesture(in: viewport))
+        } else {
+            base
         }
     }
 
@@ -89,7 +101,7 @@ struct CanvasView: View {
                 deltaScale: CanvasCamera.scaleFromWheelDelta(lineDelta: lineDelta, scrollingDelta: scrollDelta)
             )
         } else {
-            camera.pan(by: deltaX, deltaY: -deltaY)
+            camera.pan(by: deltaX, deltaY: deltaY)
         }
         appModel.canvasCamera = camera
     }
@@ -147,39 +159,32 @@ struct CanvasView: View {
     }
 }
 
+private enum SpaceChromeMetrics {
+    static let contentPadding = EdgeInsets(top: 12, leading: 8, bottom: 12, trailing: 8)
+    static let borderWidth: CGFloat = 3
+    static let textSpaceOuterChromeHeight: Double = 30
+    static let selectionBlue = Color(red: 0, green: 85 / 255, blue: 1)
+}
+
 struct SpaceCardView: View {
     @EnvironmentObject private var appModel: AppModel
     let project: Project
     let space: Space
     @State private var dragAnchor: (x: Double, y: Double)?
+    @State private var pendingTextEditAt: CGPoint?
 
     private var selected: Bool { appModel.selectedSpaceIds.contains(space.id) }
-    private var headerBackground: Color {
-        appModel.appearance == .dark ? Color(red: 0.18, green: 0.18, blue: 0.18) : Color(red: 0.94, green: 0.94, blue: 0.94)
-    }
+    private var isLayerSpace: Bool { LayerSpaceKinds.hidden.contains(space.kind) }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Text(space.kind)
-                .font(.caption.weight(.semibold))
-                .padding(6)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(headerBackground)
-                .contentShape(Rectangle())
-                .gesture(dragGesture(for: space))
-                .simultaneousGesture(spaceTapGesture(for: space, onHeader: true))
-            ZStack {
-                spaceBody
-                SpaceStrokeInteractionLayer(project: project, space: space)
-            }
-            .modifier(SpaceBodyTapModifier(
-                enabled: space.kind != "TextSpace",
-                gesture: spaceTapGesture(for: space, onHeader: false)
-            ))
+        ZStack {
+            spaceBody
+            SpaceStrokeInteractionLayer(project: project, space: space)
         }
+        .padding(isLayerSpace ? EdgeInsets() : SpaceChromeMetrics.contentPadding)
         .frame(width: space.width, height: space.height)
         .background(Color(hex: space.background_color) ?? Color.clear)
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay { spaceSelectionBorder }
         .scaleEffect(x: space.scale_x, y: space.scale_y)
         .rotationEffect(.radians(SpaceTransform.rotationRadians(space.transform_matrix)))
         .overlay(
@@ -187,13 +192,34 @@ struct SpaceCardView: View {
                 appModel.updateSelectedSpaceSize(width: Double(width), height: Double(height), spaceId: space.id)
             }
         )
+        .contentShape(Rectangle())
+        .gesture(dragGesture(for: space))
+        .simultaneousGesture(spaceTapGesture(for: space))
         .shadow(radius: selected ? 4 : 1)
+    }
+
+    @ViewBuilder
+    private var spaceSelectionBorder: some View {
+        if !isLayerSpace {
+            if space.kind == "TextSpace" || selected {
+                Rectangle()
+                    .strokeBorder(
+                        selected ? SpaceChromeMetrics.selectionBlue : Color.clear,
+                        lineWidth: SpaceChromeMetrics.borderWidth
+                    )
+            }
+        }
     }
 
     private func dragGesture(for space: Space) -> some Gesture {
         DragGesture()
             .onChanged { value in
-                guard appModel.selectedTool == .pointer, appModel.selectedSpaceId == space.id, appModel.canWritePage else { return }
+                guard appModel.selectedTool == .pointer, appModel.canWritePage else { return }
+                if space.kind == "TextSpace", EditableKeyboardTarget.textEditingActive,
+                   appModel.selectedSpaceId == space.id {
+                    return
+                }
+                guard appModel.selectedSpaceId == space.id else { return }
                 if dragAnchor == nil {
                     dragAnchor = (space.x, space.y)
                 }
@@ -210,14 +236,13 @@ struct SpaceCardView: View {
             }
     }
 
-    private func spaceTapGesture(for space: Space, onHeader: Bool) -> some Gesture {
+    private func spaceTapGesture(for space: Space) -> some Gesture {
         SpatialTapGesture()
             .onEnded { value in
                 let localX = value.location.x
                 let localY = value.location.y
-                let headerHeight: Double = 28
                 let worldX = space.x + localX
-                let worldY = space.y + (onHeader ? localY : headerHeight + localY)
+                let worldY = space.y + localY
 
                 switch appModel.selectedTool {
                 case .probe:
@@ -232,11 +257,11 @@ struct SpaceCardView: View {
                     appModel.handleCanvasToolTap(atX: worldX, y: worldY, onSpaceId: space.id)
                 case .pointer:
                     appModel.selectSpace(space.id)
-                    if space.kind == "TextSpace", onHeader {
-                        EditableKeyboardTarget.textEditingActive = false
+                    if space.kind == "TextSpace", appModel.canWritePage {
+                        pendingTextEditAt = CGPoint(x: localX, y: localY)
                     }
                 case .createStroke, .eraseStroke:
-                    if onHeader { appModel.selectSpace(space.id) }
+                    appModel.selectSpace(space.id)
                 }
             }
     }
@@ -245,7 +270,7 @@ struct SpaceCardView: View {
     private var spaceBody: some View {
         switch space.kind {
         case "TextSpace":
-            TextSpaceArea(project: project, space: space)
+            TextSpaceArea(project: project, space: space, editAtPoint: $pendingTextEditAt)
         case "ImageSpace", "PhotoSpace", "GroupPhotoSpace":
             RemoteAssetImage(project: project, space: space)
         case "PDFSpace":
@@ -527,10 +552,7 @@ struct GenericSpaceView: View {
     }
 
     var body: some View {
-        ZStack {
-            fillColor.opacity(0.15)
-            Text(space.kind).foregroundStyle(.secondary)
-        }
+        fillColor.opacity(0.15)
     }
 }
 
@@ -549,8 +571,6 @@ private struct CanvasTextFormatToolbar: View {
     @EnvironmentObject private var appModel: AppModel
     let project: Project
     let viewport: CGSize
-    private let textSpaceHeaderHeight: CGFloat = 28
-
     var body: some View {
         if let overlay = appModel.textFormatOverlay,
            appModel.selectedSpaceId == overlay.spaceId,
@@ -580,9 +600,9 @@ private struct CanvasTextFormatToolbar: View {
         let screenX = worldX * scale + appModel.canvasCamera.offsetX
         let estimatedBarHeight: CGFloat = 52
         let maxBarWidth = min(viewport.width - 16, 520)
-        var screenY = (space.y + Double(textSpaceHeaderHeight) + Double(caret.maxY) + 6) * scale + appModel.canvasCamera.offsetY
+        var screenY = (space.y + Double(caret.maxY) + 6) * scale + appModel.canvasCamera.offsetY
         if screenY + estimatedBarHeight > viewport.height - 8 {
-            screenY = (space.y + Double(textSpaceHeaderHeight) + Double(caret.minY) - 6) * scale + appModel.canvasCamera.offsetY - estimatedBarHeight
+            screenY = (space.y + Double(caret.minY) - 6) * scale + appModel.canvasCamera.offsetY - estimatedBarHeight
         }
         let clampedX = min(max(8, screenX), max(8, viewport.width - maxBarWidth - 8))
         let clampedY = max(8, screenY)
@@ -590,15 +610,3 @@ private struct CanvasTextFormatToolbar: View {
     }
 }
 
-private struct SpaceBodyTapModifier<G: Gesture>: ViewModifier {
-    let enabled: Bool
-    let gesture: G
-
-    func body(content: Content) -> some View {
-        if enabled {
-            content.simultaneousGesture(gesture)
-        } else {
-            content
-        }
-    }
-}

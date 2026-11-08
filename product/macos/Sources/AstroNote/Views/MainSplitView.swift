@@ -10,8 +10,11 @@ struct MainSplitView: View {
         } content: {
             VStack(spacing: 0) {
                 SearchBarView()
+                    .zIndex(20)
                 StatusBannerView()
+                    .zIndex(19)
                 ProjectAreaView()
+                    .zIndex(0)
             }
         } detail: {
             InspectorPanel()
@@ -67,6 +70,9 @@ struct StatusBannerView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
         .background(Color(nsColor: .windowBackgroundColor))
+        .overlay(alignment: .bottom) {
+            Divider()
+        }
         .confirmationDialog("Force write unlock?", isPresented: $confirmForceUnlock) {
             Button("Force unlock", role: .destructive) { Task { await appModel.forceUnlockSelectedPage() } }
             Button("Cancel", role: .cancel) {}
@@ -86,7 +92,9 @@ struct ProjectAreaView: View {
         } else if let project = appModel.hydratedProject {
             VStack(spacing: 0) {
                 ProjectHeaderView(project: project)
+                    .zIndex(10)
                 ToolbarView()
+                    .zIndex(9)
                 CanvasView(project: project)
             }
         } else {
@@ -105,5 +113,9 @@ struct ProjectHeaderView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+        .background(Color(nsColor: .windowBackgroundColor))
+        .overlay(alignment: .bottom) {
+            Divider()
+        }
     }
 }

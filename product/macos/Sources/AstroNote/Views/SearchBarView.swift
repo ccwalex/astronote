@@ -25,6 +25,10 @@ struct SearchBarView: View {
             SearchResultsPanel()
         }
         .padding(12)
+        .background(Color(nsColor: .windowBackgroundColor))
+        .overlay(alignment: .bottom) {
+            Divider()
+        }
         .sheet(isPresented: $showRagConfig) {
             RagConfigSheet()
         }

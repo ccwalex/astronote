@@ -160,9 +160,6 @@ struct SpaceChromeView: View {
 
     var body: some View {
         ZStack(alignment: .topLeading) {
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(selected ? Color.accentColor : Color.secondary.opacity(0.35), lineWidth: selected ? 2 : 1)
-
             if showTransformChrome {
                 HStack(spacing: 4) {
                     Button("Flip H") { appModel.flipSelectedSpace(horizontal: true) }
@@ -177,7 +174,7 @@ struct SpaceChromeView: View {
                 }
                 .padding(4)
                 .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 4))
-                .offset(x: 4, y: 4)
+                .offset(x: 0, y: -30)
             }
 
             if showTransformChrome, let onResize {
