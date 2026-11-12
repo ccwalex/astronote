@@ -68,13 +68,15 @@ final class FormattedTextEditorController: ObservableObject {
             completion(120)
             return
         }
-        webView.evaluateJavaScript("document.getElementById('content') && document.getElementById('content').scrollHeight") { result, _ in
+        webView.evaluateJavaScript(CanvasDisplayMetrics.measureEditorContentHeightJS) { result, _ in
             if let height = result as? Double {
                 completion(height)
             } else if let height = result as? Int {
                 completion(Double(height))
+            } else if let height = result as? CGFloat {
+                completion(Double(height))
             } else {
-                completion(120)
+                completion(Double(CanvasDisplayMetrics.minContentHeight))
             }
         }
     }
@@ -96,11 +98,18 @@ struct FormattedTextView: NSViewRepresentable {
     var documentDark: Bool
     let spaceId: String
     var onMarkdownChange: (String) -> Void
+    var onContentLayout: (() -> Void)?
     @ObservedObject var controller: FormattedTextEditorController
     var appModel: AppModel?
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onMarkdownChange: onMarkdownChange, controller: controller, spaceId: spaceId, appModel: appModel)
+        Coordinator(
+            onMarkdownChange: onMarkdownChange,
+            onContentLayout: onContentLayout,
+            controller: controller,
+            spaceId: spaceId,
+            appModel: appModel
+        )
     }
 
     func makeNSView(context: Context) -> WKWebView {
@@ -112,12 +121,14 @@ struct FormattedTextView: NSViewRepresentable {
         config.userContentController = userContent
         config.suppressesIncrementalRendering = true
         config.websiteDataStore = .nonPersistent()
+        config.preferences.minimumFontSize = 0
 
         let webView = EditorWebView(frame: .zero, configuration: config)
         webView.ignoresMouse = !isEditable
         webView.underPageBackgroundColor = .clear
         webView.navigationDelegate = context.coordinator
         webView.allowsMagnification = false
+        webView.pageZoom = 1
         webView.allowsBackForwardNavigationGestures = false
         if #available(macOS 13.3, *) {
             webView.isInspectable = false
@@ -132,9 +143,13 @@ struct FormattedTextView: NSViewRepresentable {
 
     func updateNSView(_ webView: WKWebView, context: Context) {
         context.coordinator.onMarkdownChange = onMarkdownChange
+        context.coordinator.onContentLayout = onContentLayout
         context.coordinator.documentDark = documentDark
         context.coordinator.pendingEditable = isEditable
         context.coordinator.attach(webView: webView)
+        if let container = webView.superview, container.bounds.width > 0, container.bounds.height > 0 {
+            webView.frame = container.bounds
+        }
         if let editor = webView as? EditorWebView {
             editor.ignoresMouse = !isEditable
         }
@@ -165,6 +180,7 @@ struct FormattedTextView: NSViewRepresentable {
         static let processPool = WKProcessPool()
 
         var onMarkdownChange: (String) -> Void
+        var onContentLayout: (() -> Void)?
         let controller: FormattedTextEditorController
         let spaceId: String
         weak var appModel: AppModel?
@@ -175,8 +191,15 @@ struct FormattedTextView: NSViewRepresentable {
         var pendingEditable = false
         var pendingMarkdown: String?
 
-        init(onMarkdownChange: @escaping (String) -> Void, controller: FormattedTextEditorController, spaceId: String, appModel: AppModel?) {
+        init(
+            onMarkdownChange: @escaping (String) -> Void,
+            onContentLayout: (() -> Void)?,
+            controller: FormattedTextEditorController,
+            spaceId: String,
+            appModel: AppModel?
+        ) {
             self.onMarkdownChange = onMarkdownChange
+            self.onContentLayout = onContentLayout
             self.controller = controller
             self.spaceId = spaceId
             self.appModel = appModel
@@ -204,8 +227,30 @@ struct FormattedTextView: NSViewRepresentable {
         func applyPendingMarkdown(in webView: WKWebView) {
             guard let markdown = pendingMarkdown else { return }
             pendingMarkdown = nil
-            let literal = TextFormatScripts.jsonJavaScriptString(markdown)
-            webView.evaluateJavaScript("window.astroSetMarkdown && window.astroSetMarkdown(\(literal))")
+            let markdownLiteral = TextFormatScripts.jsonJavaScriptString(markdown)
+            let layoutHandler = onContentLayout
+            let notifyLayout = {
+                DispatchQueue.main.async {
+                    layoutHandler?()
+                }
+            }
+            if TextFormatScripts.scriptsAvailable {
+                webView.evaluateJavaScript("window.astroSetMarkdown && window.astroSetMarkdown(\(markdownLiteral))") { _, _ in
+                    notifyLayout()
+                }
+                return
+            }
+            let htmlLiteral = TextFormatScripts.jsonJavaScriptString(TextFormat.markdownToHTML(markdown))
+            let js = """
+            (function(){
+              var el=document.getElementById('content');
+              if(!el)return;
+              el.innerHTML=\(htmlLiteral);
+            })();
+            """
+            webView.evaluateJavaScript(js) { _, _ in
+                notifyLayout()
+            }
         }
 
         func setEditable(_ editable: Bool, in webView: WKWebView) {

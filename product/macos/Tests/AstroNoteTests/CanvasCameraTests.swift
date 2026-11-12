@@ -55,6 +55,33 @@ final class CanvasCameraTests: XCTestCase {
         XCTAssertEqual(frame.height, 120, accuracy: 0.001)
     }
 
+    func testCanvasRootSpacesIncludesContentUnderObjectContainer() {
+        let root = Space(id: "root", kind: "RootSpace", x: 0, y: 0, width: 2000, height: 2000)
+        let container = Space(
+            id: "container",
+            kind: "ObjectContainerSpace",
+            x: 0,
+            y: 0,
+            width: 2000,
+            height: 2000,
+            parent_space_id: "root"
+        )
+        let text = Space(
+            id: "text",
+            kind: "TextSpace",
+            x: 120,
+            y: 80,
+            width: 320,
+            height: 240,
+            parent_space_id: "container"
+        )
+        var project = Project(id: "p1", name: "Test", root_space_id: "root", spaces: [:], objects: [:], assets: [:])
+        project.spaces = ["root": root, "container": container, "text": text]
+        let rootSpaces = project.canvasRootSpaces()
+        XCTAssertTrue(rootSpaces.contains(where: { $0.id == "text" }))
+        XCTAssertFalse(rootSpaces.contains(where: { $0.id == "container" }))
+    }
+
     func testContentSizeIncludesNestedSpaceExtents() {
         let parent = Space(
             id: "parent",

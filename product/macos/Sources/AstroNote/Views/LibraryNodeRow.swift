@@ -4,6 +4,7 @@ struct LibraryNodeRowView: View {
     @EnvironmentObject private var appModel: AppModel
     let node: LibraryNode
     let depth: Int
+    var onFolderTap: (() -> Void)?
     @State private var isRenaming = false
     @State private var renameText = ""
     @State private var confirmDelete = false
@@ -35,6 +36,11 @@ struct LibraryNodeRowView: View {
     private var label: some View {
         if node.kind == "folder" {
             Label(node.name, systemImage: "folder")
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    onFolderTap?()
+                }
         } else {
             Button {
                 Task { await appModel.openLibraryNode(node) }

@@ -7,20 +7,39 @@ struct MainSplitView: View {
         NavigationSplitView {
             LibrarySidebar()
                 .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 320)
-        } content: {
-            VStack(spacing: 0) {
-                SearchBarView()
-                    .zIndex(20)
-                StatusBannerView()
-                    .zIndex(19)
-                ProjectAreaView()
-                    .zIndex(0)
+        } detail: {
+            ZStack(alignment: .topTrailing) {
+                VStack(spacing: 0) {
+                    SearchBarView()
+                        .zIndex(20)
+                    StatusBannerView()
+                        .zIndex(19)
+                    ProjectAreaView()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .zIndex(0)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                if !appModel.inspectorVisible {
+                    Button("Inspector") {
+                        appModel.inspectorVisible = true
+                    }
+                    .font(.caption)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 4))
+                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.secondary.opacity(0.35)))
+                    .padding(8)
+                    .zIndex(30)
+                }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .toolbarBackground(.visible, for: .windowToolbar)
             .safeAreaPadding(.top)
-        } detail: {
+        }
+        .inspector(isPresented: $appModel.inspectorVisible) {
             InspectorPanel()
-                .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 320)
+                .inspectorColumnWidth(min: 220, ideal: 260, max: 360)
         }
         .sheet(isPresented: $appModel.showAssetMigrationPrompt) {
             AssetTrackingMigrationPrompt()
@@ -98,7 +117,9 @@ struct ProjectAreaView: View {
                 ToolbarView()
                     .zIndex(9)
                 CanvasView(project: project)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             ContentUnavailableView("Could not load page", systemImage: "exclamationmark.triangle")
         }

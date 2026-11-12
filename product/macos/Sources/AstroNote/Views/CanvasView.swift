@@ -1,6 +1,7 @@
 import SwiftUI
 import PDFKit
 import AppKit
+import WebKit
 
 struct CanvasView: View {
     @EnvironmentObject private var appModel: AppModel
@@ -12,6 +13,7 @@ struct CanvasView: View {
         GeometryReader { geo in
             ZStack(alignment: .topLeading) {
                 canvasBackdropColor
+                    .frame(width: geo.size.width, height: geo.size.height)
                 transformedWorldLayer(in: geo.size)
                 verticalGapPreview
                 CanvasGestureOverlay(
@@ -41,13 +43,20 @@ struct CanvasView: View {
                 ProbeResultsPanel()
                     .frame(width: geo.size.width, height: geo.size.height, alignment: .bottomLeading)
                 CanvasTextFormatToolbar(project: project, viewport: geo.size)
+                CanvasScrollBars(viewport: geo.size, contentSize: canvasSize)
+            }
+            .onAppear {
+                clampCamera(viewport: geo.size)
+            }
+            .onChange(of: geo.size) { _, size in
+                clampCamera(viewport: size)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    @ViewBuilder
     private func transformedWorldLayer(in viewport: CGSize) -> some View {
-        let base = worldLayer
+        worldLayer
             .scaleEffect(appModel.canvasCamera.scale, anchor: .topLeading)
             .offset(x: appModel.canvasCamera.offsetX, y: appModel.canvasCamera.offsetY)
             .frame(width: canvasSize.width, height: canvasSize.height, alignment: .topLeading)
@@ -58,9 +67,17 @@ struct CanvasView: View {
 
     private var worldLayer: some View {
         ZStack(alignment: .topLeading) {
-            ForEach(project.topLevelVisibleSpaces()) { space in
+            Color.clear
+                .frame(width: canvasSize.width, height: canvasSize.height)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    guard appModel.selectedTool == .pointer else { return }
+                    appModel.selectSpace(nil)
+                }
+            ForEach(project.canvasRootSpaces()) { space in
+                let origin = SpaceLayout.absolutePosition(space: space, spaces: project.spaces)
                 SpaceCardView(project: project, space: space)
-                    .offset(x: space.x, y: space.y)
+                    .offset(x: origin.x, y: origin.y)
             }
             SnapGuidesOverlay()
             StrokeCanvasOverlay()
@@ -109,6 +126,12 @@ struct CanvasView: View {
         appModel.canvasCamera = camera
     }
 
+    private func clampCamera(viewport: CGSize) {
+        var camera = appModel.canvasCamera
+        camera.clampOffset(viewport: viewport, contentSize: canvasSize)
+        appModel.canvasCamera = camera
+    }
+
     private func insertGapDragGesture(in viewport: CGSize) -> some Gesture {
         DragGesture(minimumDistance: 6)
             .onChanged { value in
@@ -141,13 +164,6 @@ struct CanvasView: View {
     }
 }
 
-private enum SpaceChromeMetrics {
-    static let contentPadding = EdgeInsets(top: 12, leading: 8, bottom: 12, trailing: 8)
-    static let borderWidth: CGFloat = 3
-    static let textSpaceOuterChromeHeight: Double = 30
-    static let selectionBlue = Color(red: 0, green: 85 / 255, blue: 1)
-}
-
 struct SpaceCardView: View {
     @EnvironmentObject private var appModel: AppModel
     let project: Project
@@ -157,17 +173,24 @@ struct SpaceCardView: View {
 
     private var selected: Bool { appModel.selectedSpaceIds.contains(space.id) }
     private var isLayerSpace: Bool { LayerSpaceKinds.hidden.contains(space.kind) }
+    private var isPhotoSpace: Bool {
+        ["ImageSpace", "PhotoSpace", "GroupPhotoSpace"].contains(space.kind)
+    }
+    private var cardPadding: EdgeInsets {
+        if isLayerSpace || isPhotoSpace { return EdgeInsets() }
+        return CanvasDisplayMetrics.contentPadding
+    }
 
     var body: some View {
         ZStack {
             spaceBody
             SpaceStrokeInteractionLayer(project: project, space: space)
         }
-        .padding(isLayerSpace ? EdgeInsets() : SpaceChromeMetrics.contentPadding)
+        .padding(cardPadding)
         .frame(width: space.width, height: space.height)
         .background(Color(hex: space.background_color) ?? Color.clear)
         .overlay { spaceSelectionBorder }
-        .scaleEffect(x: space.scale_x, y: space.scale_y)
+        .scaleEffect(x: space.scale_x, y: space.scale_y, anchor: .topLeading)
         .rotationEffect(.radians(SpaceTransform.rotationRadians(space.transform_matrix)))
         .overlay(
             SpaceChromeView(space: space, selected: selected) { width, height in
@@ -186,8 +209,8 @@ struct SpaceCardView: View {
             if space.kind == "TextSpace" || selected {
                 Rectangle()
                     .strokeBorder(
-                        selected ? SpaceChromeMetrics.selectionBlue : Color.clear,
-                        lineWidth: SpaceChromeMetrics.borderWidth
+                        selected ? CanvasDisplayMetrics.selectionBlue : Color.clear,
+                        lineWidth: CanvasDisplayMetrics.borderWidth
                     )
             }
         }
@@ -350,7 +373,8 @@ struct RemoteAssetImage: View {
     @EnvironmentObject private var appModel: AppModel
     let project: Project
     let space: Space
-    @State private var image: NSImage?
+    @State private var snapshot: SVGSnapshot?
+    @State private var loadFailed = false
     @State private var showImporter = false
     @State private var imageURL = ""
 
@@ -358,18 +382,24 @@ struct RemoteAssetImage: View {
         space.reference_asset_id != nil || !space.asset_ids.isEmpty
     }
 
+    private var assetKey: String {
+        "\(space.id)-\(space.reference_asset_id ?? space.asset_ids.first ?? "")"
+    }
+
     var body: some View {
         Group {
-            if let image {
-                Image(nsImage: image)
-                    .resizable()
-                    .scaledToFit()
+            if let snapshot, snapshot.hasVisibleContent {
+                snapshotView(snapshot)
             } else if !hasAsset {
                 EmptyImageSpaceView(
                     spaceId: space.id,
                     imageURL: $imageURL,
                     showImporter: $showImporter
                 )
+            } else if loadFailed {
+                Text("Could not load image")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             } else {
                 ProgressView()
             }
@@ -383,14 +413,100 @@ struct RemoteAssetImage: View {
                 await appModel.attachImageToSpace(spaceId: space.id, data: data, filename: url.lastPathComponent, mimeType: mime)
             }
         }
-        .task(id: space.id) {
+        .task(id: assetKey) {
             guard hasAsset else { return }
             guard let assetId = space.reference_asset_id ?? space.asset_ids.first else { return }
-            if let data = await appModel.assetData(for: assetId) {
-                image = NSImage(data: data)
+            loadFailed = false
+            snapshot = nil
+            guard let data = await appModel.assetData(for: assetId) else {
+                loadFailed = true
+                return
+            }
+            let decoded = SVGSnapshotImage.decode(data)
+            if let decoded, decoded.hasVisibleContent {
+                snapshot = decoded
+            } else {
+                loadFailed = true
             }
         }
     }
+
+    @ViewBuilder
+    private func snapshotView(_ snapshot: SVGSnapshot) -> some View {
+        GeometryReader { geo in
+            let canvasW = max(1, snapshot.width)
+            let canvasH = max(1, snapshot.height)
+            ZStack(alignment: .topLeading) {
+                ForEach(Array(snapshot.images.enumerated()), id: \.offset) { _, layer in
+                    Image(nsImage: layer.image)
+                        .resizable()
+                        .interpolation(.high)
+                        .frame(
+                            width: layer.fullFrame ? geo.size.width : geo.size.width * layer.width / canvasW,
+                            height: layer.fullFrame ? geo.size.height : geo.size.height * layer.height / canvasH
+                        )
+                        .offset(
+                            x: layer.fullFrame ? 0 : geo.size.width * layer.x / canvasW,
+                            y: layer.fullFrame ? 0 : geo.size.height * layer.y / canvasH
+                        )
+                }
+                if let overlay = snapshot.overlayImage {
+                    Image(nsImage: overlay)
+                        .resizable()
+                        .interpolation(.high)
+                        .frame(width: geo.size.width, height: geo.size.height)
+                } else if !snapshot.vectorMarkup.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    SVGVectorOverlay(
+                        markup: snapshot.vectorMarkup,
+                        viewBox: snapshot.viewBox
+                    )
+                    .frame(width: geo.size.width, height: geo.size.height)
+                    .allowsHitTesting(false)
+                }
+            }
+        }
+    }
+}
+
+private struct SVGVectorOverlay: NSViewRepresentable {
+    let markup: String
+    let viewBox: String
+
+    func makeNSView(context: Context) -> MouseThroughWebView {
+        let config = WKWebViewConfiguration()
+        config.websiteDataStore = .nonPersistent()
+        config.suppressesIncrementalRendering = true
+        let view = MouseThroughWebView(frame: .zero, configuration: config)
+        view.setValue(false, forKey: "drawsBackground")
+        view.underPageBackgroundColor = .clear
+        load(in: view)
+        return view
+    }
+
+    func updateNSView(_ view: MouseThroughWebView, context: Context) {
+        load(in: view)
+    }
+
+    private func load(in view: MouseThroughWebView) {
+        let html = """
+        <!DOCTYPE html><html><head><meta charset="utf-8">
+        <style>
+        html,body{margin:0;padding:0;background:transparent;overflow:hidden;width:100%;height:100%;}
+        svg{width:100%;height:100%;display:block;}
+        </style></head><body>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="\(viewBox)" width="100%" height="100%" preserveAspectRatio="none">\(markup)</svg>
+        </body></html>
+        """
+        guard view.loadedHTML != html else { return }
+        view.loadedHTML = html
+        view.loadHTMLString(html, baseURL: nil)
+    }
+}
+
+private final class MouseThroughWebView: WKWebView {
+    var loadedHTML: String = ""
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    override var acceptsFirstResponder: Bool { false }
 }
 
 private struct EmptyImageSpaceView: View {
@@ -513,14 +629,22 @@ struct GroupSpaceView: View {
         appModel.appearance == .dark ? Color(red: 0.18, green: 0.18, blue: 0.18) : Color(red: 0.94, green: 0.94, blue: 0.94)
     }
 
+    private var nestedSpaces: [Space] {
+        let listed = Set(space.child_space_ids)
+        var ordered: [Space] = space.child_space_ids.compactMap { project.spaces[$0] }
+        let linked = project.visibleSpaces().filter { child in
+            child.parent_space_id == space.id && !listed.contains(child.id)
+        }
+        ordered.append(contentsOf: linked)
+        return ordered.filter { !LayerSpaceKinds.hidden.contains($0.kind) }
+    }
+
     var body: some View {
         ZStack(alignment: .topLeading) {
             fillColor.opacity(0.2)
-            ForEach(space.child_space_ids, id: \.self) { childId in
-                if let child = project.spaces[childId], !LayerSpaceKinds.hidden.contains(child.kind) {
-                    SpaceCardView(project: project, space: child)
-                        .offset(x: child.x, y: child.y)
-                }
+            ForEach(nestedSpaces) { child in
+                SpaceCardView(project: project, space: child)
+                    .offset(x: child.x, y: child.y)
             }
         }
     }
@@ -547,6 +671,142 @@ private extension Color {
         let g = Int(hex[hex.index(start, offsetBy: 2)..<hex.index(start, offsetBy: 4)], radix: 16) ?? 0
         let b = Int(hex[hex.index(start, offsetBy: 4)..<hex.index(start, offsetBy: 6)], radix: 16) ?? 0
         self.init(red: Double(r) / 255, green: Double(g) / 255, blue: Double(b) / 255)
+    }
+}
+
+private struct CanvasScrollBars: View {
+    @EnvironmentObject private var appModel: AppModel
+    let viewport: CGSize
+    let contentSize: CGSize
+    @State private var verticalDragOrigin: Double?
+    @State private var horizontalDragOrigin: Double?
+
+    private let thickness: CGFloat = 13
+    private let minThumb: CGFloat = 28
+
+    private var scaled: CGSize {
+        CGSize(
+            width: contentSize.width * appModel.canvasCamera.scale,
+            height: contentSize.height * appModel.canvasCamera.scale
+        )
+    }
+
+    private var showHorizontal: Bool { scaled.width > viewport.width + 0.5 }
+    private var showVertical: Bool { scaled.height > viewport.height + 0.5 }
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            if showVertical {
+                verticalBar
+                    .frame(width: thickness, height: max(0, viewport.height - (showHorizontal ? thickness : 0)))
+                    .offset(x: max(0, viewport.width - thickness), y: 0)
+            }
+            if showHorizontal {
+                horizontalBar
+                    .frame(width: max(0, viewport.width - (showVertical ? thickness : 0)), height: thickness)
+                    .offset(x: 0, y: max(0, viewport.height - thickness))
+            }
+        }
+        .frame(width: viewport.width, height: viewport.height, alignment: .topLeading)
+        .allowsHitTesting(showHorizontal || showVertical)
+    }
+
+    private var verticalBar: some View {
+        let metrics = barMetrics(
+            trackLength: max(0, viewport.height - (showHorizontal ? thickness : 0)),
+            viewportLength: viewport.height,
+            contentLength: scaled.height,
+            offset: appModel.canvasCamera.offsetY
+        )
+        return barTrack {
+            thumb(width: thickness - 4, height: metrics.thumbLength)
+                .offset(x: 2, y: metrics.thumbOrigin)
+                .gesture(drag(.vertical, metrics: metrics))
+        }
+    }
+
+    private var horizontalBar: some View {
+        let metrics = barMetrics(
+            trackLength: max(0, viewport.width - (showVertical ? thickness : 0)),
+            viewportLength: viewport.width,
+            contentLength: scaled.width,
+            offset: appModel.canvasCamera.offsetX
+        )
+        return barTrack {
+            thumb(width: metrics.thumbLength, height: thickness - 4)
+                .offset(x: metrics.thumbOrigin, y: 2)
+                .gesture(drag(.horizontal, metrics: metrics))
+        }
+    }
+
+    private func barTrack<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        ZStack(alignment: .topLeading) {
+            RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.08))
+            content()
+        }
+        .padding(1)
+    }
+
+    private func thumb(width: CGFloat, height: CGFloat) -> some View {
+        RoundedRectangle(cornerRadius: 6)
+            .fill(Color.primary.opacity(0.38))
+            .frame(width: width, height: height)
+    }
+
+    private struct BarMetrics {
+        var travel: CGFloat
+        var thumbLength: CGFloat
+        var thumbTravel: CGFloat
+        var thumbOrigin: CGFloat
+        var scrollPos: Double
+    }
+
+    private enum Axis { case horizontal, vertical }
+
+    private func barMetrics(
+        trackLength: CGFloat,
+        viewportLength: CGFloat,
+        contentLength: CGFloat,
+        offset: Double
+    ) -> BarMetrics {
+        let travel = max(contentLength - viewportLength, 1)
+        let thumbLength = min(trackLength, max(minThumb, trackLength * viewportLength / max(contentLength, 1)))
+        let thumbTravel = max(trackLength - thumbLength, 1)
+        let scrollPos = min(Double(travel), max(0, -offset))
+        return BarMetrics(
+            travel: travel,
+            thumbLength: thumbLength,
+            thumbTravel: thumbTravel,
+            thumbOrigin: CGFloat(scrollPos / Double(travel)) * thumbTravel,
+            scrollPos: scrollPos
+        )
+    }
+
+    private func drag(_ axis: Axis, metrics: BarMetrics) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                if axis == .vertical, verticalDragOrigin == nil {
+                    verticalDragOrigin = metrics.scrollPos
+                }
+                if axis == .horizontal, horizontalDragOrigin == nil {
+                    horizontalDragOrigin = metrics.scrollPos
+                }
+                let origin = (axis == .vertical ? verticalDragOrigin : horizontalDragOrigin) ?? metrics.scrollPos
+                let delta = axis == .vertical ? value.translation.height : value.translation.width
+                let nextPos = origin + Double(delta / metrics.thumbTravel) * Double(metrics.travel)
+                var camera = appModel.canvasCamera
+                if axis == .vertical {
+                    camera.offsetY = -min(Double(metrics.travel), max(0, nextPos))
+                } else {
+                    camera.offsetX = -min(Double(metrics.travel), max(0, nextPos))
+                }
+                camera.clampOffset(viewport: viewport, contentSize: contentSize)
+                appModel.canvasCamera = camera
+            }
+            .onEnded { _ in
+                verticalDragOrigin = nil
+                horizontalDragOrigin = nil
+            }
     }
 }
 

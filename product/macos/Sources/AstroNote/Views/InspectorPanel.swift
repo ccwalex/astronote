@@ -5,7 +5,16 @@ struct InspectorPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Inspector").font(.headline)
+            HStack {
+                Text("Inspector").font(.headline)
+                Spacer()
+                Button("Hide") {
+                    appModel.inspectorVisible = false
+                }
+                .font(.caption)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
             zoomSection()
             if appModel.selectedTool == .probe {
                 ProbeResultsPanel()

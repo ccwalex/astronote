@@ -69,7 +69,6 @@ struct TextSpaceArea: View {
     @State private var loaded = false
     @StateObject private var textEditor = FormattedTextEditorController()
 
-    private static let outerChromeHeight: Double = 30
 
     private var isEditing: Bool {
         appModel.canWritePage && appModel.selectedSpaceId == space.id
@@ -87,21 +86,35 @@ struct TextSpaceArea: View {
                     text = newValue
                     guard let assetId = space.reference_asset_id ?? space.asset_ids.first else { return }
                     appModel.updateTextAsset(assetId: assetId, markdown: newValue)
-                    textEditor.measureContentHeight { height in
-                        let padded = max(Double(geo.size.height), height + Self.outerChromeHeight)
-                        appModel.updateSelectedTextHeight(padded)
-                    }
+                    syncTextSpaceHeight()
+                },
+                onContentLayout: {
+                    guard loaded else { return }
+                    syncTextSpaceHeight()
                 },
                 controller: textEditor,
                 appModel: appModel
             )
+            .frame(width: geo.size.width, height: geo.size.height)
         }
         .task(id: space.id) {
             loaded = false
             EditableKeyboardTarget.textEditingActive = false
-            guard let assetId = space.reference_asset_id ?? space.asset_ids.first else { return }
+            guard let assetId = space.reference_asset_id ?? space.asset_ids.first else {
+                text = ""
+                loaded = true
+                return
+            }
             text = await appModel.assetText(for: assetId)
             loaded = true
+        }
+        .onChange(of: loaded) { _, isLoaded in
+            guard isLoaded else { return }
+            syncTextSpaceHeight()
+        }
+        .onChange(of: space.height) { _, _ in
+            guard loaded else { return }
+            syncTextSpaceHeight()
         }
         .onChange(of: isEditing) { _, editing in
             if editing {
@@ -119,8 +132,8 @@ struct TextSpaceArea: View {
         }
         .onChange(of: editAtPoint) { _, point in
             guard let point else { return }
-            let paddedX = point.x - 8
-            let paddedY = point.y - 12
+            let paddedX = point.x - CanvasDisplayMetrics.contentPadding.leading
+            let paddedY = point.y - CanvasDisplayMetrics.contentPadding.top
             beginEditing(at: CGPoint(x: max(0, paddedX), y: max(0, paddedY)))
             editAtPoint = nil
         }
@@ -130,5 +143,13 @@ struct TextSpaceArea: View {
         appModel.selectSpace(space.id)
         EditableKeyboardTarget.textEditingActive = true
         textEditor.focusEditor(at: point)
+    }
+
+    private func syncTextSpaceHeight() {
+        textEditor.measureContentHeight { height in
+            let required = CanvasDisplayMetrics.requiredTextSpaceHeight(contentHeight: height)
+            if abs(required - space.height) < 0.5 { return }
+            appModel.updateTextSpaceHeight(required, spaceId: space.id)
+        }
     }
 }

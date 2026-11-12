@@ -280,7 +280,8 @@ extension Project {
         spaces.values.filter { !LayerSpaceKinds.hidden.contains($0.kind) }.sorted { $0.z < $1.z }
     }
 
-    func topLevelVisibleSpaces() -> [Space] {
+    /// Spaces drawn on the canvas root layer (matches web `renderableSpaces` for non-layer kinds).
+    func canvasRootSpaces() -> [Space] {
         visibleSpaces().filter { space in
             guard let parentId = space.parent_space_id, let parent = spaces[parentId] else { return true }
             return LayerSpaceKinds.hidden.contains(parent.kind)

@@ -85,4 +85,14 @@ final class TextFormatTests: XCTestCase {
             XCTFail("expected idle")
         }
     }
+
+    func testJsonJavaScriptStringEncodesMarkdownForEvaluateJavaScript() {
+        let md = "# Title\nline \"quote\" \\ backslash"
+        let literal = TextFormatScripts.jsonJavaScriptString(md)
+        XCTAssertTrue(literal.hasPrefix("\""))
+        XCTAssertTrue(literal.hasSuffix("\""))
+        let data = Data(literal.utf8)
+        let decoded = try? JSONDecoder().decode(String.self, from: data)
+        XCTAssertEqual(decoded, md)
+    }
 }

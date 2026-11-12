@@ -451,9 +451,20 @@ extension AppModel {
     }
 
     func updateSelectedTextHeight(_ height: Double) {
-        guard var project = hydratedProject, let spaceId = selectedSpaceId else { return }
-        _ = WorkspaceActionsSpaces.updateSpaceSize(project: &project, spaceId: spaceId, width: project.spaces[spaceId]?.width ?? 320, height: height)
+        guard let spaceId = selectedSpaceId else { return }
+        updateTextSpaceHeight(height, spaceId: spaceId)
+    }
+
+    func updateTextSpaceHeight(_ height: Double, spaceId: String) {
+        guard var project = hydratedProject, let space = project.spaces[spaceId], space.kind == "TextSpace" else { return }
+        _ = WorkspaceActionsSpaces.updateSpaceSize(
+            project: &project,
+            spaceId: spaceId,
+            width: space.width,
+            height: height
+        )
         hydratedProject = project
+        guard canWritePage else { return }
         mutationSignals.editedSpaceIds.append(spaceId)
         markDirty(coalesceKey: "text-height:\(spaceId)")
         scheduleSave()

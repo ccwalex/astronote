@@ -48,6 +48,15 @@ echo "==> Universal binary: $(lipo -info "$UNIVERSAL")"
 cp "$UNIVERSAL" "$MACOS_DIR/${APP_NAME}"
 chmod +x "$MACOS_DIR/${APP_NAME}"
 
+RESOURCE_BUNDLE="$ROOT/.build/arm64-apple-macosx/release/${APP_NAME}_AstroNote.bundle"
+if [ -d "$RESOURCE_BUNDLE" ]; then
+  rm -rf "$MACOS_DIR/${APP_NAME}_AstroNote.bundle"
+  cp -R "$RESOURCE_BUNDLE" "$MACOS_DIR/"
+  echo "==> Bundled SPM resources: ${APP_NAME}_AstroNote.bundle"
+else
+  echo "==> Warning: ${APP_NAME}_AstroNote.bundle not found; text formatting scripts may be missing."
+fi
+
 xattr -cr "$APP_PATH" 2>/dev/null || true
 
 ENTITLEMENTS="$ROOT/Resources/AstroNote.entitlements"

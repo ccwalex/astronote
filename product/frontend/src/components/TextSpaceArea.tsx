@@ -13,9 +13,13 @@ import {
   writeTextSpaceCopyPayload,
 } from '../model/textSpaceClipboard';
 
-const TEXTSPACE_PADDING_Y = 12;
-const TEXTSPACE_BORDER_Y = 3;
-const OUTER_TEXTSPACE_CHROME_HEIGHT = TEXTSPACE_PADDING_Y * 2 + TEXTSPACE_BORDER_Y * 2;
+import {
+  OUTER_TEXTSPACE_CHROME_HEIGHT,
+  TEXT_MIN_CONTENT_HEIGHT,
+  TEXT_FONT_SIZE,
+  TEXT_LINE_HEIGHT,
+  TEXT_EDITOR_PADDING_BOTTOM
+} from '../model/canvasDisplay';
 
 /** Plain-text offset of the caret from the start of the editor, or null if no caret lives inside it. */
 function getCaretTextOffset(editor: HTMLElement): number | null {
@@ -90,11 +94,11 @@ function caretRangeFromClientPoint(x: number, y: number): Range | null {
 
 function measureEditorContentHeight(editor: HTMLElement): number {
   const style = window.getComputedStyle(editor);
-  const paddingBottom = parseFloat(style.paddingBottom) || 0;
+  const paddingBottom = parseFloat(style.paddingBottom) || TEXT_EDITOR_PADDING_BOTTOM;
   const paddingTop = parseFloat(style.paddingTop) || 0;
-  const fontSize = parseFloat(style.fontSize) || 18;
+  const fontSize = parseFloat(style.fontSize) || TEXT_FONT_SIZE;
   const parsedLineHeight = parseFloat(style.lineHeight);
-  const lineHeight = Number.isFinite(parsedLineHeight) ? parsedLineHeight : fontSize * 1.4;
+  const lineHeight = Number.isFinite(parsedLineHeight) ? parsedLineHeight : fontSize * TEXT_LINE_HEIGHT;
 
   const minHeight = paddingTop + lineHeight + paddingBottom;
   if (!editor.firstChild) {

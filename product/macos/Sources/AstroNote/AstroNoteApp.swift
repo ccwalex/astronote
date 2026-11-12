@@ -30,6 +30,12 @@ struct AstroNoteApp: App {
                 Button("Commit checkpoint") { Task { await appModel.commitCheckpoint() } }
                 Button("Revert to baseline") { Task { await appModel.revertToBaseline() } }
             }
+            CommandGroup(after: .sidebar) {
+                Button(appModel.inspectorVisible ? "Hide Inspector" : "Show Inspector") {
+                    appModel.inspectorVisible.toggle()
+                }
+                .keyboardShortcut("i", modifiers: [.command, .option])
+            }
         }
     }
 }

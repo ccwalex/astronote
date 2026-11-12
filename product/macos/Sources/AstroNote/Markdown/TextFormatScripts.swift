@@ -9,13 +9,18 @@ enum TextFormatScripts {
         "astroTextFormat",
     ]
 
+    private static func scriptURL(name: String) -> URL? {
+        Bundle.module.url(forResource: name, withExtension: "js")
+            ?? Bundle.module.url(forResource: name, withExtension: "js", subdirectory: "Markdown/js")
+    }
+
+    static var scriptsAvailable: Bool {
+        scriptNames.contains { scriptURL(name: $0) != nil }
+    }
+
     static func install(into userContent: WKUserContentController) {
         for name in scriptNames {
-            guard let url = Bundle.module.url(
-                forResource: name,
-                withExtension: "js",
-                subdirectory: "Markdown/js"
-            ),
+            guard let url = scriptURL(name: name),
                 let source = try? String(contentsOf: url, encoding: .utf8) else {
                 continue
             }
@@ -25,7 +30,7 @@ enum TextFormatScripts {
     }
 
     static func jsonJavaScriptString(_ value: String) -> String {
-        guard let data = try? JSONSerialization.data(withJSONObject: value, options: []),
+        guard let data = try? JSONEncoder().encode(value),
               let encoded = String(data: data, encoding: .utf8) else {
             return "''"
         }

@@ -127,6 +127,12 @@ final class AppModel: ObservableObject {
     @Published var spaceBackgroundColor: String = "#ffffff"
 
     @AppStorage("astronote.appearance") var appearanceStorage: String = AppAppearance.light.rawValue
+    @Published var inspectorVisible: Bool = {
+        if UserDefaults.standard.object(forKey: "astronote.inspector.visible") == nil { return true }
+        return UserDefaults.standard.bool(forKey: "astronote.inspector.visible")
+    }() {
+        didSet { UserDefaults.standard.set(inspectorVisible, forKey: "astronote.inspector.visible") }
+    }
 
     var appearance: AppAppearance {
         get { AppAppearance(rawValue: appearanceStorage) ?? .light }
@@ -440,6 +446,12 @@ final class AppModel: ObservableObject {
         syncSpaceBackgroundColorFromSelection()
         if spaceId == nil {
             EditableKeyboardTarget.textEditingActive = false
+            textFormatOverlay = nil
+            activeTextFormatEditor = nil
+        } else if let space = hydratedProject?.spaces[spaceId!], space.kind != "TextSpace" {
+            EditableKeyboardTarget.textEditingActive = false
+            textFormatOverlay = nil
+            activeTextFormatEditor = nil
         }
     }
 
@@ -722,7 +734,8 @@ final class AppModel: ObservableObject {
 
     func restoreSelectedPhotoToGroup() async {
         guard let client, let projectId = selectedProjectId, let spaceId = selectedSpaceId,
-              let space = hydratedProject?.spaces[spaceId], space.kind.contains("Photo") else { return }
+              let space = hydratedProject?.spaces[spaceId],
+              ["ImageSpace", "PhotoSpace", "GroupPhotoSpace"].contains(space.kind) else { return }
         do {
             let updated = try await client.restorePhotoToGroup(projectId: projectId, imageSpaceId: spaceId)
             workspace = updated

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { LibraryNode } from '../types';
 import {
   embedAllAssets,
@@ -65,6 +65,21 @@ export function LibrarySidebar({
   const toggleFolder = (id: string) => {
     setExpandedFolders(prev => ({ ...prev, [id]: !prev[id] }));
   };
+
+  useEffect(() => {
+    setExpandedFolders((prev) => {
+      const next = { ...prev };
+      let changed = false;
+      Object.values(libraryNodes).forEach((n) => {
+        const isRoot = !n.parent_id || !libraryNodes[n.parent_id];
+        if (isRoot && n.kind === 'folder' && next[n.id] === undefined) {
+          next[n.id] = true;
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
+  }, [libraryNodes]);
 
   const refreshEmbeddingStatus = async () => {
     const status = await fetchEmbeddingTrackingStatus();

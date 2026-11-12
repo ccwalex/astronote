@@ -39,6 +39,7 @@ struct ToolbarView: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(persistColor)
                 zoomControls()
+                inspectorToggle()
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 2)
@@ -308,6 +309,15 @@ struct ToolbarView: View {
         }
         .pickerStyle(.segmented)
         .frame(width: 140)
+    }
+
+    private func inspectorToggle() -> some View {
+        labeledButton(
+            appModel.inspectorVisible ? "Hide Inspector" : "Inspector",
+            systemImage: "sidebar.right"
+        ) {
+            appModel.inspectorVisible.toggle()
+        }
     }
 
     private func zoomControls() -> some View {

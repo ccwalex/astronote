@@ -142,17 +142,28 @@ enum TextFormat {
         let fg = dark ? "#f5f5f5" : "#111111"
         let editableAttr = editable ? "true" : "false"
         return """
-        <!doctype html><html><head><meta charset=\"utf-8\"><style>
-        html,body{margin:0;padding:0;overflow:hidden;height:100%;}
-        body{font:14px -apple-system,sans-serif;background:\(bg);color:\(fg);}
-        #content{outline:none;min-height:0;height:100%;box-sizing:border-box;line-height:1.45;caret-color:currentColor;-webkit-user-select:text;user-select:text;overflow:hidden;}
+        <!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><style>
+        html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;-webkit-text-size-adjust:100%;text-size-adjust:100%;}
+        body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;font-size:18px;line-height:1.4;background:\(bg);color:\(fg);}
+        #content{outline:none;min-height:0;height:auto;box-sizing:border-box;font-size:18px;line-height:1.4;color:\(fg);caret-color:currentColor;-webkit-user-select:text;user-select:text;word-wrap:break-word;overflow-wrap:break-word;padding:0;padding-bottom:5px;margin:0;}
+        #content > :first-child{margin-top:0 !important;}
+        #content > :last-child{margin-bottom:0 !important;}
         #content ul,#content ol{margin:0 0 0.5em 0;padding-left:1.5em;}
         #content li{margin:0.15em 0;}
         #content table{border-collapse:collapse;width:100%;margin-bottom:1em;}
         #content td{border:1px solid #000;padding:6px;text-align:left;font-weight:normal;vertical-align:top;}
-        blockquote{border-left:3px solid #888;margin:0;padding-left:10px;color:#888;}
-        pre{background:rgba(127,127,127,0.15);padding:8px;border-radius:4px;overflow-x:auto;}
-        code{font-family:ui-monospace,monospace;}
+        #content blockquote{border-left:3px solid #ccc;margin-left:0;padding-left:10px;color:#555;}
+        #content pre{background:rgba(127,127,127,0.15);padding:8px;border-radius:4px;overflow-x:auto;}
+        #content code{font-family:ui-monospace,monospace;background:rgba(127,127,127,0.15);padding:2px 4px;border-radius:3px;}
+        #content pre code{background:transparent;padding:0;}
+        #content h1,#content h2,#content h3,#content h4,#content h5,#content h6{margin-top:0.5em;margin-bottom:0.5em;font-weight:bold;}
+        #content h1{font-size:2em;}
+        #content h2{font-size:1.5em;}
+        #content h3{font-size:1.17em;}
+        #content h4{font-size:1em;}
+        #content h5{font-size:0.83em;}
+        #content h6{font-size:0.67em;}
+        #content p{margin-top:0;margin-bottom:0.5em;}
         </style></head><body>
         <div id=\"content\" contenteditable=\"\(editableAttr)\">\(body)</div>
         <script>
