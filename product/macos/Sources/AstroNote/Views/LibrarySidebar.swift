@@ -32,22 +32,31 @@ struct LibrarySidebar: View {
             Task { await appModel.openLibraryNode(node) }
         }
         .toolbar {
-            ToolbarItemGroup {
-                Button { showCreateFolder = true } label: {
-                    Label("Folder", systemImage: "folder.badge.plus")
-                        .labelStyle(.titleAndIcon)
-                }
-                Button { showCreatePage = true } label: {
-                    Label("Page", systemImage: "doc.badge.plus")
-                        .labelStyle(.titleAndIcon)
-                }
-                Button { appModel.disconnect(clearCredentials: false) } label: {
-                    Label("Disconnect", systemImage: "link.badge.plus")
-                        .labelStyle(.titleAndIcon)
-                }
-                Button { appModel.disconnect(clearCredentials: true) } label: {
-                    Label("Clear saved login", systemImage: "key.slash")
-                        .labelStyle(.titleAndIcon)
+            ToolbarItem(placement: .primaryAction) {
+                Menu {
+                    Button {
+                        showCreateFolder = true
+                    } label: {
+                        Label("New Folder", systemImage: "folder.badge.plus")
+                    }
+                    Button {
+                        showCreatePage = true
+                    } label: {
+                        Label("New Page", systemImage: "doc.badge.plus")
+                    }
+                    Divider()
+                    Button {
+                        appModel.disconnect(clearCredentials: false)
+                    } label: {
+                        Label("Disconnect", systemImage: "link.badge.plus")
+                    }
+                    Button {
+                        appModel.disconnect(clearCredentials: true)
+                    } label: {
+                        Label("Clear saved login", systemImage: "key.slash")
+                    }
+                } label: {
+                    Label("Library actions", systemImage: "ellipsis.circle")
                 }
             }
         }

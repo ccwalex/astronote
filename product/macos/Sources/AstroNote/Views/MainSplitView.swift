@@ -16,6 +16,8 @@ struct MainSplitView: View {
                 ProjectAreaView()
                     .zIndex(0)
             }
+            .toolbarBackground(.visible, for: .windowToolbar)
+            .safeAreaPadding(.top)
         } detail: {
             InspectorPanel()
                 .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 320)

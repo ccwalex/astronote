@@ -218,8 +218,13 @@ struct StrokeCanvasOverlay: View {
 }
 
 struct CanvasGestureOverlay: NSViewRepresentable {
+    let selectedTool: AppModel.CanvasTool
+    let camera: CanvasCamera
+    let project: Project
     let onScroll: (Double, Double, CGPoint) -> Void
     let onPan: (Double, Double) -> Void
+    let onProbe: (Double, Double) -> Void
+    let onCanvasToolTap: (Double, Double, String?) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -231,8 +236,13 @@ struct CanvasGestureOverlay: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: ScrollCaptureView, context: Context) {
+        context.coordinator.selectedTool = selectedTool
+        context.coordinator.camera = camera
+        context.coordinator.project = project
         context.coordinator.onScroll = onScroll
         context.coordinator.onPan = onPan
+        context.coordinator.onProbe = onProbe
+        context.coordinator.onCanvasToolTap = onCanvasToolTap
         context.coordinator.hostView = nsView
         if nsView.window != nil {
             context.coordinator.installMonitorIfNeeded()
@@ -244,10 +254,40 @@ struct CanvasGestureOverlay: NSViewRepresentable {
     }
 
     final class Coordinator {
+        var selectedTool: AppModel.CanvasTool = .pointer
+        var camera = CanvasCamera()
+        var project: Project?
         var onScroll: ((Double, Double, CGPoint) -> Void)?
         var onPan: ((Double, Double) -> Void)?
+        var onProbe: ((Double, Double) -> Void)?
+        var onCanvasToolTap: ((Double, Double, String?) -> Void)?
         weak var hostView: ScrollCaptureView?
         private var monitor: Any?
+
+        var capturesCanvasClicks: Bool {
+            switch selectedTool {
+            case .probe, .createGeneric, .createText, .createImage, .createPDF, .createGroup:
+                return true
+            default:
+                return false
+            }
+        }
+
+        func handleClick(atWindowPoint windowPoint: NSPoint) {
+            guard capturesCanvasClicks, let host = hostView else { return }
+            let viewport = host.convert(windowPoint, from: nil)
+            guard host.bounds.contains(viewport) else { return }
+            let world = SpaceLayout.pointerToWorld(point: viewport, camera: camera)
+            switch selectedTool {
+            case .probe:
+                onProbe?(world.x, world.y)
+            case .createGeneric, .createText, .createImage, .createPDF, .createGroup:
+                let groupId = project.map { ProbeCanvas.groupParentId(atX: world.x, y: world.y, project: $0) }
+                onCanvasToolTap?(world.x, world.y, groupId ?? nil)
+            default:
+                break
+            }
+        }
 
         func installMonitorIfNeeded() {
             guard monitor == nil else { return }
@@ -265,8 +305,9 @@ struct CanvasGestureOverlay: NSViewRepresentable {
                     panX = event.scrollingDeltaX
                     panY = event.scrollingDeltaY
                 } else {
-                    panX = Double(event.deltaX) * 16
-                    panY = Double(event.deltaY) * 16
+                    let direction: Double = event.isDirectionInvertedFromDevice ? -1 : 1
+                    panX = Double(event.deltaX) * 16 * direction
+                    panY = Double(event.deltaY) * 16 * direction
                 }
                 if commandZoom {
                     self.onScroll?(event.deltaY, event.scrollingDeltaY, point)
@@ -300,7 +341,14 @@ struct CanvasGestureOverlay: NSViewRepresentable {
             }
         }
 
-        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            guard coordinator?.capturesCanvasClicks == true, bounds.contains(point) else { return nil }
+            return self
+        }
+
+        override func mouseDown(with event: NSEvent) {
+            coordinator?.handleClick(atWindowPoint: event.locationInWindow)
+        }
     }
 }
 

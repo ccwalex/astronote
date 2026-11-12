@@ -335,12 +335,16 @@ private struct ToolbarToolButtonStyle: ButtonStyle {
     let selected: Bool
 
     func makeBody(configuration: Configuration) -> some View {
+        let fill: Color = selected
+            ? Color.accentColor
+            : Color(nsColor: .controlBackgroundColor)
+        let label: Color = selected ? .white : Color(nsColor: .controlTextColor)
         configuration.label
             .font(.caption)
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
-            .background(selected ? Color(red: 0, green: 0.333, blue: 1) : Color.white)
-            .foregroundStyle(selected ? Color.white : Color.primary)
+            .background(fill)
+            .foregroundStyle(label)
             .clipShape(RoundedRectangle(cornerRadius: 4))
             .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.secondary.opacity(0.35)))
             .opacity(configuration.isPressed ? 0.85 : 1)

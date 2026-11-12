@@ -15,6 +15,9 @@ struct CanvasView: View {
                 transformedWorldLayer(in: geo.size)
                 verticalGapPreview
                 CanvasGestureOverlay(
+                    selectedTool: appModel.selectedTool,
+                    camera: appModel.canvasCamera,
+                    project: project,
                     onScroll: { lineDelta, scrollDelta, point in
                         handleCanvasScroll(
                             lineDelta: lineDelta,
@@ -26,6 +29,12 @@ struct CanvasView: View {
                     },
                     onPan: { dx, dy in
                         handleCanvasScroll(deltaX: dx, deltaY: dy, viewport: geo.size, commandZoom: false)
+                    },
+                    onProbe: { x, y in
+                        appModel.runProbe(atX: x, y: y)
+                    },
+                    onCanvasToolTap: { x, y, groupId in
+                        appModel.handleCanvasToolTap(atX: x, y: y, onSpaceId: groupId)
                     }
                 )
                 .frame(width: geo.size.width, height: geo.size.height)
@@ -43,20 +52,13 @@ struct CanvasView: View {
             .offset(x: appModel.canvasCamera.offsetX, y: appModel.canvasCamera.offsetY)
             .frame(width: canvasSize.width, height: canvasSize.height, alignment: .topLeading)
             .contentShape(Rectangle())
-            .simultaneousGesture(probeCanvasGesture(in: viewport))
             .simultaneousGesture(insertGapDragGesture(in: viewport))
-
-        if appModel.selectedTool != .pointer {
-            base.gesture(canvasToolGesture(in: viewport))
-                .clipped()
-        } else {
-            base.clipped()
-        }
+            .clipped()
     }
 
     private var worldLayer: some View {
         ZStack(alignment: .topLeading) {
-            ForEach(project.visibleSpaces()) { space in
+            ForEach(project.topLevelVisibleSpaces()) { space in
                 SpaceCardView(project: project, space: space)
                     .offset(x: space.x, y: space.y)
             }
@@ -107,24 +109,6 @@ struct CanvasView: View {
         appModel.canvasCamera = camera
     }
 
-    private func canvasToolGesture(in viewport: CGSize) -> some Gesture {
-        SpatialTapGesture()
-            .onEnded { value in
-                guard appModel.selectedTool != .insertVerticalSpace else { return }
-                let world = canvasWorldPoint(from: value.location, viewport: viewport)
-                appModel.handleCanvasToolTap(atX: world.x, y: world.y, onSpaceId: nil)
-            }
-    }
-
-    private func probeCanvasGesture(in viewport: CGSize) -> some Gesture {
-        SpatialTapGesture()
-            .onEnded { value in
-                guard appModel.selectedTool == .probe else { return }
-                let world = canvasWorldPoint(from: value.location, viewport: viewport)
-                appModel.runProbe(atX: world.x, y: world.y)
-            }
-    }
-
     private func insertGapDragGesture(in viewport: CGSize) -> some Gesture {
         DragGesture(minimumDistance: 6)
             .onChanged { value in
@@ -153,10 +137,7 @@ struct CanvasView: View {
     }
 
     private var canvasSize: CGSize {
-        let spaces = project.visibleSpaces()
-        let maxX = spaces.map { $0.x + $0.width }.max() ?? 1200
-        let maxY = spaces.map { $0.y + $0.height }.max() ?? 900
-        return CGSize(width: max(maxX + 200, 1200), height: max(maxY + 200, 900))
+        CanvasWorldBounds.contentSize(visibleSpaces: project.visibleSpaces(), spaces: project.spaces)
     }
 }
 
@@ -242,8 +223,9 @@ struct SpaceCardView: View {
             .onEnded { value in
                 let localX = value.location.x
                 let localY = value.location.y
-                let worldX = space.x + localX
-                let worldY = space.y + localY
+                let abs = SpaceLayout.absolutePosition(space: space, spaces: project.spaces)
+                let worldX = abs.x + localX
+                let worldY = abs.y + localY
 
                 switch appModel.selectedTool {
                 case .probe:

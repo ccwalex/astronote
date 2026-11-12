@@ -12,6 +12,8 @@ struct AstroNoteApp: App {
                 .onAppear { AppTerminationBridge.appModel = appModel }
                 .frame(minWidth: 1100, minHeight: 700)
         }
+        .windowToolbarStyle(.unifiedCompact(showsTitle: false))
+        .defaultSize(width: 1440, height: 900)
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("New Page") { appModel.createPage() }
@@ -54,5 +56,6 @@ struct RootView: View {
                 onRedo: { appModel.redo() }
             ))
         }
+        .background(WindowConfigurator())
     }
 }

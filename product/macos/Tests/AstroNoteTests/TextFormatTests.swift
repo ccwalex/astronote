@@ -10,6 +10,26 @@ final class TextFormatTests: XCTestCase {
         XCTAssertTrue(back.contains("world"))
     }
 
+    func testExtendedHeadingsMarkdownToHTML() {
+        let md = "#### Four\n\n##### Five\n\n###### Six"
+        let html = TextFormat.markdownToHTML(md)
+        XCTAssertTrue(html.contains("<h4>Four</h4>"))
+        XCTAssertTrue(html.contains("<h5>Five</h5>"))
+        XCTAssertTrue(html.contains("<h6>Six</h6>"))
+        let back = TextFormat.htmlToMarkdown(html)
+        XCTAssertTrue(back.contains("#### Four"))
+        XCTAssertTrue(back.contains("##### Five"))
+        XCTAssertTrue(back.contains("###### Six"))
+    }
+
+    func testNbspBlankParagraphLineInMarkdown() {
+        let nbsp = "\u{00a0}"
+        let md = "Line one\n\n\(nbsp)\n\nLine two"
+        let html = TextFormat.markdownToHTML(md)
+        XCTAssertTrue(html.contains("Line one"))
+        XCTAssertTrue(html.contains("Line two"))
+    }
+
     func testNestedListMarkdownToHTML() {
         let md = "- one\n  - nested\n    - deeper\n- two"
         let html = TextFormat.markdownToHTML(md)

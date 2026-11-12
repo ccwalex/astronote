@@ -42,8 +42,9 @@ enum WorkspaceActionsSpaces {
         var localY = y
         if let parentId, let group = project.spaces[parentId], group.kind == "GroupSpace" {
             container = group
-            localX = x - group.x
-            localY = y - group.y
+            let absolute = SpaceLayout.absolutePosition(space: group, spaces: project.spaces)
+            localX = x - absolute.x
+            localY = y - absolute.y
         }
         guard let containerSpace = container else { return nil }
 

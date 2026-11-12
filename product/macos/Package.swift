@@ -30,6 +30,9 @@ let package = Package(
         .executableTarget(
             name: "AstroNote",
             path: "Sources/AstroNote",
+            resources: [
+                .process("Resources"),
+            ],
             linkerSettings: astroLinkerSettings
         ),
         .testTarget(

@@ -119,6 +119,12 @@ enum TextFormat {
         text = text.replacingOccurrences(of: "(?i)</h2>", with: "\n\n", options: .regularExpression)
         text = text.replacingOccurrences(of: "(?i)<h3[^>]*>", with: "\n\n### ", options: .regularExpression)
         text = text.replacingOccurrences(of: "(?i)</h3>", with: "\n\n", options: .regularExpression)
+        text = text.replacingOccurrences(of: "(?i)<h4[^>]*>", with: "\n\n#### ", options: .regularExpression)
+        text = text.replacingOccurrences(of: "(?i)</h4>", with: "\n\n", options: .regularExpression)
+        text = text.replacingOccurrences(of: "(?i)<h5[^>]*>", with: "\n\n##### ", options: .regularExpression)
+        text = text.replacingOccurrences(of: "(?i)</h5>", with: "\n\n", options: .regularExpression)
+        text = text.replacingOccurrences(of: "(?i)<h6[^>]*>", with: "\n\n###### ", options: .regularExpression)
+        text = text.replacingOccurrences(of: "(?i)</h6>", with: "\n\n", options: .regularExpression)
         text = text.replacingOccurrences(of: "(?i)<p[^>]*>", with: "", options: .regularExpression)
         text = text.replacingOccurrences(of: "(?i)</p>", with: "\n\n", options: .regularExpression)
         text = text.replacingOccurrences(of: "(?i)<br\\s*/?>", with: "\n", options: .regularExpression)
@@ -152,7 +158,10 @@ enum TextFormat {
         <script>
         const el=document.getElementById('content');
         const post=(payload)=>window.webkit.messageHandlers.astro.postMessage(JSON.stringify(payload));
-        const emitChange=()=>post({type:'change',html:el.innerHTML});
+        const emitChange=()=>{
+          var md=typeof window.astroHtmlToMarkdown==='function'?window.astroHtmlToMarkdown(el.innerHTML):'';
+          post({type:'change',markdown:md});
+        };
         const queryState=(cmd)=>document.queryCommandState(cmd);
         const queryValue=(cmd)=>document.queryCommandValue(cmd);
         const readFormats=()=>({
@@ -168,6 +177,9 @@ enum TextFormat {
             if(block.includes('h1'))return 'h1';
             if(block.includes('h2'))return 'h2';
             if(block.includes('h3'))return 'h3';
+            if(block.includes('h4'))return 'h4';
+            if(block.includes('h5'))return 'h5';
+            if(block.includes('h6'))return 'h6';
             return 'normal';
           })()
         });
@@ -195,8 +207,9 @@ enum TextFormat {
           }
           emitSelection();
         };
-        el.addEventListener('mousedown',(e)=>{focusAtPoint(e.clientX,e.clientY);});
+        el.addEventListener('mousedown',(e)=>{if(el.contentEditable!=='true')return;focusAtPoint(e.clientX,e.clientY);});
         document.addEventListener('mousedown',(e)=>{
+          if(el.contentEditable!=='true')return;
           if(el.contains(e.target))return;
           focusAtPoint(e.clientX,e.clientY);
         });
@@ -206,7 +219,7 @@ enum TextFormat {
           el.focus();
           switch(action){
             case 'normal':document.execCommand('formatBlock',false,'P');break;
-            case 'h1':case 'h2':case 'h3':document.execCommand('formatBlock',false,action.toUpperCase());break;
+            case 'h1':case 'h2':case 'h3':case 'h4':case 'h5':case 'h6':document.execCommand('formatBlock',false,action.toUpperCase());break;
             case 'bold':document.execCommand('bold');break;
             case 'italic':document.execCommand('italic');break;
             case 'strike':document.execCommand('strikeThrough');break;
@@ -639,6 +652,9 @@ enum TextFormat {
     }
 
     private static func parseHeading(_ line: String) -> (tag: String, text: String)? {
+        if line.hasPrefix("###### ") { return ("h6", String(line.dropFirst(7))) }
+        if line.hasPrefix("##### ") { return ("h5", String(line.dropFirst(6))) }
+        if line.hasPrefix("#### ") { return ("h4", String(line.dropFirst(5))) }
         if line.hasPrefix("### ") { return ("h3", String(line.dropFirst(4))) }
         if line.hasPrefix("## ") { return ("h2", String(line.dropFirst(3))) }
         if line.hasPrefix("# ") { return ("h1", String(line.dropFirst(2))) }
@@ -776,5 +792,5 @@ enum TextFormat {
 }
 
 enum TextFormatAction: String {
-    case normal, h1, h2, h3, bold, italic, strike, bullet, number, quote, code
+    case normal, h1, h2, h3, h4, h5, h6, bold, italic, strike, bullet, number, quote, code
 }

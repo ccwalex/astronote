@@ -13,6 +13,9 @@ struct TextFormattingToolbarView: View {
                     case "h1": onAction(.h1)
                     case "h2": onAction(.h2)
                     case "h3": onAction(.h3)
+                    case "h4": onAction(.h4)
+                    case "h5": onAction(.h5)
+                    case "h6": onAction(.h6)
                     default: onAction(.normal)
                     }
                 }
@@ -21,9 +24,12 @@ struct TextFormattingToolbarView: View {
                 Text("H1").tag("h1")
                 Text("H2").tag("h2")
                 Text("H3").tag("h3")
+                Text("H4").tag("h4")
+                Text("H5").tag("h5")
+                Text("H6").tag("h6")
             }
             .labelsHidden()
-            .frame(width: 88)
+            .frame(width: 120)
 
             formatButton("Bold", systemImage: "bold", active: activeFormats.bold) { onAction(.bold) }
             formatButton("Italic", systemImage: "italic", active: activeFormats.italic) { onAction(.italic) }

@@ -35,6 +35,7 @@ final class FormattedTextEditorController: ObservableObject {
 
     func focusEditor(at point: CGPoint?) {
         guard let webView else { return }
+        EditableKeyboardTarget.textEditingActive = true
         webView.window?.makeFirstResponder(webView)
         if let point {
             let js = """
@@ -80,7 +81,13 @@ final class FormattedTextEditorController: ObservableObject {
 }
 
 final class EditorWebView: WKWebView {
+    var ignoresMouse = true
+
     override var acceptsFirstResponder: Bool { true }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        ignoresMouse ? nil : super.hitTest(point)
+    }
 }
 
 struct FormattedTextView: NSViewRepresentable {
@@ -100,12 +107,14 @@ struct FormattedTextView: NSViewRepresentable {
         let config = WKWebViewConfiguration()
         config.processPool = Coordinator.processPool
         let userContent = config.userContentController
+        TextFormatScripts.install(into: userContent)
         userContent.add(context.coordinator, name: "astro")
         config.userContentController = userContent
         config.suppressesIncrementalRendering = true
         config.websiteDataStore = .nonPersistent()
 
         let webView = EditorWebView(frame: .zero, configuration: config)
+        webView.ignoresMouse = !isEditable
         webView.underPageBackgroundColor = .clear
         webView.navigationDelegate = context.coordinator
         webView.allowsMagnification = false
@@ -126,6 +135,9 @@ struct FormattedTextView: NSViewRepresentable {
         context.coordinator.documentDark = documentDark
         context.coordinator.pendingEditable = isEditable
         context.coordinator.attach(webView: webView)
+        if let editor = webView as? EditorWebView {
+            editor.ignoresMouse = !isEditable
+        }
         let interaction = isEditable
         webView.isHidden = false
         context.coordinator.setEditable(interaction, in: webView)
@@ -161,6 +173,7 @@ struct FormattedTextView: NSViewRepresentable {
         var documentDark = false
         var loadedDark = false
         var pendingEditable = false
+        var pendingMarkdown: String?
 
         init(onMarkdownChange: @escaping (String) -> Void, controller: FormattedTextEditorController, spaceId: String, appModel: AppModel?) {
             self.onMarkdownChange = onMarkdownChange
@@ -183,9 +196,16 @@ struct FormattedTextView: NSViewRepresentable {
         func load(markdown: String, editable: Bool, in webView: WKWebView) {
             displayedMarkdown = markdown
             lastEmittedMarkdown = markdown
-            let body = TextFormat.markdownToHTML(markdown)
-            let html = TextFormat.documentHTML(body: body, editable: editable, dark: documentDark)
+            pendingMarkdown = markdown
+            let html = TextFormat.documentHTML(body: "<p><br></p>", editable: editable, dark: documentDark)
             webView.loadHTMLString(html, baseURL: nil)
+        }
+
+        func applyPendingMarkdown(in webView: WKWebView) {
+            guard let markdown = pendingMarkdown else { return }
+            pendingMarkdown = nil
+            let literal = TextFormatScripts.jsonJavaScriptString(markdown)
+            webView.evaluateJavaScript("window.astroSetMarkdown && window.astroSetMarkdown(\(literal))")
         }
 
         func setEditable(_ editable: Bool, in webView: WKWebView) {
@@ -195,8 +215,12 @@ struct FormattedTextView: NSViewRepresentable {
 
         @MainActor
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            applyPendingMarkdown(in: webView)
             setEditable(pendingEditable, in: webView)
             if pendingEditable {
+                if let editor = webView as? EditorWebView {
+                    editor.ignoresMouse = false
+                }
                 controller.focusEditor(at: nil)
             }
         }
@@ -208,12 +232,20 @@ struct FormattedTextView: NSViewRepresentable {
                let data = jsonString.data(using: .utf8),
                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let type = json["type"] as? String {
-                if type == "change", let html = json["html"] as? String {
-                    let markdown = TextFormat.htmlToMarkdown(html)
-                    lastEmittedMarkdown = markdown
-                    displayedMarkdown = markdown
-                    onMarkdownChange(markdown)
-                    return
+                if type == "change" {
+                    if let markdown = json["markdown"] as? String {
+                        lastEmittedMarkdown = markdown
+                        displayedMarkdown = markdown
+                        onMarkdownChange(markdown)
+                        return
+                    }
+                    if let html = json["html"] as? String {
+                        let markdown = TextFormat.htmlToMarkdown(html)
+                        lastEmittedMarkdown = markdown
+                        displayedMarkdown = markdown
+                        onMarkdownChange(markdown)
+                        return
+                    }
                 }
                 if type == "selection" {
                     let visible = (json["visible"] as? Bool) ?? false

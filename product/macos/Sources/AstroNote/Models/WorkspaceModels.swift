@@ -279,4 +279,11 @@ extension Project {
     func visibleSpaces() -> [Space] {
         spaces.values.filter { !LayerSpaceKinds.hidden.contains($0.kind) }.sorted { $0.z < $1.z }
     }
+
+    func topLevelVisibleSpaces() -> [Space] {
+        visibleSpaces().filter { space in
+            guard let parentId = space.parent_space_id, let parent = spaces[parentId] else { return true }
+            return LayerSpaceKinds.hidden.contains(parent.kind)
+        }
+    }
 }

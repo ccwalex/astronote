@@ -237,20 +237,40 @@ extension AppModel {
     }
 
     func handleCanvasToolTap(atX x: Double, y: Double, onSpaceId: String?) {
+        guard canWritePage else {
+            statusMessage = "Cannot create space: page is read-only"
+            return
+        }
+        let parentId = resolveCreateParentId(onSpaceId: onSpaceId)
         switch selectedTool {
         case .createGeneric:
-            createSpace(kind: .createGeneric, atX: x, y: y, parentId: onSpaceId)
+            createSpace(kind: .createGeneric, atX: x, y: y, parentId: parentId)
         case .createText:
-            createSpace(kind: .createText, atX: x, y: y, parentId: onSpaceId)
+            createSpace(kind: .createText, atX: x, y: y, parentId: parentId)
         case .createImage:
-            createSpace(kind: .createImage, atX: x, y: y, parentId: onSpaceId)
+            createSpace(kind: .createImage, atX: x, y: y, parentId: parentId)
         case .createPDF:
-            createSpace(kind: .createPDF, atX: x, y: y, parentId: onSpaceId)
+            createSpace(kind: .createPDF, atX: x, y: y, parentId: parentId)
         case .createGroup:
-            createSpace(kind: .createGroup, atX: x, y: y, parentId: onSpaceId)
+            createSpace(kind: .createGroup, atX: x, y: y, parentId: parentId)
         default:
             break
         }
+    }
+
+    private func resolveCreateParentId(onSpaceId: String?) -> String? {
+        guard let project = hydratedProject else { return nil }
+        if let onSpaceId {
+            if project.spaces[onSpaceId]?.kind == "GroupSpace" { return onSpaceId }
+            if let parentId = project.spaces[onSpaceId]?.parent_space_id,
+               project.spaces[parentId]?.kind == "GroupSpace" {
+                return parentId
+            }
+        }
+        if let selected = selectedSpaceId, project.spaces[selected]?.kind == "GroupSpace" {
+            return selected
+        }
+        return nil
     }
 
     func createSpace(kind: CanvasTool, atX x: Double, y: Double, parentId: String? = nil) {
@@ -277,6 +297,7 @@ extension AppModel {
         if createKind == .text {
             EditableKeyboardTarget.textEditingActive = true
         }
+        selectedTool = .pointer
         statusMessage = "Created space"
     }
 

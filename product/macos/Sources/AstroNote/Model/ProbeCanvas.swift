@@ -30,6 +30,16 @@ struct ProbeResult: Identifiable, Hashable {
 enum ProbeCanvas {
     private static let layerSpaces: Set<String> = Set(LayerSpaceKinds.hidden)
 
+    static func groupParentId(atX x: Double, y: Double, project: Project) -> String? {
+        let top = probe(project: project, x: x, y: y, mode: .topHit).first?.spaceId
+        guard let spaceId = top, let space = project.spaces[spaceId] else { return nil }
+        if space.kind == "GroupSpace" { return space.id }
+        if let parentId = space.parent_space_id, project.spaces[parentId]?.kind == "GroupSpace" {
+            return parentId
+        }
+        return nil
+    }
+
     static func probe(project: Project, x: Double, y: Double, mode: ProbeMode) -> [ProbeResult] {
         var hits: [Space] = []
         for space in project.spaces.values {

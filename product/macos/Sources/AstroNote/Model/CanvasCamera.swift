@@ -25,8 +25,8 @@ struct CanvasCamera: Equatable {
     }
 
     mutating func pan(by deltaX: Double, deltaY: Double) {
-        offsetX -= deltaX
-        offsetY -= deltaY
+        offsetX += deltaX
+        offsetY += deltaY
     }
 
     mutating func clampOffset(viewport: CGSize, contentSize: CGSize) {
@@ -52,6 +52,33 @@ struct CanvasCamera: Equatable {
             view = current.superview
         }
         return false
+    }
+}
+
+enum CanvasWorldBounds {
+    static let padding: CGFloat = 400
+    private static let minimumWidth: CGFloat = 1200
+    private static let minimumHeight: CGFloat = 900
+
+    static func effectiveFrame(space: Space, spaces: [String: Space]) -> CGRect {
+        let origin = SpaceLayout.absolutePosition(space: space, spaces: spaces)
+        let width = space.width * abs(space.scale_x)
+        let height = space.height * abs(space.scale_y)
+        return CGRect(x: origin.x, y: origin.y, width: width, height: height)
+    }
+
+    static func contentSize(visibleSpaces: [Space], spaces: [String: Space]) -> CGSize {
+        var maxX: CGFloat = 0
+        var maxY: CGFloat = 0
+        for space in visibleSpaces {
+            let frame = effectiveFrame(space: space, spaces: spaces)
+            maxX = max(maxX, frame.maxX)
+            maxY = max(maxY, frame.maxY)
+        }
+        return CGSize(
+            width: max(maxX + padding, minimumWidth),
+            height: max(maxY + padding, minimumHeight)
+        )
     }
 }
 
